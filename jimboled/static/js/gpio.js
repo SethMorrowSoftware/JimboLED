@@ -19,9 +19,11 @@
       button.addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') this.release('key'); });
       button.addEventListener('blur', () => this.release('blur'));
       this._onHide = () => { if (document.hidden) this.release('hidden'); };
+      this._onPageHide = () => this.release('pagehide');
+      this._onWinBlur = () => this.release('winblur');
       document.addEventListener('visibilitychange', this._onHide);
-      window.addEventListener('pagehide', () => this.release('pagehide'));
-      window.addEventListener('blur', () => this.release('winblur'));
+      window.addEventListener('pagehide', this._onPageHide);
+      window.addEventListener('blur', this._onWinBlur);
     }
     async press(e) {
       if (this.token || this.pending) return;
@@ -63,7 +65,12 @@
         if (this.opts.onState) this.opts.onState(r.switch);
       } catch (err) { UI.notifyError(err); }
     }
-    destroy() { this.release('destroy'); document.removeEventListener('visibilitychange', this._onHide); }
+    destroy() {
+      this.release('destroy');
+      document.removeEventListener('visibilitychange', this._onHide);
+      window.removeEventListener('pagehide', this._onPageHide);
+      window.removeEventListener('blur', this._onWinBlur);
+    }
   }
 
   function switchIcon(sw) { return sw.icon || (sw.mode === 'momentary' ? 'hand' : sw.mode === 'pulse' ? 'zap' : 'switch'); }
