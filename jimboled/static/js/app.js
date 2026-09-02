@@ -3,7 +3,7 @@
   const { h, el, esc } = UI;
   const POLL_MS = 2000;
   const App = {
-    state: { devices: [], gpio: { switches: [] }, dashboard: null, rev: -1, cfgRev: -1, presets: {} },
+    state: { devices: [], gpio: { switches: [] }, dashboard: null, rev: -1, cfgRev: -1, presets: {}, presetsMeta: {} },
     editMode: false,
     tiles: new Map(), // tile id -> {el, kind, update}
     route: { view: 'dashboard' },
@@ -93,15 +93,15 @@
   let grid = null;
   function render() {
     renderTopbar();
-    if (App.route.view === 'settings') { App.tiles.clear(); grid = null; Settings.render(main, App.route.section); return; }
-    if (!grid) { main.innerHTML = ''; grid = h('div', { class: 'grid' }); main.append(grid); App.tiles.clear(); }
+    if (App.route.view === 'settings') { destroyTiles(); grid = null; Settings.render(main, App.route.section); return; }
+    if (!grid) { main.innerHTML = ''; grid = h('div', { class: 'grid' }); main.append(grid); destroyTiles(); }
     renderDashboard();
     if (App.route.device) { const id = App.route.device; App.route.device = null; Device.openPanel(id, App.route.tab); history.replaceState(null, '', '#/'); }
     if (App.route.q && App.route.q.edit === '1' && !App.editMode) { setEditMode(true); history.replaceState(null, '', '#/'); }
   }
   function renderDashboard() {
     if (App.route.view !== 'dashboard' || !App.state.dashboard) return;
-    if (!grid || !grid.isConnected) { main.innerHTML = ''; grid = h('div', { class: 'grid' }); main.append(grid); App.tiles.clear(); }
+    if (!grid || !grid.isConnected) { main.innerHTML = ''; grid = h('div', { class: 'grid' }); main.append(grid); destroyTiles(); }
     const dash = App.state.dashboard;
     const tiles = dash.tiles || [];
     const devById = Object.fromEntries(App.state.devices.map((d) => [d.id, d]));
@@ -130,13 +130,22 @@
     else { const b = grid.querySelector('.add-tile'); if (b) b.remove(); }
     main.classList.toggle('editing', App.editMode);
   }
+  function destroyTiles() { for (const ent of App.tiles.values()) { try { ent.destroy && ent.destroy(); } catch (e) {} } App.tiles.clear(); }
   function tileSignature(t) { return [t.type, t.ref, t.size, t.hidden, t.name, t.icon, t.color, JSON.stringify(t.opts || {})].join('|'); }
   function updateTiles() {
     const devById = Object.fromEntries(App.state.devices.map((d) => [d.id, d]));
     const swById = Object.fromEntries((App.state.gpio.switches || []).map((s) => [s.id, s]));
     for (const ent of App.tiles.values()) {
       const t = ent.tile;
-      if (t.type === 'device') { const d = devById[t.ref]; if (d) { d._presets = App.state.presets[d.id]; ent.update(d); } }
+      if (t.type === 'device') {
+        const d = devById[t.ref];
+        if (d) {
+          const wantPresets = (t.size === 'l' || t.size === 'xl') && d.online;
+          const meta = App.state.presetsMeta[d.id] || {};
+          if (wantPresets && !meta.loading && (!App.state.presets[d.id] || Date.now() - (meta.at || 0) > 60000 || meta.ps !== (d.state && d.state.ps))) loadPresets(d.id, d.state && d.state.ps);
+          d._presets = App.state.presets[d.id]; ent.update(d);
+        }
+      }
       else if (t.type === 'switch') { const s = swById[t.ref]; if (s) ent.update(s); }
       else if (t.type === 'all') ent.update();
     }
@@ -185,7 +194,7 @@
         '-',
         { label: 'Edit controller', icon: 'edit', onClick: () => Device.editDevice(d, () => refresh(true)) },
       ]); };
-      if (!App.state.presets[d.id] && d.online && (t.size === 'l' || t.size === 'xl')) loadPresets(d.id);
+
       return { el: shell.node, update: (dd) => { const dot = shell.node.querySelector('.status-dot'); dot.className = `status-dot ${dd.online ? 'ok' : 'bad'}`; dot.title = dd.online ? 'online' : (dd.last_error || 'offline'); shell.node.classList.toggle('is-on', !!(dd.online && dd.state && dd.state.on)); shell.node.classList.toggle('offline', !dd.online); shell.title.querySelector('.name').textContent = t.name || dd.name; shell.title.querySelector('.sub').textContent = dd.online ? `${dd.info && dd.info.led_count ? dd.info.led_count + ' LEDs' : ''}${dd.state && dd.state.on ? ' · ' + Math.round((dd.state.bri || 0) / 2.55) + '%' : ' · off'}` : 'offline'; body.update(dd); } };
     }
     if (t.type === 'switch') {
@@ -231,7 +240,11 @@
     }
     return null;
   }
-  async function loadPresets(id) { App.state.presets[id] = []; try { App.state.presets[id] = (await api.get(`/api/devices/${id}/presets`)).presets; updateTiles(); } catch (e) {} }
+  async function loadPresets(id, ps) {
+    App.state.presetsMeta[id] = { loading: true, at: Date.now(), ps };
+    try { App.state.presets[id] = (await api.get(`/api/devices/${id}/presets`)).presets; App.state.presetsMeta[id] = { loading: false, at: Date.now(), ps }; updateTiles(); }
+    catch (e) { App.state.presetsMeta[id] = { loading: false, at: Date.now() - 45000, ps }; }
+  }
 
   // -------------------------------------------------------- edit mode
   function setEditMode(on) { App.editMode = on; document.getElementById('topbar-actions').dataset.rendered = ''; renderTopbar(); if (on) UI.toast('Drag tiles by the handle, resize with S/M/L/XL, hide with the eye. Tap Done when finished.', 'info', 5000); renderDashboard(); }
@@ -281,11 +294,11 @@
         drag.before = ev.clientX < r.left + r.width / 2;
         drag.target = t; t.classList.add(drag.before ? 'drop-before' : 'drop-after');
       };
-      const up = async () => {
-        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+      const up = async (ev) => {
+        handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', cancel);
         node.classList.remove('dragging');
         grid.querySelectorAll('.drop-before, .drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after'));
-        if (drag && drag.target) {
+        if (drag && drag.target && ev && ev.type === 'pointerup') {
           const ids = App.state.dashboard.tiles.map((t) => t.id);
           const from = ids.indexOf(drag.id); ids.splice(from, 1);
           let to = ids.indexOf(drag.target.dataset.tile); if (!drag.before) to += 1;
@@ -294,7 +307,8 @@
         }
         drag = null;
       };
-      handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+      const cancel = () => { if (drag) drag.target = null; up({ type: 'pointercancel' }); };
+      handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', cancel);
     });
   }
 

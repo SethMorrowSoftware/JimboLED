@@ -35,6 +35,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Optional dashboard password (werkzeug hash).  ``None`` = open on LAN.
         "password_hash": None,
         "secret_key": None,
+        "session_version": 0,
+        # Extra host names the dashboard may be opened with (e.g. "jimboled.lan").
+        # IP addresses, bare names and *.local/.lan/.home... always work.
+        "allowed_hosts": [],
     },
     "devices": [],
     "gpio": {
@@ -100,6 +104,9 @@ class ConfigStore:
         self.path = self.data_dir / "config.json"
         self.backup_dir = self.data_dir / "backups"
         self._lock = threading.RLock()
+        # Listeners are notified outside the data lock but strictly in commit
+        # order (this lock is taken before the data lock is released).
+        self._notify_lock = threading.Lock()
         self._data: Dict[str, Any] = copy.deepcopy(DEFAULT_CONFIG)
         self._listeners: List[Callable[[Dict[str, Any], Dict[str, Any]], None]] = []
         self.load()
@@ -168,8 +175,10 @@ class ConfigStore:
             safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "-", reason)[:32] or "backup"
             stamp = time.strftime("%Y%m%d-%H%M%S")
             dest = self.backup_dir / f"config-{stamp}-{safe_reason}.json"
-            with open(dest, "w", encoding="utf-8") as fh:
+            fd, tmp_path = tempfile.mkstemp(prefix=".backup-", suffix=".json", dir=str(self.backup_dir))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(self._data, fh, indent=2)
+            os.replace(tmp_path, dest)
             backups = sorted(self.backup_dir.glob("config-*.json"))
             for old in backups[:-MAX_BACKUPS]:
                 try:
@@ -202,7 +211,9 @@ class ConfigStore:
         The mutator receives a deep copy; if it raises nothing is written.
         Returns the new config.  Listeners are notified *outside* the lock.
         """
-        with self._lock:
+        self._lock.acquire()
+        notify = False
+        try:
             before = copy.deepcopy(self._data)
             working = copy.deepcopy(self._data)
             mutator(working)
@@ -214,11 +225,19 @@ class ConfigStore:
             self._data = working
             self._write_locked()
             after = copy.deepcopy(working)
-        for listener in list(self._listeners):
-            try:
-                listener(before, after)
-            except Exception:  # pragma: no cover - listeners must not break saves
-                log.exception("config listener failed")
+            self._notify_lock.acquire()
+            notify = True
+        finally:
+            self._lock.release()
+        try:
+            for listener in list(self._listeners):
+                try:
+                    listener(before, after)
+                except Exception:  # pragma: no cover - listeners must not break saves
+                    log.exception("config listener failed")
+        finally:
+            if notify:
+                self._notify_lock.release()
         return after
 
     def replace(self, new_config: Dict[str, Any], *, backup_reason: str = "restore") -> Dict[str, Any]:

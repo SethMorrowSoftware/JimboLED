@@ -9,7 +9,7 @@ from flask import Blueprint, request
 from .. import get_ctx
 from ..config import new_id
 from ..wled.client import WLEDClient, WLEDError
-from ..wled.manager import DeviceError, normalise_device
+from ..wled.manager import DeviceError, normalise_device, sanitise_state
 from . import APIError, body, ok
 from .dashboard import ensure_tile, remove_tile
 
@@ -59,9 +59,11 @@ def add_device():
             client = WLEDClient(new["host"], timeout=4.0)
             info = client.get_info()
             client.close()
-            mac = info.get("mac") if isinstance(info, dict) else None
+            if not isinstance(info, dict) or "ver" not in info:
+                raise APIError(f"{new['host']} answered, but it doesn't look like a WLED controller", 502)
+            mac = info.get("mac")
             if not new.get("name") or new["name"] == new["host"]:
-                new["name"] = (info.get("name") or new["host"])[:60]
+                new["name"] = str(info.get("name") or new["host"])[:60]
         except WLEDError as exc:
             raise APIError(f"Could not reach a WLED controller at {new['host']} ({exc}). "
                            "Check the address, or tick 'add anyway' if it is switched off right now.", 502)
@@ -189,12 +191,19 @@ def save_preset(device_id):
         raise APIError("Preset slot must be a number between 1 and 250")
     if not 1 <= slot <= 250:
         raise APIError("Preset slot must be between 1 and 250")
+    state = None
+    if isinstance(data.get("state"), dict) and data["state"]:
+        state = sanitise_state(data["state"])
+        for key in ("psave", "pdel", "ps", "pd", "np", "live", "time", "tb"):
+            state.pop(key, None)
+        if not state:
+            raise APIError("state contains nothing that can be saved in a preset")
     presets = ctx.devices.save_preset(
         device_id, slot, name,
         include_brightness=bool(data.get("include_brightness", True)),
         save_segment_bounds=bool(data.get("save_segment_bounds", True)),
         quick_label=str(data.get("quick_label") or "")[:2],
-        state=data.get("state") if isinstance(data.get("state"), dict) else None,
+        state=state,
     )
     return ok({"presets": presets, "slot": slot})
 

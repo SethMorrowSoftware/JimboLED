@@ -237,7 +237,7 @@
     for (const [id, label] of [['midnight', 'Midnight'], ['graphite', 'Graphite'], ['ocean', 'Ocean'], ['oled', 'Pure black (OLED)']]) { const c = h('button', { class: 'chip' + (theme === id ? ' active' : ''), text: label }); c.onclick = () => { theme = id; themes.querySelectorAll('.chip').forEach((x) => x.classList.remove('active')); c.classList.add('active'); document.documentElement.dataset.theme = id; }; themes.append(c); }
     const accentRow = h('div', { class: 'row wrap' });
     for (const c of ['#7c5cff', '#22d3ee', '#34d399', '#fbbf24', '#f97316', '#f87171', '#ec4899', '#60a5fa', '#a3e635', '#e2e8f0']) { const b = h('button', { class: 'swatch lg' + (c === accent ? ' active' : ''), style: { background: c } }); b.onclick = () => { accent = c; accentRow.querySelectorAll('.swatch').forEach((x) => x.classList.remove('active')); b.classList.add('active'); custom.value = c; document.documentElement.style.setProperty('--accent', c); }; accentRow.append(b); }
-    const custom = h('input', { class: 'input mono', value: accent, maxlength: 7, style: { width: '110px' } }); custom.onchange = () => { if (Color.hexToRgb(custom.value)) { accent = custom.value; document.documentElement.style.setProperty('--accent', accent); } };
+    const custom = h('input', { class: 'input mono', value: accent, maxlength: 7, style: { width: '110px' } }); custom.onchange = () => { const v = custom.value.trim().toLowerCase(); if (/^#[0-9a-f]{6}$/.test(v)) { custom.classList.remove('invalid'); accent = v; document.documentElement.style.setProperty('--accent', accent); } else { custom.classList.add('invalid'); UI.toast('Use a 6-digit hex colour like #7c5cff', 'error'); } };
     accentRow.append(custom);
     const dens = h('select', { class: 'select' }); [['comfortable', 'Comfortable'], ['compact', 'Compact']].forEach(([v, t]) => dens.append(h('option', { value: v, text: t, selected: density === v }))); dens.onchange = () => { density = dens.value; document.documentElement.dataset.density = density; };
     const showOffline = h('input', { type: 'checkbox', checked: dash.show_offline !== false });
@@ -263,6 +263,11 @@
       el(`<p class="muted small">By default anyone on your home network can open the dashboard. Set a password if guests or children shouldn't be able to control things. WLED controllers themselves have no password, so this only protects the dashboard.</p>`),
       h('div', { class: 'form-grid' }, s.server.password_set ? UI.field('Current password', current) : null, UI.field('New password', pw, 'Leave empty to remove'), UI.field('Repeat new password', pw2)),
       h('div', { class: 'row end' }, s.server.password_set ? remove : null, save)));
+    // allowed host names (DNS-rebinding guard)
+    const hosts = h('input', { class: 'input mono', value: (s.server.allowed_hosts || []).join(' '), placeholder: 'e.g. jimboled.mydomain.com' });
+    const saveHosts = el(`<button class="btn" data-busy="Saving…">Save names</button>`);
+    saveHosts.onclick = () => UI.busy(saveHosts, api.put('/api/settings', { server: { allowed_hosts: hosts.value } }).then(() => UI.toast('Saved', 'success')).catch(UI.notifyError));
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Allowed names' })), el(`<p class="muted small">For safety JimboLED only answers when opened by IP address, by a plain name, or by names ending in .local, .lan, .home and similar. If you gave the Pi a public-style DNS name, list it here (space separated).</p>`), UI.field('Extra names', hosts), h('div', { class: 'row end' }, saveHosts)));
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Good to know' })), el(`<ul class="muted small" style="margin:0;padding-left:18px;line-height:1.6"><li>Keep JimboLED on your home network. Don't forward its port on your router.</li><li>Relays are always released when JimboLED restarts, when the Pi reboots, or when a held button loses contact.</li><li>The <b>All off</b> button in the header turns off every relay and every light immediately.</li></ul>`)));
   }
 

@@ -29,8 +29,9 @@ def login():
         if check_password_hash(server_cfg["password_hash"], password):
             session.permanent = True
             session["auth"] = "ok"
+            session["sv"] = int(server_cfg.get("session_version") or 0)
             nxt = request.args.get("next") or url_for("ui.index")
-            if not nxt.startswith("/") or nxt.startswith("//"):
+            if not nxt.startswith("/") or nxt.startswith("//") or "\\" in nxt or ":" in nxt.split("?")[0]:
                 nxt = url_for("ui.index")
             return redirect(nxt)
         error = "Wrong password, try again."

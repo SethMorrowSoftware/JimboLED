@@ -67,6 +67,18 @@ def register_blueprints(app: Flask) -> None:
     def _config_error(exc):
         return jsonify({"error": str(exc)}), 400
 
+    @app.errorhandler(ValueError)
+    def _value_error(exc):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": f"invalid value: {exc}"}), 400
+        raise exc
+
+    @app.errorhandler(TypeError)
+    def _type_error(exc):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "invalid value"}), 400
+        raise exc
+
     @app.errorhandler(404)
     def _not_found(exc):
         if request.path.startswith("/api/"):

@@ -78,14 +78,25 @@
     const m = UI.modal({ title: d.name, icon: d.icon || 'bulb', body, full: true, headActions: menuBtn, onClose: () => { delete panels[deviceId]; clearInterval(poll); } });
     let current = tab || 'control';
     let refreshing = false;
+    let lastSig = '';
+    const panelState = { segId: null };
+    const sig = (dev) => JSON.stringify([dev.online, dev.state_full, dev.info_full && dev.info_full.live, dev.presets && dev.presets.length]);
+    const userBusy = () => { const a = document.activeElement; return !!(a && content.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) || !!content.querySelector('.hold-btn.active'); };
     async function reload(force) {
       if (refreshing) return; refreshing = true;
-      try { d = (await (force ? api.post(`/api/devices/${d.id}/refresh`) : api.get(`/api/devices/${d.id}`))).device; m.setTitle(d.name); if (current !== 'control' || !document.activeElement || document.activeElement.tagName !== 'INPUT') render(false); }
-      catch (e) { /* offline blip */ } finally { refreshing = false; }
+      try {
+        d = (await (force ? api.post(`/api/devices/${d.id}/refresh`) : api.get(`/api/devices/${d.id}`))).device;
+        d._segId = panelState.segId; m.setTitle(d.name);
+        const next = sig(d);
+        // Only rebuild when something actually changed and the user is not mid-interaction.
+        if ((force || next !== lastSig) && !userBusy()) render(false);
+      } catch (e) { /* offline blip */ } finally { refreshing = false; }
     }
     const poll = setInterval(() => reload(false), 4000);
     function setTab(id) { current = id; render(); }
     function render(full) {
+      lastSig = sig(d);
+      d._segId = panelState.segId ?? d._segId;
       content.innerHTML = '';
       if (!d.online && current !== 'settings') { content.append(el(`<div class="alert warn">${icon('wifiOff')} <b>${esc(d.name)}</b> is offline: ${esc(d.last_error || 'not reachable')}. Controls will work again when it reconnects.</div>`)); }
       if (current === 'control') content.append(controlTab(d));
@@ -94,7 +105,8 @@
       else content.append(settingsTab(d, m));
     }
     render();
-    const api_ = { setTab, close: m.close, reloadDevice: (dd) => { d = dd; } };
+    d._panelState = panelState;
+    const api_ = { setTab, close: m.close, reloadDevice: (dd) => { d = dd; d._panelState = panelState; d._segId = panelState.segId; } };
     panels[deviceId] = api_;
     return api_;
   }
@@ -117,7 +129,7 @@
     const info = d.info_full || {};
     if (info.live && (st.lor === 0 || st.lor == null)) {
       const banner = h('div', { class: 'alert warn' });
-      banner.append(el(`${icon('radio')} <b>Receiving live ${esc(info.lm || 'realtime')} data</b>${info.lip ? ' from ' + esc(info.lip) : ''}. The effects below are paused until it stops.`));
+      banner.append(el(`<span>${icon('radio')} <b>Receiving live ${esc(info.lm || 'realtime')} data</b>${info.lip ? ' from ' + esc(info.lip) : ''}. The effects below are paused until it stops.</span>`));
       const row = h('div', { class: 'row wrap', style: { marginTop: '8px' } });
       const o1 = el(`<button class="btn sm">Override until it stops</button>`); o1.onclick = () => send(d, { lor: 1 }).then(() => refreshPanel(d.id, 'control'));
       const o2 = el(`<button class="btn sm">Override until reboot</button>`); o2.onclick = () => send(d, { lor: 2 }).then(() => refreshPanel(d.id, 'control'));
@@ -125,7 +137,7 @@
     } else if (st.lor) {
       const banner = h('div', { class: 'alert info' });
       const allow = el(`<button class="btn sm">Allow live data again</button>`); allow.onclick = () => send(d, { lor: 0 }).then(() => refreshPanel(d.id, 'control'));
-      banner.append(el(`${icon('radio')} Live data is being ignored (override ${st.lor === 2 ? 'until reboot' : 'until it stops'}). `), allow); root.append(banner);
+      banner.append(el(`<span>${icon('radio')} Live data is being ignored (override ${st.lor === 2 ? 'until reboot' : 'until it stops'}). </span>`), allow); root.append(banner);
     }
     // master row
     const power = UI.toggle(!!st.on, (on) => send(d, { on }), 'lg');
@@ -137,7 +149,7 @@
       const chips = h('div', { class: 'chips' });
       for (const s of segs) {
         const ch = h('button', { class: 'chip' + (s.id === segId ? ' active' : ''), text: s.n || `Segment ${s.id}` });
-        ch.onclick = () => { d._segId = s.id; root.replaceWith(controlTab(d)); };
+        ch.onclick = () => { d._segId = s.id; if (d._panelState) d._panelState.segId = s.id; root.replaceWith(controlTab(d)); };
         chips.append(ch);
       }
       root.append(h('div', { class: 'card' }, h('div', { class: 'row between' }, h('span', { class: 'small muted', text: 'Controlling segment' }), chips)));
@@ -173,7 +185,8 @@
     fxBtn.onclick = () => pickEffect(d, segId, seg.fx);
     const curPal = (d.palettes || []).find((p) => p.id === seg.pal);
     const palGrad = curPal ? paletteGradient(curPal.stops, seg.col) : null;
-    const palBtn = el(`<button class="btn">${icon('palette')}<span class="ellipsis">${esc(curPal?.name || 'Default')}</span>${palGrad ? `<span class="pal-preview" style="width:40px;height:10px;border-radius:5px;background:${palGrad}"></span>` : ''}${icon('chevronRight')}</button>`);
+    const palBtn = el(`<button class="btn">${icon('palette')}<span class="ellipsis">${esc(curPal?.name || 'Default')}</span>${icon('chevronRight')}</button>`);
+    if (palGrad) { const pv = h('span', { class: 'pal-preview', style: { width: '40px', height: '10px', borderRadius: '5px', background: palGrad } }); palBtn.insertBefore(pv, palBtn.lastElementChild); }
     palBtn.onclick = () => pickPalette(d, segId, seg.pal);
     const flags = fx.flags || {};
     const badges = h('div', { class: 'row', style: { gap: '4px' } });
@@ -276,11 +289,12 @@
     const cols = segCols || [[255, 160, 0], [0, 0, 0], [0, 0, 0]];
     const parts = [];
     const n = stops.length;
+    const clamp = (v) => Math.max(0, Math.min(255, Math.round(Number(v) || 0)));
     stops.forEach((st, i) => {
       let rgb, pos;
-      if (Array.isArray(st)) { pos = (st[0] / 255) * 100; rgb = st.slice(1, 4); }
-      else { pos = (i / Math.max(1, n - 1)) * 100; if (st === 'r') rgb = Color.hsvToRgb((i * 137) % 360, 1, 1); else rgb = (cols[({ c1: 0, c2: 1, c3: 2 }[st] || 0)] || [0, 0, 0]).slice(0, 3); }
-      parts.push(`rgb(${rgb[0]},${rgb[1]},${rgb[2]}) ${pos.toFixed(1)}%`);
+      if (Array.isArray(st)) { pos = clamp(st[0]) / 255 * 100; rgb = st.slice(1, 4); }
+      else { pos = (i / Math.max(1, n - 1)) * 100; if (st === 'r') rgb = Color.hsvToRgb((i * 137) % 360, 1, 1); else rgb = (cols[({ c1: 0, c2: 1, c3: 2 }[String(st)] || 0)] || [0, 0, 0]).slice(0, 3); }
+      parts.push(`rgb(${clamp(rgb[0])},${clamp(rgb[1])},${clamp(rgb[2])}) ${pos.toFixed(1)}%`);
     });
     return `linear-gradient(90deg, ${parts.join(', ')})`;
   }
@@ -440,7 +454,7 @@
     // sync
     const udpn = st.udpn || {};
     const syncCard = h('div', { class: 'card' });
-    syncCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Sync with other controllers' })), el(`<p class="muted small">WLED can mirror changes to other WLED devices on the network (UDP sync, group 1).</p>`), h('div', { class: 'row wrap', style: { gap: '18px' } }, h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.send, (v) => send(d, { udpn: { send: v, sgrp: udpn.sgrp || 1 } })), h('span', { class: 'small', text: 'Send changes to others' })), h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.recv, (v) => send(d, { udpn: { rgrp: v ? (udpn.rgrp || 1) : 0 } })), h('span', { class: 'small', text: 'Receive changes from others' }))));
+    syncCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Sync with other controllers' })), el(`<p class="muted small">WLED can mirror changes to other WLED devices on the network (UDP sync, group 1).</p>`), h('div', { class: 'row wrap', style: { gap: '18px' } }, h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.send, (v) => send(d, { udpn: { send: v, sgrp: udpn.sgrp || 1 } })), h('span', { class: 'small', text: 'Send changes to others' })), h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.recv, (v) => { if (!v && udpn.rgrp) d._lastRgrp = udpn.rgrp; send(d, { udpn: { recv: v, rgrp: v ? (udpn.rgrp || d._lastRgrp || 1) : 0 } }); }), h('span', { class: 'small', text: 'Receive changes from others' }))));
     const lor = h('select', { class: 'select' });
     [['0', 'Normal'], ['1', 'Override until live data ends'], ['2', 'Override until reboot']].forEach(([v, t]) => lor.append(h('option', { value: v, text: t, selected: String(st.lor ?? 0) === v })));
     lor.onchange = () => send(d, { lor: +lor.value });

@@ -78,7 +78,7 @@
     backdrop.append(box);
     root.append(backdrop);
     const api = {
-      el: box, body, head, foot, title,
+      el: box, body, head, foot, title, sticky: !!opts.sticky,
       setTitle: (t) => { title.textContent = t; },
       close: () => { if (!backdrop.isConnected) return; backdrop.remove(); const i = stack.indexOf(api); if (i >= 0) stack.splice(i, 1); if (opts.onClose) opts.onClose(); },
     };
@@ -89,7 +89,7 @@
     setTimeout(() => { const f = box.querySelector('input:not([type=hidden]), select, textarea, button.primary'); if (f && opts.autofocus !== false && window.matchMedia('(min-width: 640px)').matches) f.focus(); }, 30);
     return api;
   }
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stack.length) stack[stack.length - 1].close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stack.length) { const top = stack[stack.length - 1]; if (!top.sticky) top.close(); } });
 
   function confirm(opts) {
     opts = typeof opts === 'string' ? { message: opts } : opts;

@@ -100,6 +100,15 @@ def sanitise_state(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Whitelist keys and coerce obvious types for a WLED state POST."""
     if not isinstance(payload, dict):
         raise DeviceError("state must be an object")
+    try:
+        return _sanitise_state(payload)
+    except DeviceError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise DeviceError(f"invalid state value: {exc}") from exc
+
+
+def _sanitise_state(payload: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for key, value in payload.items():
         if key not in ALLOWED_STATE_KEYS:
@@ -229,6 +238,9 @@ class DeviceManager:
             "offline_poll": _clamp(w.get("offline_poll_interval_s"), 3.0, 600.0, 15.0),
             "timeout": _clamp(w.get("request_timeout_s"), 1.0, 30.0, 4.0),
         }
+        with self._lock:
+            for rec in self._devices.values():
+                rec.client.timeout = (min(2.0, self._settings["timeout"]), self._settings["timeout"])
 
     def _on_config_change(self, before: Dict[str, Any], after: Dict[str, Any]) -> None:
         if before.get("wled") != after.get("wled"):
@@ -250,8 +262,8 @@ class DeviceManager:
             for did, cfg in wanted.items():
                 if did not in self._devices:
                     try:
-                        client = WLEDClient(cfg["host"], timeout=self._settings["timeout"])
-                    except WLEDError as exc:
+                        client = WLEDClient(str(cfg.get("host") or ""), timeout=self._settings["timeout"])
+                    except Exception as exc:  # invalid host or malformed entry: skip, never crash
                         log.error("device %s has an invalid host: %s", did, exc)
                         continue
                     self._devices[did] = DeviceRecord(cfg=dict(cfg), client=client, next_poll=0.0)
@@ -354,7 +366,7 @@ class DeviceManager:
             return
         # presets.json changed (mtime) or the device rebooted -> reload presets
         pkey = _presets_key(info)
-        if pkey != rec.presets_key or time.monotonic() - rec.presets_loaded_at > PRESET_REFRESH_S:
+        if _presets_changed(rec.presets_key, pkey) or time.monotonic() - rec.presets_loaded_at > PRESET_REFRESH_S:
             rec.presets = rec.client.get_presets()
             rec.presets_loaded_at = time.monotonic()
             rec.presets_key = pkey
@@ -562,10 +574,24 @@ class DeviceManager:
 
 
 def _presets_key(info: Dict[str, Any]) -> str:
-    """Changes when presets.json is rewritten or the device reboots (pmt resets to 0)."""
+    """``pmt|boot_time`` – changes when presets.json is rewritten or the device reboots."""
     fs = info.get("fs") or {}
-    boot = int(time.time() - float(info.get("uptime") or 0)) // 5  # 5 s tolerance
+    try:
+        boot = int(time.time() - float(info.get("uptime") or 0))
+    except (TypeError, ValueError):
+        boot = 0
     return f"{fs.get('pmt')}|{boot}"
+
+
+def _presets_changed(old: str, new: str, tolerance_s: int = 5) -> bool:
+    if not old:
+        return True
+    try:
+        old_pmt, old_boot = old.split("|")
+        new_pmt, new_boot = new.split("|")
+        return old_pmt != new_pmt or abs(int(new_boot) - int(old_boot)) > tolerance_s
+    except ValueError:
+        return old != new
 
 
 def _name_at(names: List[str], idx: Any) -> Optional[str]:

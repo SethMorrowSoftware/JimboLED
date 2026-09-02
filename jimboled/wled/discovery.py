@@ -15,6 +15,7 @@ version, LED count and whether the device is already configured.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import logging
 import random
 import shutil
@@ -461,11 +462,11 @@ class DiscoveryService:
             with self._lock:
                 self._status["errors"].append(f"'{net}' is not a valid network (try 192.168.1.0/24)")
             return
-        hosts = [str(h) for h in network.hosts() if str(h) not in skip]
-        if len(hosts) > 1024:
-            hosts = hosts[:1024]
+        if network.num_addresses > 1024:
             with self._lock:
-                self._status["errors"].append(f"{net} is large; only the first 1024 addresses were scanned")
+                self._status["errors"].append(f"{net} is too large to scan (max /22 = 1024 addresses); scanning its first /22")
+            network = ipaddress.ip_network(f"{network.network_address}/22", strict=False)
+        hosts = [str(h) for h in itertools.islice(network.hosts(), 1024) if str(h) not in skip]
         with ThreadPoolExecutor(max_workers=32) as pool:
             futs = {pool.submit(self.probe, h, 0.7): h for h in hosts}
             done = 0

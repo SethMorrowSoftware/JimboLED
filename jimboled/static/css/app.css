@@ -67,7 +67,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 
 /* ---------- layout ---------- */
 .app { display: flex; flex-direction: column; min-height: 100vh; }
-.topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 14px; padding: 10px max(14px, env(safe-area-inset-left)) 10px max(14px, env(safe-area-inset-right)); background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border); }
+.topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 14px; padding: 10px max(14px, env(safe-area-inset-right)) 10px max(14px, env(safe-area-inset-left)); background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border-bottom: 1px solid var(--border); }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-mark { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 40%, #22d3ee)); box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset, 0 6px 16px color-mix(in srgb, var(--accent) 40%, transparent); flex: none; }
 .brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.1; }
@@ -76,7 +76,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 .brand-sub:empty { display: none; }
 .topbar-status { flex: 1; display: flex; align-items: center; gap: 8px; min-width: 0; justify-content: center; }
 .topbar-actions { display: flex; align-items: center; gap: 6px; }
-.main { flex: 1; width: 100%; max-width: 1500px; margin: 0 auto; padding: var(--gap) max(var(--gap), env(safe-area-inset-left)) 60px; }
+.main { flex: 1; width: 100%; max-width: 1500px; margin: 0 auto; padding: var(--gap) max(var(--gap), env(safe-area-inset-right)) 60px max(var(--gap), env(safe-area-inset-left)); }
 .footer { text-align: center; padding: 20px; color: var(--faint); font-size: 12px; }
 
 /* ---------- status pill ---------- */
@@ -222,7 +222,7 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 .tile.drop-before { box-shadow: -4px 0 0 var(--accent); }
 .tile.drop-after { box-shadow: 4px 0 0 var(--accent); }
 .drag-handle { color: var(--faint); cursor: grab; touch-action: none; }
-.editing .tile-body .btn, .editing .tile-body .slider, .editing .tile-body .toggle, .editing .hold-btn { pointer-events: none; opacity: .55; }
+.editing .tile-body .btn, .editing .tile-body .slider, .editing .tile-body .toggle, .editing .hold-btn, .editing .tile-body .chip, .editing .tile-body .swatch, .editing .tile-head .btn { pointer-events: none; opacity: .55; }
 
 /* hold-to-run button */
 .hold-btn { position: relative; width: 100%; padding: 18px 16px; border-radius: 14px; border: 1px solid var(--border-strong); background: var(--surface-2); color: var(--text); font-weight: 700; font-size: 15px; display: flex; align-items: center; justify-content: center; gap: 10px; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; overflow: hidden; transition: background .15s, border-color .15s; }

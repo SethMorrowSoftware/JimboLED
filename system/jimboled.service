@@ -16,6 +16,7 @@ StateDirectoryMode=0750
 # lgpio creates a notification pipe in its working directory at import time.
 RuntimeDirectory=jimboled
 WorkingDirectory=__DATA__
+Environment=PYTHONPATH=__APP__
 Environment=JIMBOLED_DATA_DIR=__DATA__
 Environment=JIMBOLED_HELPER=__APP__/bin/jimboled-helper
 Environment=JIMBOLED_INSTALL_ENV=/etc/jimboled/install.env

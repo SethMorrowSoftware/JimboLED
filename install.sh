@@ -62,8 +62,8 @@ mkdir -p /run/lock
 exec 9>"/run/lock/${APP_NAME}-install.lock"
 flock -n 9 || die "Another JimboLED install/update is already running."
 
-OWNER="${SUDO_USER:-}"
-if [ -z "$OWNER" ] || [ "$OWNER" = root ]; then OWNER="$(stat -c '%U' "$SRC")"; fi
+# The clone's owner runs git (git refuses repos owned by someone else).
+OWNER="$(stat -c '%U' "$SRC")"
 as_owner() { if [ "$OWNER" = root ]; then "$@"; else sudo -u "$OWNER" -H "$@"; fi; }
 
 IS_PI=0
@@ -78,8 +78,10 @@ if [ "$IS_PI" = 1 ]; then say "${DIM}board:  $PI_MODEL${RESET}"; else warn "Not 
 step "System packages"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  PKGS=(python3 python3-venv python3-pip git rsync avahi-daemon avahi-utils)
+  PKGS=(python3 python3-venv python3-pip git rsync curl avahi-daemon avahi-utils iw)
   [ "$IS_PI" = 1 ] && PKGS+=(python3-gpiozero python3-lgpio)   # compiled for this Pi; never from pip
+  # pinctrl (raspi-utils) lets the helper drive relay pins safe after the service stops; optional.
+  if [ "$IS_PI" = 1 ] && apt-cache show raspi-utils >/dev/null 2>&1; then PKGS+=(raspi-utils); fi
   MISSING=()
   for p in "${PKGS[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed' || MISSING+=("$p"); done
   if [ "${#MISSING[@]}" -gt 0 ]; then
@@ -142,7 +144,9 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_NO_INPUT=
   || die "pip could not install the Python packages. Check the internet connection and run again."
 "$VENV_DIR/bin/python" -c "import flask, waitress, requests, gpiozero" || die "Python packages did not install correctly."
 if [ "$IS_PI" = 1 ]; then
-  if "$VENV_DIR/bin/python" -c "import lgpio" 2>/dev/null; then ok "gpiozero + lgpio ready"; else warn "lgpio is not importable – GPIO will be simulated. Try: sudo apt install python3-lgpio"; fi
+  # lgpio creates a notification pipe in its working directory on import: keep that out of the clone.
+  if (cd / && LG_WD=/tmp "$VENV_DIR/bin/python" -c "import lgpio" 2>/dev/null); then ok "gpiozero + lgpio ready"; else warn "lgpio is not importable – GPIO will be simulated. Try: sudo apt install python3-lgpio"; fi
+  rm -f "$SRC"/.lgd-nfy* 2>/dev/null || true
 fi
 ok "packages ready"
 
@@ -227,12 +231,16 @@ rm -f "$UNIT.tmp"
 systemctl daemon-reload
 systemctl enable "$APP_NAME.service" >/dev/null 2>&1
 systemctl restart "$APP_NAME.service"
-for _ in 1 2 3 4 5 6 7 8; do systemctl is-active --quiet "$APP_NAME.service" && break; sleep 1; done
-if systemctl is-active --quiet "$APP_NAME.service"; then
-  ok "jimboled.service is running"
+HEALTHY=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  sleep 1
+  if curl -fsS -m 2 "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then HEALTHY=1; break; fi
+done
+if [ "$HEALTHY" = 1 ] && systemctl is-active --quiet "$APP_NAME.service"; then
+  ok "jimboled.service is running and answering on port $PORT"
 else
-  journalctl -u "$APP_NAME" -n 30 --no-pager || true
-  die "the service failed to start – the log above usually says why"
+  journalctl -u "$APP_NAME" -n 40 --no-pager || true
+  die "the service did not come up – the log above usually says why"
 fi
 # Boot-time relay safety: record configured pins in config.txt (no-op when none are configured yet).
 if [ "$IS_PI" = 1 ]; then
@@ -275,6 +283,56 @@ AVAHI
   rm -f "/etc/avahi/services/${APP_NAME}.service.tmp"
 fi
 [ -n "$NEW_HOSTNAME" ] && systemctl restart avahi-daemon >/dev/null 2>&1 || true
+
+# ------------------------------------------------------- Wi-Fi power save
+# Wi-Fi power save makes the Pi sleep through the multicast/broadcast frames
+# that mDNS (jimboled.local, WLED _wled._tcp) and WLED node discovery (UDP
+# 65506) rely on. Disable it persistently via NetworkManager and right now.
+WIFI_IFACES=()
+for w in /sys/class/net/*/wireless; do [ -d "$w" ] && WIFI_IFACES+=("$(basename "$(dirname "$w")")"); done
+if [ "${#WIFI_IFACES[@]}" -gt 0 ]; then
+  step "Wi-Fi power save ${DIM}(keeps .local names and WLED discovery reliable)${RESET}"
+  if [ -d /etc/NetworkManager ]; then
+    NM_CONF=/etc/NetworkManager/conf.d/99-jimboled-wifi-powersave.conf
+    cat > "$NM_CONF.tmp" <<'NM'
+# Installed by JimboLED. Wi-Fi power save makes the Pi sleep through the
+# multicast/broadcast frames that mDNS and WLED discovery rely on.
+# Value MUST be an integer: 2 = disable, 3 = enable, 1 = driver default.
+[connection]
+wifi.powersave = 2
+NM
+    if ! cmp -s "$NM_CONF.tmp" "$NM_CONF" 2>/dev/null; then
+      install -d -m 0755 /etc/NetworkManager/conf.d
+      install -m 0644 -o root -g root "$NM_CONF.tmp" "$NM_CONF"
+      nmcli general reload conf >/dev/null 2>&1 || systemctl reload NetworkManager >/dev/null 2>&1 || true
+    fi
+    rm -f "$NM_CONF.tmp"
+    HOOK=/etc/NetworkManager/dispatcher.d/99-jimboled-wifi-powersave
+    cat > "$HOOK.tmp" <<'SH'
+#!/bin/sh
+# Installed by JimboLED: re-assert "power save off" whenever a Wi-Fi interface
+# comes up (covers driver re-probes after a firmware crash).
+[ "$2" = up ] && [ -d "/sys/class/net/$1/wireless" ] || exit 0
+IW=$(command -v iw || echo /usr/sbin/iw)
+[ -x "$IW" ] && "$IW" dev "$1" set power_save off
+exit 0
+SH
+    if ! cmp -s "$HOOK.tmp" "$HOOK" 2>/dev/null; then
+      install -d -m 0755 /etc/NetworkManager/dispatcher.d
+      install -m 0755 -o root -g root "$HOOK.tmp" "$HOOK"
+    fi
+    rm -f "$HOOK.tmp"
+    ok "NetworkManager default set (wifi.powersave = 2)"
+  else
+    warn "NetworkManager not found – power save switched off now but not persisted"
+  fi
+  for i in "${WIFI_IFACES[@]}"; do
+    if command -v iw >/dev/null 2>&1; then
+      iw dev "$i" set power_save off 2>/dev/null || true
+      if iw dev "$i" get power_save 2>/dev/null | grep -q 'Power save: off'; then ok "$i: power save off"; fi
+    fi
+  done
+fi
 
 # ------------------------------------------------------------------ done
 HOST_SHORT="${NEW_HOSTNAME:-$(hostname -s 2>/dev/null || hostname)}"

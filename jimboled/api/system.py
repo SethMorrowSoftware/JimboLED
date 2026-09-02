@@ -21,7 +21,41 @@ from .. import __version__, get_ctx
 from ..gpio.backend import is_raspberry_pi, pi_model
 from ..gpio.manager import validate_switches
 from ..wled.discovery import local_ipv4_addresses
+from ..wled.manager import normalise_device
 from . import APIError, body, ok
+
+import collections
+import threading
+
+# Simple login throttle: after 5 failures from one address, wait 30 s.
+_login_failures: Dict[str, collections.deque] = collections.defaultdict(lambda: collections.deque(maxlen=5))
+_login_lock = threading.Lock()
+
+
+def _login_blocked(addr: str) -> bool:
+    with _login_lock:
+        q = _login_failures[addr]
+        return len(q) >= 5 and time.monotonic() - q[0] < 30
+
+
+def _login_failed(addr: str) -> None:
+    with _login_lock:
+        _login_failures[addr].append(time.monotonic())
+
+
+def _login_ok(addr: str) -> None:
+    with _login_lock:
+        _login_failures.pop(addr, None)
+
+
+def _num(value, lo, hi, name, cast=float):
+    try:
+        v = cast(value)
+    except (TypeError, ValueError):
+        raise APIError(f"{name} must be a number")
+    if not lo <= v <= hi:
+        raise APIError(f"{name} must be between {lo} and {hi}")
+    return v
 
 log = logging.getLogger(__name__)
 bp = Blueprint("system", __name__)
@@ -75,10 +109,7 @@ def update_settings():
             w = data["wled"]
             for key, lo, hi in (("poll_interval_s", 1, 120), ("offline_poll_interval_s", 3, 600), ("request_timeout_s", 1, 30)):
                 if key in w:
-                    try:
-                        cfg["wled"][key] = max(lo, min(hi, float(w[key])))
-                    except (TypeError, ValueError):
-                        raise APIError(f"{key} must be a number")
+                    cfg["wled"][key] = _num(w[key], lo, hi, key)
         if isinstance(data.get("gpio"), dict):
             g = data["gpio"]
             if "backend" in g:
@@ -87,16 +118,20 @@ def update_settings():
                     raise APIError("unknown GPIO backend")
                 cfg["gpio"]["backend"] = backend
             if "interlock_dead_time_ms" in g:
-                cfg["gpio"]["interlock_dead_time_ms"] = int(max(0, min(5000, int(g["interlock_dead_time_ms"]))))
+                cfg["gpio"]["interlock_dead_time_ms"] = int(_num(g["interlock_dead_time_ms"], 0, 5000, "interlock_dead_time_ms"))
             if "hold_timeout_s" in g:
-                cfg["gpio"]["hold_timeout_s"] = max(0.5, min(10.0, float(g["hold_timeout_s"])))
+                cfg["gpio"]["hold_timeout_s"] = _num(g["hold_timeout_s"], 0.5, 10.0, "hold_timeout_s")
         if isinstance(data.get("server"), dict):
             s = data["server"]
             if "port" in s:
-                port = int(s["port"])
-                if not 1 <= port <= 65535:
-                    raise APIError("port must be between 1 and 65535")
-                cfg["server"]["port"] = port
+                cfg["server"]["port"] = int(_num(s["port"], 1, 65535, "port", int))
+            if "allowed_hosts" in s:
+                hosts = s["allowed_hosts"]
+                if isinstance(hosts, str):
+                    hosts = [h.strip() for h in hosts.replace(",", " ").split()]
+                if not isinstance(hosts, list):
+                    raise APIError("allowed_hosts must be a list of names")
+                cfg["server"]["allowed_hosts"] = [str(h).strip().lower()[:253] for h in hosts if str(h).strip()][:50]
         if "setup_complete" in data:
             cfg["setup_complete"] = bool(data["setup_complete"])
 
@@ -116,10 +151,16 @@ def set_password():
     if new and len(new) < 4:
         raise APIError("Password must be at least 4 characters")
     new_hash = generate_password_hash(new) if new else None
-    ctx.store.update(lambda cfg: cfg["server"].__setitem__("password_hash", new_hash), backup_reason="password")
+
+    def mutate(cfg):
+        cfg["server"]["password_hash"] = new_hash
+        cfg["server"]["session_version"] = int(cfg["server"].get("session_version") or 0) + 1
+
+    ctx.store.update(mutate, backup_reason="password")
     if new_hash:
         session.permanent = True
         session["auth"] = "ok"
+        session["sv"] = int((ctx.store.section("server") or {}).get("session_version") or 0)
     else:
         session.clear()
     return ok({"password_set": bool(new_hash)})
@@ -129,13 +170,20 @@ def set_password():
 def api_login():
     ctx = get_ctx()
     data = body()
-    current_hash = (ctx.store.section("server") or {}).get("password_hash")
+    server_cfg = ctx.store.section("server") or {}
+    current_hash = server_cfg.get("password_hash")
     if not current_hash:
         return ok({"authed": True})
+    addr = request.remote_addr or "?"
+    if _login_blocked(addr):
+        raise APIError("Too many attempts. Wait 30 seconds and try again.", 429)
     if check_password_hash(current_hash, str(data.get("password") or "")):
+        _login_ok(addr)
         session.permanent = True
         session["auth"] = "ok"
+        session["sv"] = int(server_cfg.get("session_version") or 0)
         return ok({"authed": True})
+    _login_failed(addr)
     raise APIError("Wrong password", 401)
 
 
@@ -164,6 +212,50 @@ def download_backup():
                      download_name=f"jimboled-backup-{stamp}.json")
 
 
+def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, Any]:
+    """Check a backup document thoroughly; a bad restore must never crash-loop the service."""
+    if not isinstance(data, dict) or not isinstance(data.get("devices"), list) or not isinstance(data.get("dashboard"), dict):
+        raise APIError("That file is not a valid JimboLED backup")
+    devices = []
+    for raw in data["devices"]:
+        try:
+            dev = normalise_device(raw, existing_id=str(raw.get("id") or "")) if isinstance(raw, dict) else None
+        except Exception:
+            dev = None
+        if dev and dev["id"]:
+            devices.append(dev)
+    data["devices"] = devices
+    gpio = data.get("gpio") if isinstance(data.get("gpio"), dict) else {}
+    try:
+        gpio["switches"] = [s.to_dict() for s in validate_switches(gpio.get("switches", []))]
+    except Exception as exc:
+        raise APIError(f"Backup contains invalid GPIO settings: {exc}")
+    if str(gpio.get("backend", "auto")) not in ("auto", "mock", "lgpio", "rpigpio", "pigpio", "native"):
+        gpio["backend"] = "auto"
+    gpio["interlock_dead_time_ms"] = int(_num(gpio.get("interlock_dead_time_ms", 250), 0, 5000, "interlock_dead_time_ms"))
+    gpio["hold_timeout_s"] = _num(gpio.get("hold_timeout_s", 1.5), 0.5, 10.0, "hold_timeout_s")
+    data["gpio"] = gpio
+    wled = data.get("wled") if isinstance(data.get("wled"), dict) else {}
+    for key, lo, hi, default in (("poll_interval_s", 1, 120, 3.0), ("offline_poll_interval_s", 3, 600, 15.0), ("request_timeout_s", 1, 30, 4.0)):
+        wled[key] = _num(wled.get(key, default), lo, hi, key)
+    data["wled"] = wled
+    server = data.get("server") if isinstance(data.get("server"), dict) else {}
+    server["port"] = int(_num(server.get("port", current_server.get("port", 80)), 1, 65535, "port", int))
+    server["host"] = str(server.get("host") or "0.0.0.0")[:64]
+    server["secret_key"] = current_server.get("secret_key")
+    server["password_hash"] = server.get("password_hash") if isinstance(server.get("password_hash"), str) else current_server.get("password_hash")
+    server["session_version"] = int(current_server.get("session_version") or 0)
+    hosts = server.get("allowed_hosts")
+    server["allowed_hosts"] = [str(h).lower()[:253] for h in hosts if isinstance(h, str)][:50] if isinstance(hosts, list) else []
+    data["server"] = server
+    dash = data["dashboard"]
+    if not isinstance(dash.get("tiles"), list):
+        dash["tiles"] = []
+    if not isinstance(dash.get("scenes"), list):
+        dash["scenes"] = []
+    return data
+
+
 @bp.post("/restore")
 def restore_backup():
     ctx = get_ctx()
@@ -178,17 +270,9 @@ def restore_backup():
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise APIError("That file is not a valid JimboLED backup")
-    if not isinstance(data, dict) or "devices" not in data or "dashboard" not in data:
-        raise APIError("That file is not a valid JimboLED backup")
-    try:
-        validate_switches(data.get("gpio", {}).get("switches", []))
-    except Exception as exc:
-        raise APIError(f"Backup contains invalid GPIO settings: {exc}")
-    data.setdefault("server", {})
-    current = ctx.store.section("server") or {}
-    data["server"]["secret_key"] = current.get("secret_key")
-    data["server"].setdefault("password_hash", current.get("password_hash"))
+    data = _validated_restore(data, ctx.store.section("server") or {})
     ctx.store.replace(data, backup_reason="pre-restore")
+    apply_boot_pins(ctx)
     return ok({"message": "Backup restored"})
 
 
@@ -205,11 +289,14 @@ def restore_named_backup(name):
     path = ctx.store.backup_dir / name
     if not path.exists():
         raise APIError("unknown backup", 404)
-    with open(path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    current = ctx.store.section("server") or {}
-    data.setdefault("server", {})["secret_key"] = current.get("secret_key")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        raise APIError("That snapshot is unreadable", 400)
+    data = _validated_restore(data, ctx.store.section("server") or {})
     ctx.store.replace(data, backup_reason="pre-restore")
+    apply_boot_pins(ctx)
     return ok({"message": f"Restored {name}"})
 
 
@@ -247,6 +334,13 @@ def apply_boot_pins(ctx) -> None:
     """Record boot-time pin states in config.txt via the helper (Pi only)."""
     if not is_raspberry_pi() or not helper_available():
         return
+    try:
+        _apply_boot_pins(ctx)
+    except APIError as exc:
+        log.warning("boot pin update skipped: %s", exc)
+
+
+def _apply_boot_pins(ctx) -> None:
     switches = (ctx.store.section("gpio") or {}).get("switches", [])
     spec = ",".join(f"{s['pin']}={'dl' if s.get('active_high', True) else 'dh'}" for s in switches if s.get("pin") is not None)
     proc = run_helper("bootpins", spec or "none", timeout=20)

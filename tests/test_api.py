@@ -145,3 +145,65 @@ def test_discovery_endpoints(client):
             break
         time.sleep(0.2)
     assert s["running"] is False and isinstance(s["found"], list) and "passive" in s
+
+
+def test_restore_rejects_broken_devices_and_keeps_service_alive(client):
+    bad = json.dumps({"devices": [{"id": "x"}, {"id": "ok", "host": "10.1.1.1", "name": "OK"}], "dashboard": {}, "gpio": {"switches": [], "backend": "weird"}, "server": {"port": "nope"}})
+    r = client.post("/api/restore", data=bad, content_type="application/json")
+    assert r.status_code == 400  # bad port is reported, not swallowed
+    good = json.dumps({"devices": [{"id": "x"}, {"id": "ok", "host": "10.1.1.1", "name": "OK"}], "dashboard": {}, "gpio": {"switches": [], "backend": "weird"}})
+    r = client.post("/api/restore", data=good, content_type="application/json")
+    assert r.status_code == 200
+    devs = client.get("/api/devices").json["devices"]
+    assert [d["id"] for d in devs] == ["ok"]
+    assert client.get("/api/settings").json["gpio"]["backend"] == "auto"
+    assert client.get("/api/state").status_code == 200
+
+
+def test_numeric_settings_validation(client):
+    assert client.put("/api/settings", json={"wled": {"poll_interval_s": "abc"}}).status_code == 400
+    assert client.put("/api/settings", json={"server": {"port": 99999}}).status_code == 400
+    assert client.put("/api/settings", json={"server": {"allowed_hosts": "Jimbo.example.com other"}}).json["server"]["allowed_hosts"] == ["jimbo.example.com", "other"]
+
+
+def test_password_change_invalidates_old_sessions_and_throttles(client):
+    assert client.post("/api/settings/password", json={"password": "first1"}).status_code == 200
+    other = client.application.test_client()
+    other.environ_base["HTTP_X_REQUESTED_WITH"] = "JimboLED"
+    assert other.post("/api/login", json={"password": "first1"}).status_code == 200
+    assert other.get("/api/state").status_code == 200
+    # changing the password logs the other client out
+    assert client.post("/api/settings/password", json={"current": "first1", "password": "second2"}).status_code == 200
+    assert other.get("/api/state").status_code == 401
+    # brute force throttle
+    for _ in range(5):
+        assert other.post("/api/login", json={"password": "wrong"}).status_code == 401
+    assert other.post("/api/login", json={"password": "second2"}).status_code == 429
+
+
+def test_host_header_guard(app):
+    app.config["CHECK_HOST"] = True
+    c = app.test_client()
+    c.environ_base["HTTP_X_REQUESTED_WITH"] = "JimboLED"
+    for host in ("192.168.1.5", "192.168.1.5:8080", "jimboled", "jimboled.local", "pi.lan", "[fe80::1]", "localhost"):
+        assert c.get("/healthz", headers={"Host": host}).status_code == 200, host
+    assert c.get("/api/state", headers={"Host": "evil.example.com"}).status_code == 421
+    assert c.get("/", headers={"Host": "evil.example.com"}).status_code == 421
+    assert c.put("/api/settings", json={"server": {"allowed_hosts": ["evil.example.com"]}}, headers={"Host": "192.168.1.5"}).status_code == 200
+    assert c.get("/api/state", headers={"Host": "evil.example.com"}).status_code == 200
+
+
+def test_save_preset_state_is_sanitised(client, fake_wled):
+    srv = fake_wled("Bed", 60, "aabbccdd0303")
+    did = client.post("/api/devices", json={"host": srv.host}).json["device"]["id"]
+    r = client.post(f"/api/devices/{did}/presets", json={"name": "Loop", "state": {"on": True, "playlist": {"ps": [1, 2], "dur": 100}, "rb": True, "pdel": 1}})
+    assert r.status_code == 200
+    sent = [p for p in srv.fake["log"] if "psave" in p][-1]
+    assert "rb" not in sent and "pdel" not in sent and sent["o"] is True and "playlist" in sent
+    assert client.post(f"/api/devices/{did}/presets", json={"name": "Nothing", "state": {"rb": True}}).status_code == 400
+
+
+def test_open_redirect_blocked(client):
+    client.post("/api/settings/password", json={"password": "abcd1"})
+    r = client.post("/login?next=/\\evil.com", data={"password": "abcd1"})
+    assert r.status_code == 302 and r.headers["Location"].endswith("/")

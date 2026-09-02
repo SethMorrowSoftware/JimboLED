@@ -16,7 +16,6 @@ set -euo pipefail
 ENV_FILE="${JIMBOLED_INSTALL_ENV:-/etc/jimboled/install.env}"
 # shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
-VENV_DIR="${JIMBOLED_VENV:-/opt/jimboled/venv}"
 DATA_DIR="${JIMBOLED_DATA:-/var/lib/jimboled}"
 SRC_DIR="${JIMBOLED_SRC:-}"
 OWNER="${JIMBOLED_OWNER:-}"
@@ -27,10 +26,16 @@ done
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'; }
 
+# Run the system Python in isolated mode (-I: no cwd/PYTHONPATH/user-site on
+# sys.path) from / so the unprivileged service user can never plant a module
+# that this root process would import.
+PY3="$(command -v python3 || echo /usr/bin/python3)"
+run_py() { ( cd / && "$PY3" -I - "$@" ); }
+
 # Print "pin=dl,pin=dh,..." for every configured switch (dl = active-high OFF, dh = active-low OFF).
 pin_spec() {
   [ -f "$DATA_DIR/config.json" ] || { echo none; return; }
-  "$VENV_DIR/bin/python" - "$DATA_DIR/config.json" <<'PY' 2>/dev/null || echo none
+  run_py "$DATA_DIR/config.json" <<'PY' 2>/dev/null || echo none
 import json, sys
 try:
     cfg = json.load(open(sys.argv[1]))
@@ -73,11 +78,12 @@ case "$cmd" in
     # power-on until the service starts. The managed block is idempotent.
     [ -n "$CONFIG_TXT" ] || { echo "no config.txt found (not a Raspberry Pi?)"; exit 0; }
     spec="${2:-none}"
-    tmp="$(mktemp)"
+    tmp="$(mktemp "${CONFIG_TXT}.jimboled.XXXXXX")"
     awk '/^# BEGIN JimboLED/{skip=1} !skip{print} /^# END JimboLED/{skip=0}' "$CONFIG_TXT" > "$tmp"
     if [ "$spec" != "none" ] && [ -n "$spec" ]; then
       {
         echo "# BEGIN JimboLED (managed – do not edit; relay pins default to OFF at boot)"
+        echo "[all]"
         IFS=',' read -ra pairs <<< "$spec"
         for p in "${pairs[@]}"; do
           pin="${p%%=*}"; lvl="${p##*=}"
@@ -90,13 +96,13 @@ case "$cmd" in
       } >> "$tmp"
     fi
     if ! cmp -s "$tmp" "$CONFIG_TXT"; then
-      cp "$CONFIG_TXT" "${CONFIG_TXT}.jimboled.bak"
-      cat "$tmp" > "$CONFIG_TXT"
+      cp -p "$CONFIG_TXT" "${CONFIG_TXT}.jimboled.bak"
+      mv -f "$tmp" "$CONFIG_TXT"
       echo "updated $CONFIG_TXT (takes effect after the next reboot)"
     else
+      rm -f "$tmp"
       echo "no change"
     fi
-    rm -f "$tmp"
     ;;
   check-update)
     if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR/.git" ]; then
@@ -121,16 +127,25 @@ case "$cmd" in
   update)
     if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR/.git" ]; then echo "Source checkout not found" >&2; exit 1; fi
     [ -n "$OWNER" ] || OWNER="$(stat -c '%U' "$SRC_DIR")"
+    if systemctl is-active --quiet jimboled-update.service; then
+      echo "An update is already running (journalctl -u jimboled-update)" >&2; exit 1
+    fi
     # Detached: survives the service restart that install.sh performs.
-    systemctl stop jimboled-update.service >/dev/null 2>&1 || true
     systemctl reset-failed jimboled-update.service >/dev/null 2>&1 || true
     systemd-run --quiet --collect --unit=jimboled-update -p WorkingDirectory="$SRC_DIR" \
       /bin/bash -c "sudo -u '$OWNER' -H git -C '$SRC_DIR' pull --ff-only && bash '$SRC_DIR/install.sh' --quiet" \
       >/dev/null 2>&1
     echo '{"started":true,"message":"Update started. JimboLED will restart itself in a few minutes.","log":"journalctl -u jimboled-update"}'
     ;;
+  update-status)
+    if systemctl is-active --quiet jimboled-update.service; then echo '{"running":true}'
+    else
+      rc="$(systemctl show -p Result --value jimboled-update.service 2>/dev/null || echo unknown)"
+      echo "{\"running\":false,\"result\":\"${rc:-unknown}\"}"
+    fi
+    ;;
   *)
-    echo "usage: jimboled-helper {restart|reboot|pins-safe|bootpins <spec>|check-update|update}" >&2
+    echo "usage: jimboled-helper {restart|reboot|pins-safe|bootpins <spec>|check-update|update|update-status}" >&2
     exit 2
     ;;
 esac

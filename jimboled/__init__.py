@@ -4,14 +4,46 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import socket
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import ipaddress
+import re
+
 from flask import Flask, g, jsonify, redirect, request, session, url_for
 
 from .config import ConfigStore
+
+# Host names that can only be reached from inside a home network. Anything
+# else (a public domain an attacker could point at this Pi – "DNS rebinding")
+# is refused unless listed in server.allowed_hosts.
+PRIVATE_SUFFIXES = ("local", "lan", "home", "internal", "intranet", "localdomain", "arpa", "box", "private", "homenet", "localhost")
+_HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$")
+
+
+def host_is_allowed(host_header: str, allowed: list) -> bool:
+    host = (host_header or "").strip().lower()
+    if host.startswith("["):  # IPv6 literal
+        host = host.split("]", 1)[0].lstrip("[")
+    else:
+        host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    host = host.rstrip(".")
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if host in (allowed or []):
+        return True
+    labels = host.split(".")
+    if len(labels) == 1:
+        return _HOSTNAME_RE.match(host) is not None
+    return labels[-1] in PRIVATE_SUFFIXES
 
 __version__ = "1.0.0"
 
@@ -124,11 +156,19 @@ def _install_security(app: Flask, ctx: AppContext) -> None:
     @app.before_request
     def _guard():
         path = request.path
+        server_cfg = ctx.store.section("server") or {}
+        if not app.config.get("TESTING") or app.config.get("CHECK_HOST"):
+            if not host_is_allowed(request.host, server_cfg.get("allowed_hosts") or []):
+                msg = (f"JimboLED refused the address '{request.host}'. Open it via its IP address or "
+                       f"{socket.gethostname()}.local, or add this name under Settings → Security → Allowed names.")
+                if path.startswith("/api/"):
+                    return jsonify({"error": msg}), 421
+                return msg, 421, {"Content-Type": "text/plain; charset=utf-8"}
         if path.startswith("/static/") or path in ("/healthz", "/favicon.ico", "/manifest.webmanifest"):
             return None
-        server_cfg = ctx.store.section("server") or {}
         needs_login = bool(server_cfg.get("password_hash"))
-        authed = session.get("auth") == "ok" or not needs_login
+        session_ok = session.get("auth") == "ok" and int(session.get("sv") or 0) == int(server_cfg.get("session_version") or 0)
+        authed = session_ok or not needs_login
         g.authed = authed
         if path.startswith("/api/"):
             if path in ("/api/login", "/api/auth"):

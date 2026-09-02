@@ -88,6 +88,22 @@ class GPIOError(Exception):
     """Raised for invalid switch configuration or disallowed actions."""
 
 
+def as_bool(value: Any, default: bool = False) -> bool:
+    """Lenient boolean: accepts JSON bools, 0/1 and 'true'/'false'/'on'/'off' strings."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "t", "y"):
+        return True
+    if text in ("0", "false", "no", "off", "f", "n", ""):
+        return False
+    raise GPIOError(f"'{value}' is not a valid yes/no value")
+
+
 @dataclass
 class SwitchConfig:
     id: str
@@ -141,14 +157,14 @@ class SwitchConfig:
             name=name,
             pin=pin,
             mode=mode,
-            active_high=bool(raw.get("active_high", True)),
+            active_high=as_bool(raw.get("active_high"), True),
             pulse_ms=pulse_ms,
             max_on_seconds=max_on,
             interlock_group=str(raw.get("interlock_group") or "").strip()[:40],
             icon=str(raw.get("icon") or "power")[:32],
             color=str(raw.get("color") or "")[:16],
-            confirm=bool(raw.get("confirm", False)),
-            enabled=bool(raw.get("enabled", True)),
+            confirm=as_bool(raw.get("confirm"), False),
+            enabled=as_bool(raw.get("enabled"), True),
             notes=str(raw.get("notes") or "")[:200],
         )
 
@@ -194,8 +210,9 @@ class _Runtime:
     device: Any = None            # gpiozero OutputDevice (or None if failed)
     error: str = ""
     on: bool = False
-    since: float = 0.0
-    last_heartbeat: float = 0.0
+    since: float = 0.0          # monotonic
+    since_wall: float = 0.0     # wall clock, for display only
+    last_heartbeat: float = 0.0  # monotonic
     hold_token: str = ""
     auto_off_at: float = 0.0
     source: str = ""
@@ -262,6 +279,13 @@ class GPIOManager:
                     self._set_off(rt, "reconfigure")
                     self._close_device(rt)
                 self._switches.clear()
+                old = self._factory
+                self._factory = None
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    pass
             self._factory, self.factory_name, self.simulated = select_pin_factory(g_after.get("backend", "auto"))
         self._apply_config(g_after.get("switches", []))
 
@@ -288,6 +312,15 @@ class GPIOManager:
             for sid, cfg in wanted.items():
                 if sid not in self._switches:
                     self._switches[sid] = self._create_runtime(cfg)
+            # A changed interlock group must never leave two members energised.
+            groups: Dict[str, List[_Runtime]] = {}
+            for rt in self._switches.values():
+                if rt.on and rt.cfg.interlock_group:
+                    groups.setdefault(rt.cfg.interlock_group, []).append(rt)
+            for members in groups.values():
+                if len(members) > 1:
+                    for rt in members:
+                        self._set_off(rt, "reconfigure-interlock")
 
     def _create_runtime(self, cfg: SwitchConfig) -> _Runtime:
         rt = _Runtime(cfg=cfg)
@@ -340,22 +373,41 @@ class GPIOManager:
             except Exception:
                 log.exception("gpio event callback failed")
 
+    def _energise(self, switch_id: str, source: str) -> _Runtime:
+        """Turn a switch on, honouring interlocks and the group dead time.
+
+        The dead-time wait happens *outside* the lock so heartbeats, releases
+        and the watchdog keep running for every other switch meanwhile.
+        """
+        deadline = time.monotonic() + 10.0
+        while True:
+            with self._lock:
+                rt = self._get(switch_id)
+                if rt.on:
+                    return rt
+                group = rt.cfg.interlock_group
+                wait = 0.0
+                if group:
+                    for other in self._switches.values():
+                        if other is not rt and other.cfg.interlock_group == group and other.on:
+                            self._set_off(other, f"interlock:{rt.cfg.id}")
+                    wait = self._group_block_until.get(group, 0.0) - time.monotonic()
+                if wait <= 0:
+                    self._set_on(rt, source)
+                    return rt
+            if time.monotonic() > deadline:
+                raise GPIOError(f"'{switch_id}' could not be energised: interlock dead time never elapsed")
+            time.sleep(min(wait, 0.25))
+
     def _set_on(self, rt: _Runtime, source: str) -> None:
-        """Energise ``rt`` honouring interlocks.  Caller holds the lock."""
-        group = rt.cfg.interlock_group
-        if group:
-            for other in self._switches.values():
-                if other is not rt and other.cfg.interlock_group == group and other.on:
-                    self._set_off(other, f"interlock:{rt.cfg.id}")
-            wait = self._group_block_until.get(group, 0.0) - time.monotonic()
-            if wait > 0:
-                time.sleep(min(wait, 2.0))
+        """Energise ``rt``.  Caller holds the lock and has cleared interlocks."""
         if rt.on:
             return
         rt.device.on()
-        now = time.time()
+        now = time.monotonic()
         rt.on = True
         rt.since = now
+        rt.since_wall = time.time()
         rt.last_heartbeat = now
         rt.source = source
         rt.activations += 1
@@ -373,7 +425,7 @@ class GPIOManager:
             except Exception as exc:
                 log.error("failed to turn off GPIO%s: %s", rt.cfg.pin, exc)
         if rt.on:
-            rt.total_on_time += time.time() - rt.since
+            rt.total_on_time += time.monotonic() - rt.since
             rt.on = False
             rt.hold_token = ""
             rt.auto_off_at = 0.0
@@ -390,7 +442,8 @@ class GPIOManager:
                 raise GPIOError(f"'{rt.cfg.name}' is a hold-to-run switch; use press/heartbeat/release")
             if rt.cfg.mode == "pulse":
                 return self.pulse(switch_id, source=source)
-            self._set_on(rt, source)
+        rt = self._energise(switch_id, source)
+        with self._lock:
             return self._snapshot_one(rt)
 
     def turn_off(self, switch_id: str, source: str = "api") -> Dict[str, Any]:
@@ -411,9 +464,14 @@ class GPIOManager:
     def pulse(self, switch_id: str, duration_ms: Optional[int] = None, source: str = "api") -> Dict[str, Any]:
         with self._lock:
             rt = self._get(switch_id)
-            ms = int(duration_ms) if duration_ms else rt.cfg.pulse_ms
+            try:
+                ms = int(duration_ms) if duration_ms else rt.cfg.pulse_ms
+            except (TypeError, ValueError):
+                raise GPIOError("duration_ms must be a number")
             ms = max(20, min(ms, 60_000))
-            self._set_on(rt, source)
+        self._energise(switch_id, source)
+        with self._lock:
+            rt = self._get(switch_id)
             rt.auto_off_at = time.monotonic() + ms / 1000.0
             if rt.pulse_timer:
                 rt.pulse_timer.cancel()
@@ -435,10 +493,12 @@ class GPIOManager:
             rt = self._get(switch_id)
             if rt.cfg.mode != "momentary":
                 raise GPIOError(f"'{rt.cfg.name}' is not a hold-to-run switch")
+        self._energise(switch_id, source)
+        with self._lock:
+            rt = self._get(switch_id)
             token = secrets.token_urlsafe(12)
-            self._set_on(rt, source)
             rt.hold_token = token
-            rt.last_heartbeat = time.time()
+            rt.last_heartbeat = time.monotonic()
             snap = self._snapshot_one(rt)
             snap["token"] = token
             return snap
@@ -450,7 +510,7 @@ class GPIOManager:
                 snap = self._snapshot_one(rt)
                 snap["held"] = False
                 return snap
-            rt.last_heartbeat = time.time()
+            rt.last_heartbeat = time.monotonic()
             snap = self._snapshot_one(rt)
             snap["held"] = True
             return snap
@@ -471,26 +531,36 @@ class GPIOManager:
             return self.snapshot()
 
     def test_pin(self, pin: int, active_high: bool, duration_ms: int = 300) -> bool:
-        """Briefly pulse an unconfigured pin so the user can identify the relay."""
+        """Briefly pulse a pin so the user can identify the relay."""
+        duration_ms = max(20, min(int(duration_ms), 2000))
         with self._lock:
             for rt in self._switches.values():
                 if rt.cfg.pin == pin and rt.device is not None:
-                    self.pulse(rt.cfg.id, duration_ms, source="test")
-                    return True
-            if self._factory is None:
-                raise GPIOError("GPIO library unavailable")
-            if pin not in PIN_NOTES or pin in RESERVED_PINS:
-                raise GPIOError(f"GPIO{pin} cannot be used")
-            from gpiozero import OutputDevice
+                    configured = rt.cfg.id
+                    break
+            else:
+                configured = None
+            if configured is None:
+                if self._factory is None:
+                    raise GPIOError("GPIO library unavailable")
+                if pin not in PIN_NOTES or pin in RESERVED_PINS:
+                    raise GPIOError(f"GPIO{pin} cannot be used")
+                from gpiozero import OutputDevice
 
-            dev = OutputDevice(pin, active_high=active_high, initial_value=False, pin_factory=self._factory)
-            try:
+                dev = OutputDevice(pin, active_high=active_high, initial_value=False, pin_factory=self._factory)
                 dev.on()
-                time.sleep(max(0.02, min(duration_ms, 5000)) / 1000.0)
-                dev.off()
-            finally:
-                dev.close()
+        if configured is not None:
+            self.pulse(configured, duration_ms, source="test")
             return True
+        try:
+            time.sleep(duration_ms / 1000.0)
+        finally:
+            with self._lock:
+                try:
+                    dev.off()
+                finally:
+                    dev.close()
+        return True
 
     # ------------------------------------------------------------- watchdog
     def _watchdog_loop(self) -> None:
@@ -501,32 +571,36 @@ class GPIOManager:
                 log.exception("gpio watchdog error")
 
     def _watchdog_tick(self) -> None:
-        now = time.time()
-        mono = time.monotonic()
+        now = time.monotonic()
         with self._lock:
             for rt in self._switches.values():
-                if not rt.on:
-                    continue
                 cfg = rt.cfg
-                if cfg.mode == "momentary" and now - rt.last_heartbeat > self._hold_timeout:
-                    log.warning("'%s' released: no heartbeat for %.1fs", cfg.name, now - rt.last_heartbeat)
-                    self._set_off(rt, "heartbeat-timeout")
-                elif cfg.max_on_seconds and now - rt.since > cfg.max_on_seconds:
-                    log.warning("'%s' released: max on-time %.1fs reached", cfg.name, cfg.max_on_seconds)
-                    self._set_off(rt, "max-on-time")
-                elif cfg.mode == "pulse" and rt.auto_off_at and mono > rt.auto_off_at + 0.5:
-                    self._set_off(rt, "pulse-complete")
-                # Sanity: hardware/state mismatch (e.g. someone poked the pin).
+                if rt.on:
+                    if cfg.mode == "momentary" and now - rt.last_heartbeat > self._hold_timeout:
+                        log.warning("'%s' released: no heartbeat for %.1fs", cfg.name, now - rt.last_heartbeat)
+                        self._set_off(rt, "heartbeat-timeout")
+                    elif cfg.max_on_seconds and now - rt.since > cfg.max_on_seconds:
+                        log.warning("'%s' released: max on-time %.1fs reached", cfg.name, cfg.max_on_seconds)
+                        self._set_off(rt, "max-on-time")
+                    elif cfg.mode == "pulse" and rt.auto_off_at and now > rt.auto_off_at + 0.5:
+                        self._set_off(rt, "pulse-complete")
+                # Sanity: hardware must agree with our state.  A switch we believe
+                # is OFF but whose pin is still driving the relay is forced off.
                 if rt.device is not None:
                     try:
-                        if bool(rt.device.value) != rt.on:
-                            rt.device.value = 1 if rt.on else 0
-                    except Exception:
-                        pass
+                        hw_on = bool(rt.device.value)
+                        if hw_on != rt.on:
+                            if rt.on:
+                                rt.device.on()
+                            else:
+                                log.error("GPIO%s ('%s') was still energised while marked off; forcing off", cfg.pin, cfg.name)
+                                rt.device.off()
+                    except Exception as exc:
+                        log.error("watchdog could not verify GPIO%s: %s", cfg.pin, exc)
 
     # ------------------------------------------------------------- reporting
     def _snapshot_one(self, rt: _Runtime) -> Dict[str, Any]:
-        now = time.time()
+        now = time.monotonic()
         cfg = rt.cfg
         remaining = None
         if rt.on and cfg.max_on_seconds:
@@ -537,7 +611,7 @@ class GPIOManager:
             "pin": cfg.pin,
             "mode": cfg.mode,
             "on": rt.on,
-            "since": rt.since if rt.on else None,
+            "since": rt.since_wall if rt.on else None,
             "on_for": round(now - rt.since, 1) if rt.on else 0,
             "remaining": round(remaining, 1) if remaining is not None else None,
             "available": rt.device is not None,

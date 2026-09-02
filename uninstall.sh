@@ -11,6 +11,8 @@ fi
 systemctl disable --now jimboled.service >/dev/null 2>&1 || true
 systemctl stop jimboled-update.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/jimboled.service /etc/sudoers.d/jimboled /etc/avahi/services/jimboled.service
+rm -f /etc/NetworkManager/conf.d/99-jimboled-wifi-powersave.conf /etc/NetworkManager/dispatcher.d/99-jimboled-wifi-powersave
+nmcli general reload conf >/dev/null 2>&1 || true
 systemctl daemon-reload
 systemctl reset-failed jimboled.service >/dev/null 2>&1 || true
 rm -rf /opt/jimboled

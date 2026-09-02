@@ -130,3 +130,62 @@ def test_pin_map_marks_usage(data_dir):
         assert pins[4]["boot_pull"] == "up" and pins[17]["boot_pull"] == "down"
     finally:
         m.stop()
+
+
+def test_interlock_enforced_after_reconfigure(data_dir):
+    store, m = make_manager(data_dir, [
+        {"id": "a", "name": "A", "pin": 17, "mode": "toggle"},
+        {"id": "b", "name": "B", "pin": 27, "mode": "toggle"},
+    ])
+    try:
+        m.turn_on("a")
+        m.turn_on("b")
+        assert state(m, "a")["on"] and state(m, "b")["on"]
+        # Putting both into one group while both are on must not leave both energised.
+        store.update(lambda c: c["gpio"].update({"switches": [
+            {"id": "a", "name": "A", "pin": 17, "mode": "toggle", "interlock_group": "g"},
+            {"id": "b", "name": "B", "pin": 27, "mode": "toggle", "interlock_group": "g"},
+        ]}))
+        assert not (state(m, "a")["on"] and state(m, "b")["on"])
+    finally:
+        m.stop()
+
+
+def test_watchdog_forces_off_when_hardware_disagrees(data_dir):
+    _, m = make_manager(data_dir, [{"id": "lamp", "name": "Lamp", "pin": 22, "mode": "toggle"}])
+    try:
+        dev = m._switches["lamp"].device
+        dev.on()  # simulate a stray write behind the manager's back
+        assert dev.value == 1
+        time.sleep(0.3)
+        assert dev.value == 0 and not state(m, "lamp")["on"]
+    finally:
+        m.stop()
+
+
+def test_dead_time_does_not_block_other_switches(data_dir):
+    _, m = make_manager(data_dir, [
+        {"id": "up", "name": "Up", "pin": 17, "mode": "toggle", "interlock_group": "bed"},
+        {"id": "down", "name": "Down", "pin": 27, "mode": "toggle", "interlock_group": "bed"},
+        {"id": "lamp", "name": "Lamp", "pin": 22, "mode": "toggle"},
+    ], interlock_dead_time_ms=600)
+    try:
+        m.turn_on("up")
+        import threading
+        t = threading.Thread(target=m.turn_on, args=("down",))
+        t0 = time.monotonic()
+        t.start()
+        time.sleep(0.1)
+        m.turn_on("lamp")  # must not wait for the bed dead time
+        assert time.monotonic() - t0 < 0.4
+        t.join(timeout=3)
+        assert state(m, "down")["on"] and not state(m, "up")["on"] and state(m, "lamp")["on"]
+    finally:
+        m.stop()
+
+
+def test_lenient_booleans():
+    assert SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "false"}).active_high is False
+    assert SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "1"}).active_high is True
+    with pytest.raises(GPIOError):
+        SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "maybe"})
