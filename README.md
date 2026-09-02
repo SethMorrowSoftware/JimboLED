@@ -11,6 +11,10 @@
 
 ---
 
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="800" alt="JimboLED dashboard">
+</p>
+
 ## What it does
 
 * **Controls any number of WLED controllers** – power, brightness, colours (incl. white / CCT), every effect with its own sliders and options, palettes, presets & playlists, segments, sleep timer, sync, reboot… Finds them on your network automatically.
@@ -44,6 +48,10 @@ See **[docs/WIRING.md](docs/WIRING.md)** for the full guide. The short version:
 * Use a common opto‑isolated **5 V relay module**; power its coils from 5 V, its logic (VCC) from the Pi's 3.3 V, and connect each `IN` pin to a GPIO.
 * Wire each relay's contacts **in parallel with a button of the bed's wired remote** (most beds: the remote just closes a low‑voltage contact). The bed's own control box keeps all its safety features; the original remote keeps working.
 * In JimboLED, use the **Bed template** (Settings → Switches): two *hold‑to‑run* switches, interlocked so "up" and "down" can never be energised together, with a 60‑second limit.
+
+<p align="center">
+  <img src="docs/screenshots/device-panel.png" width="560" alt="Controller panel"> <img src="docs/screenshots/mobile.png" width="200" alt="Mobile view">
+</p>
 
 ## Safety model
 
