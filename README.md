@@ -86,7 +86,8 @@ Everything is in one file: `/var/lib/jimboled/config.json` (or `./data/config.js
 
 ## Troubleshooting
 
-* **Can't open jimboled.local** – use the IP address instead (`hostname -I` on the Pi). Some Android browsers don't resolve `.local` names.
+* **Can't open jimboled.local** – use the IP address instead (`hostname -I` on the Pi). Some Android browsers don't resolve `.local` names. The installer switches off Wi‑Fi power saving on the Pi, because it makes Pi Zeros miss the network broadcasts that `.local` names and WLED discovery rely on.
+* **"JimboLED refused the address …"** – for safety the dashboard only answers to IP addresses, plain names and names ending in `.local`, `.lan`, `.home` and similar. If you gave the Pi a custom DNS name, add it under Settings → Security → Allowed names (or open it by IP once to do so).
 * **A controller shows "offline"** – check it is powered and on the same Wi‑Fi; the tile tells you the last error. WLED's own page must open at `http://<its-ip>/`.
 * **A relay clicks when it should be off (or the other way round)** – flip *Relay trigger* (active HIGH / active LOW) in the switch settings and use *Test this pin*.
 * **"GPIO simulated"** in the header – the service couldn't open the GPIO hardware. Run `sudo bash install.sh` again and check `sudo journalctl -u jimboled -n 50`.

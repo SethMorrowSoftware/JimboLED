@@ -11,6 +11,8 @@ JimboLED from Home Assistant, Node-RED, cron jobs or a Stream Deck.
 * If a dashboard password is set, log in first: `POST /api/login {"password": "…"}`
   and keep the session cookie.
 * Errors are `{"error": "message"}` with a 4xx/5xx status.
+* Requests must use an IP address, a plain host name, or a private-style name (`*.local`, `*.lan`, `*.home`, …) in the `Host` header; other names get **421** unless listed in `server.allowed_hosts`. This blocks DNS-rebinding attacks from the internet.
+* Hold-to-run switches must receive a heartbeat at least every second (the dashboard sends one every 0.4 s); the relay releases automatically otherwise.
 
 ```bash
 # turn a controller on at 60 %
@@ -74,7 +76,7 @@ heartbeats arrive, and it always has a maximum on-time.
 | GET / POST | `/api/scenes` | `{"name":"Goodnight","icon":"moon","actions":[{"type":"all","state":{"on":false}},{"type":"switch","ref":"sw-…","action":"off"},{"type":"delay","ms":500}]}` |
 | PUT / DELETE | `/api/scenes/<id>` | |
 | POST | `/api/scenes/<id>/run` | |
-| GET / PUT | `/api/settings` | `wled.poll_interval_s`, `wled.request_timeout_s`, `gpio.hold_timeout_s`, `gpio.interlock_dead_time_ms`, `gpio.backend`, `server.port`, `setup_complete` |
+| GET / PUT | `/api/settings` | `wled.poll_interval_s`, `wled.request_timeout_s`, `gpio.hold_timeout_s`, `gpio.interlock_dead_time_ms`, `gpio.backend`, `server.port`, `server.allowed_hosts` (extra host names the dashboard answers to), `setup_complete` |
 | POST | `/api/settings/password` | `{"current":"…","password":"new or empty to remove"}` |
 | POST | `/api/login`, `/api/logout` · GET `/api/auth` | |
 
