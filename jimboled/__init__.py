@@ -28,17 +28,30 @@ class AppContext:
         self.discovery = None
         self.started_at = time.time()
         self._rev = 0
+        self._cfg_rev = 0
         self._rev_lock = threading.Lock()
         self.log_buffer = None
 
     def bump(self, *_args) -> None:
+        """Something observable changed (device state, relay, config)."""
         with self._rev_lock:
             self._rev += 1
+
+    def bump_config(self, *_args) -> None:
+        """The configuration (devices, switches, dashboard layout) changed."""
+        with self._rev_lock:
+            self._rev += 1
+            self._cfg_rev += 1
 
     @property
     def rev(self) -> int:
         with self._rev_lock:
             return self._rev
+
+    @property
+    def cfg_rev(self) -> int:
+        with self._rev_lock:
+            return self._cfg_rev
 
 
 def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, testing: bool = False) -> Flask:
@@ -74,7 +87,7 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
     ctx.devices = DeviceManager(store, on_change=ctx.bump)
     ctx.gpio = GPIOManager(store, on_event=ctx.bump)
     ctx.discovery = DiscoveryService(store, ctx.devices)
-    store.on_change(ctx.bump)
+    store.on_change(ctx.bump_config)
 
     from .api import register_blueprints
 

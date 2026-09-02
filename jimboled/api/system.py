@@ -36,10 +36,11 @@ def aggregate_state():
     ctx = get_ctx()
     return ok({
         "rev": ctx.rev,
+        "cfg_rev": ctx.cfg_rev,
         "ts": time.time(),
         "devices": ctx.devices.snapshot(),
         "gpio": ctx.gpio.snapshot(),
-        "discovery_running": ctx.discovery.status()["running"],
+        "discovery_running": ctx.discovery.is_running,
     })
 
 

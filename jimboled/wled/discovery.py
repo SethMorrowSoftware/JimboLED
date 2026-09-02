@@ -355,6 +355,11 @@ class DiscoveryService:
         known_hosts = {d.get("host") for d in (self.store.section("devices") or [])}
         return [n for n in self.listener.snapshot() if n["host"] not in known_hosts]
 
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self._status["running"])
+
     def status(self) -> Dict[str, Any]:
         with self._lock:
             snap = dict(self._status)

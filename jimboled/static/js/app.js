@@ -3,7 +3,7 @@
   const { h, el, esc } = UI;
   const POLL_MS = 2000;
   const App = {
-    state: { devices: [], gpio: { switches: [] }, dashboard: null, rev: -1, presets: {} },
+    state: { devices: [], gpio: { switches: [] }, dashboard: null, rev: -1, cfgRev: -1, presets: {} },
     editMode: false,
     tiles: new Map(), // tile id -> {el, kind, update}
     route: { view: 'dashboard' },
@@ -29,9 +29,10 @@
     try {
       const s = await api.get('/api/state');
       failures = 0;
-      const prevRev = App.state.rev;
-      App.state.devices = s.devices; App.state.gpio = s.gpio; App.state.rev = s.rev; App.state.discovery_running = s.discovery_running;
-      if (full || !App.state.dashboard || s.rev !== prevRev) {
+      const prevCfg = App.state.cfgRev;
+      App.state.devices = s.devices; App.state.gpio = s.gpio; App.state.rev = s.rev; App.state.cfgRev = s.cfg_rev; App.state.discovery_running = s.discovery_running;
+      // The layout only changes when the configuration changes, so fetch it lazily.
+      if (full || !App.state.dashboard || s.cfg_rev !== prevCfg) {
         const d = await api.get('/api/dashboard');
         App.state.dashboard = d.dashboard; App.state.setupComplete = d.setup_complete;
         applyTheme(d.dashboard);
