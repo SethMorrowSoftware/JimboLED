@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-theme="{{ theme }}" style="--accent: {{ accent }};">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · {{ title }}</title>
+  <link rel="icon" href="/static/img/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="/login{% if request.args.get('next') %}?next={{ request.args.get('next') | urlencode }}{% endif %}">
+    <div class="brand" style="justify-content:center;margin-bottom:12px"><span class="brand-mark"></span><span class="brand-title">{{ title }}</span></div>
+    <p class="muted" style="text-align:center;margin:0 0 18px">Enter the dashboard password to continue.</p>
+    {% if error %}<div class="alert danger">{{ error }}</div>{% endif %}
+    <label class="field"><span>Password</span><input class="input" type="password" name="password" autofocus autocomplete="current-password" required></label>
+    <button class="btn primary block" type="submit">Sign in</button>
+  </form>
+</body>
+</html>

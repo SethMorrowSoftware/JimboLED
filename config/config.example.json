@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "server": { "host": "0.0.0.0", "port": 80, "password_hash": null },
+  "devices": [],
+  "gpio": { "backend": "auto", "switches": [], "interlock_dead_time_ms": 250, "hold_timeout_s": 1.5 },
+  "wled": { "poll_interval_s": 3.0, "offline_poll_interval_s": 15.0, "request_timeout_s": 4.0 },
+  "dashboard": { "title": "JimboLED", "subtitle": "", "theme": "midnight", "accent": "#7c5cff", "density": "comfortable", "show_offline": true, "show_clock": true, "tiles": [], "scenes": [] },
+  "setup_complete": false
+}

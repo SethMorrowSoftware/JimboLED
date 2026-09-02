@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  Privileged helper for JimboLED.
+#
+#  Installed root-owned in /opt/jimboled/app/bin. The service user may run it
+#  through a sudoers rule limited to this exact path. Every sub-command is
+#  deliberately narrow so the dashboard can never run arbitrary commands.
+#
+#  The service runs under ProtectHome=yes and would be killed by its own
+#  restart, so anything that touches the owner's git clone or outlives the
+#  service is launched through systemd-run (PID 1 spawns it outside the
+#  service's sandbox and cgroup).
+# =============================================================================
+set -euo pipefail
+
+ENV_FILE="${JIMBOLED_INSTALL_ENV:-/etc/jimboled/install.env}"
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+APP_DIR="${JIMBOLED_APP:-/opt/jimboled/app}"
+VENV_DIR="${JIMBOLED_VENV:-/opt/jimboled/venv}"
+DATA_DIR="${JIMBOLED_DATA:-/var/lib/jimboled}"
+SRC_DIR="${JIMBOLED_SRC:-}"
+OWNER="${JIMBOLED_OWNER:-}"
+CONFIG_TXT=""
+for c in /boot/firmware/config.txt /boot/config.txt; do
+  if [ -f "$c" ]; then CONFIG_TXT="$c"; break; fi
+done
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'; }
+
+# Print "pin=dl,pin=dh,..." for every configured switch (dl = active-high OFF, dh = active-low OFF).
+pin_spec() {
+  [ -f "$DATA_DIR/config.json" ] || { echo none; return; }
+  "$VENV_DIR/bin/python" - "$DATA_DIR/config.json" <<'PY' 2>/dev/null || echo none
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+    pairs = []
+    for s in cfg.get("gpio", {}).get("switches", []):
+        pin = s.get("pin")
+        if isinstance(pin, int) and 2 <= pin <= 27:
+            pairs.append(f"{pin}={'dl' if s.get('active_high', True) else 'dh'}")
+    print(",".join(pairs) or "none")
+except Exception:
+    print("none")
+PY
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  restart)
+    # --no-block: a blocking restart would kill this very process.
+    systemctl --no-block restart jimboled.service
+    ;;
+  reboot)
+    systemctl --no-block reboot
+    ;;
+  pins-safe)
+    # Drive every configured relay pin to its OFF level using the firmware
+    # tools (works even when the Python process is gone). Best effort.
+    spec="$(pin_spec)"
+    [ "$spec" != "none" ] || exit 0
+    IFS=',' read -ra pairs <<< "$spec"
+    for p in "${pairs[@]}"; do
+      pin="${p%%=*}"; lvl="${p##*=}"
+      if command -v pinctrl >/dev/null 2>&1; then pinctrl set "$pin" op "$lvl" >/dev/null 2>&1 || true
+      elif command -v raspi-gpio >/dev/null 2>&1; then raspi-gpio set "$pin" op "$lvl" >/dev/null 2>&1 || true
+      fi
+    done
+    ;;
+  bootpins)
+    # Usage: bootpins "17=dl,27=dh" | bootpins none
+    # Writes boot-time output levels into config.txt so relays stay off from
+    # power-on until the service starts. The managed block is idempotent.
+    [ -n "$CONFIG_TXT" ] || { echo "no config.txt found (not a Raspberry Pi?)"; exit 0; }
+    spec="${2:-none}"
+    tmp="$(mktemp)"
+    awk '/^# BEGIN JimboLED/{skip=1} !skip{print} /^# END JimboLED/{skip=0}' "$CONFIG_TXT" > "$tmp"
+    if [ "$spec" != "none" ] && [ -n "$spec" ]; then
+      {
+        echo "# BEGIN JimboLED (managed – do not edit; relay pins default to OFF at boot)"
+        IFS=',' read -ra pairs <<< "$spec"
+        for p in "${pairs[@]}"; do
+          pin="${p%%=*}"; lvl="${p##*=}"
+          case "$pin" in ''|*[!0-9]*) continue;; esac
+          [ "$pin" -ge 2 ] && [ "$pin" -le 27 ] || continue
+          case "$lvl" in dl|dh) ;; *) continue;; esac
+          echo "gpio=${pin}=op,${lvl}"
+        done
+        echo "# END JimboLED"
+      } >> "$tmp"
+    fi
+    if ! cmp -s "$tmp" "$CONFIG_TXT"; then
+      cp "$CONFIG_TXT" "${CONFIG_TXT}.jimboled.bak"
+      cat "$tmp" > "$CONFIG_TXT"
+      echo "updated $CONFIG_TXT (takes effect after the next reboot)"
+    else
+      echo "no change"
+    fi
+    rm -f "$tmp"
+    ;;
+  check-update)
+    if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR/.git" ]; then
+      echo '{"update_available":false,"message":"Source checkout not found; update from the command line."}'; exit 0
+    fi
+    [ -n "$OWNER" ] || OWNER="$(stat -c '%U' "$SRC_DIR")"
+    # Runs as the clone's owner, outside our sandbox (ProtectHome) via PID 1.
+    out="$(systemd-run --quiet --wait --pipe --collect --uid="$OWNER" -p WorkingDirectory="$SRC_DIR" \
+           /bin/bash -c 'git fetch -q origin 2>&1 && b=$(git rev-parse --abbrev-ref HEAD) && l=$(git rev-parse --short HEAD) && r=$(git rev-parse --short "origin/$b" 2>/dev/null || echo "$l") && n=$(git rev-list --count "HEAD..origin/$b" 2>/dev/null || echo 0) && echo "OK $l $r $n"' 2>&1 || true)"
+    case "$out" in
+      OK*)
+        set -- $out; local_rev="$2"; remote_rev="$3"; behind="$4"
+        if [ "${behind:-0}" -gt 0 ]; then
+          echo "{\"update_available\":true,\"local\":\"$local_rev\",\"remote\":\"$remote_rev\",\"behind\":$behind,\"message\":\"$behind new change(s) available.\"}"
+        else
+          echo "{\"update_available\":false,\"local\":\"$local_rev\",\"remote\":\"$remote_rev\",\"behind\":0,\"message\":\"You are up to date ($local_rev).\"}"
+        fi ;;
+      *)
+        echo "{\"update_available\":false,\"message\":\"Could not check for updates (no internet?): $(json_escape "$(echo "$out" | tail -1)")\"}" ;;
+    esac
+    ;;
+  update)
+    if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR/.git" ]; then echo "Source checkout not found" >&2; exit 1; fi
+    [ -n "$OWNER" ] || OWNER="$(stat -c '%U' "$SRC_DIR")"
+    # Detached: survives the service restart that install.sh performs.
+    systemctl stop jimboled-update.service >/dev/null 2>&1 || true
+    systemctl reset-failed jimboled-update.service >/dev/null 2>&1 || true
+    systemd-run --quiet --collect --unit=jimboled-update -p WorkingDirectory="$SRC_DIR" \
+      /bin/bash -c "sudo -u '$OWNER' -H git -C '$SRC_DIR' pull --ff-only && bash '$SRC_DIR/install.sh' --quiet" \
+      >/dev/null 2>&1
+    echo '{"started":true,"message":"Update started. JimboLED will restart itself in a few minutes.","log":"journalctl -u jimboled-update"}'
+    ;;
+  *)
+    echo "usage: jimboled-helper {restart|reboot|pins-safe|bootpins <spec>|check-update|update}" >&2
+    exit 2
+    ;;
+esac

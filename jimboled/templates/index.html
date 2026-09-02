@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" data-theme="{{ theme }}" style="--accent: {{ accent }};">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>{{ title }}</title>
+  <link rel="icon" href="/static/img/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/img/icon.svg">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/css/app.css?v={{ version }}">
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar" id="topbar">
+      <a class="brand" href="#/" id="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-text"><span class="brand-title" id="brand-title">{{ title }}</span><span class="brand-sub" id="brand-sub"></span></span>
+      </a>
+      <div class="topbar-status" id="topbar-status"></div>
+      <nav class="topbar-actions" id="topbar-actions"></nav>
+    </header>
+    <main class="main" id="main" aria-live="polite"></main>
+    <footer class="footer" id="footer"></footer>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="assertive"></div>
+  <script>window.JIMBOLED = { version: "{{ version }}" };</script>
+  <script src="/static/js/icons.js?v={{ version }}"></script>
+  <script src="/static/js/api.js?v={{ version }}"></script>
+  <script src="/static/js/ui.js?v={{ version }}"></script>
+  <script src="/static/js/color.js?v={{ version }}"></script>
+  <script src="/static/js/gpio.js?v={{ version }}"></script>
+  <script src="/static/js/device.js?v={{ version }}"></script>
+  <script src="/static/js/settings.js?v={{ version }}"></script>
+  <script src="/static/js/wizard.js?v={{ version }}"></script>
+  <script src="/static/js/app.js?v={{ version }}"></script>
+</body>
+</html>

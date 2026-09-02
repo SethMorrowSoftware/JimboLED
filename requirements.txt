@@ -1,0 +1,8 @@
+# Pure-Python dependencies only: they install from wheels on every Raspberry
+# Pi model (including the armv6 Zero) without compiling anything.
+flask>=3.0,<4
+waitress>=3.0,<4
+requests>=2.31,<3
+# gpiozero is normally supplied by Raspberry Pi OS (python3-gpiozero) and shared
+# into the venv via --system-site-packages; this pin only matters on other systems.
+gpiozero>=2.0
