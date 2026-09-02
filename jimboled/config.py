@@ -106,7 +106,7 @@ class ConfigStore:
         self._lock = threading.RLock()
         # Listeners are notified outside the data lock but strictly in commit
         # order (this lock is taken before the data lock is released).
-        self._notify_lock = threading.Lock()
+        self._notify_lock = threading.RLock()  # re-entrant: a listener may write back to the store
         self._data: Dict[str, Any] = copy.deepcopy(DEFAULT_CONFIG)
         self._listeners: List[Callable[[Dict[str, Any], Dict[str, Any]], None]] = []
         self.load()
