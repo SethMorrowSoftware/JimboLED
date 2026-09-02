@@ -14,8 +14,8 @@
 set -euo pipefail
 
 ENV_FILE="${JIMBOLED_INSTALL_ENV:-/etc/jimboled/install.env}"
+# shellcheck disable=SC1090
 [ -f "$ENV_FILE" ] && . "$ENV_FILE"
-APP_DIR="${JIMBOLED_APP:-/opt/jimboled/app}"
 VENV_DIR="${JIMBOLED_VENV:-/opt/jimboled/venv}"
 DATA_DIR="${JIMBOLED_DATA:-/var/lib/jimboled}"
 SRC_DIR="${JIMBOLED_SRC:-}"
