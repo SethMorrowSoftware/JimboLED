@@ -311,14 +311,16 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 14px 0; }
 }
 
 /* pin picker */
-.pinout { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-family: var(--mono); font-size: 12px; }
-.pin { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; }
+.pinout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; font-family: var(--mono); font-size: 12px; }
+@media (max-width: 700px) { .pinout { grid-template-columns: minmax(0, 1fr); } }
+.pin { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; min-width: 0; overflow: hidden; text-align: left; }
 .pin.rec { border-color: color-mix(in srgb, var(--success) 40%, transparent); }
 .pin.reserved, .pin.used { opacity: .45; cursor: not-allowed; }
 .pin.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--surface-2)); }
 .pin .num { font-weight: 700; min-width: 58px; }
 .pin .phys { color: var(--faint); }
-.pin .note { color: var(--muted); font-family: var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin .note { color: var(--muted); font-family: var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
+.pin .num { flex: none; } .pin .phys { flex: none; }
 .pin .boot { color: var(--success); white-space: nowrap; font-size: 11px; }
 
 /* wizard */

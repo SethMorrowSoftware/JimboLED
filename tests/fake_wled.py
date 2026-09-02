@@ -204,6 +204,24 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
         maybe_fail()
         return jsonify(FXDATA)
 
+    @app.get("/json/palx")
+    def json_palx():
+        maybe_fail()
+        page = int(request.args.get("page", 0))
+        per = 8
+        ids = list(range(len(PALETTES)))
+        chunk = ids[page * per:(page + 1) * per]
+        p: Dict[str, Any] = {}
+        for i in chunk:
+            if i == 0: p[str(i)] = [[0, 255, 0, 0], [128, 0, 255, 0], [255, 0, 0, 255]]
+            elif i == 1: p[str(i)] = ["r", "r", "r", "r"]
+            elif i == 2: p[str(i)] = ["c1"]
+            elif i == 3: p[str(i)] = ["c1", "c1", "c2", "c2"]
+            elif i == 4: p[str(i)] = ["c3", "c2", "c1"]
+            elif i == 5: p[str(i)] = ["c1"] * 5 + ["c2"] * 5 + ["c3"] * 5 + ["c1"]
+            else: p[str(i)] = [[k * 16, (i * 37 + k * 20) % 256, (i * 91 + k * 5) % 256, (i * 53 + k * 40) % 256] for k in range(16)]
+        return jsonify({"m": (len(ids) - 1) // per, "p": p})
+
     @app.get("/presets.json")
     def presets_json():
         maybe_fail()

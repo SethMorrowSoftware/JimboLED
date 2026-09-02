@@ -33,6 +33,8 @@ def test_fxdata_matches_stock_ui_rules():
     pal = parse_fxdata("Shift,Size,Rotation,,,Animate Shift,Animate Rotation,Anamorphic;;!;12;ix=112,c1=0,o1=1", 65)
     assert not any(c["visible"] for c in pal["colors"]) and pal["flags"]["two_d"] and pal["defaults"]["ix"] == 112
     assert not parse_fxdata("!,!;!;;1", 71)["palette"]["visible"]
+    assert sum(s["visible"] for s in parse_fxdata("", 140)["sliders"]) == 5  # legacy SR effects
+    assert parse_fxdata("", 0)["flags"]["raw"] == ""
     assert parse_fxdata("!,!;;Palette=11;1", 70)["defaults"] == {"pal": 11}
 
 

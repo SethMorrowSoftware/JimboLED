@@ -147,6 +147,32 @@ class WLEDClient:
             return []
         return [str(d) for d in data] if isinstance(data, list) else []
 
+    def get_palette_data(self, max_pages: int = 40) -> Dict[int, List[Any]]:
+        """Gradient stops for every palette via the paged ``/json/palx`` endpoint.
+
+        Each entry is a list of ``[pos, r, g, b]`` stops or the markers
+        ``"r"`` (random) / ``"c1"``..``"c3"`` (segment colour slots).
+        """
+        out: Dict[int, List[Any]] = {}
+        page, max_page = 0, 0
+        while page <= max_page and page < max_pages:
+            try:
+                doc = self.get(f"/json/palx?page={page}")
+            except WLEDError as exc:
+                if isinstance(exc, WLEDUnreachable):
+                    raise
+                break
+            if not isinstance(doc, dict):
+                break
+            max_page = int(doc.get("m") or 0)
+            for key, stops in (doc.get("p") or {}).items():
+                try:
+                    out[int(key)] = stops
+                except (TypeError, ValueError):
+                    continue
+            page += 1
+        return out
+
     def get_presets(self) -> Dict[str, Dict[str, Any]]:
         """Presets file as ``{"1": {...}, ...}`` (slot 0 is always empty)."""
         try:

@@ -113,6 +113,20 @@
     const c = caps(d);
     const target = () => ({ id: segId });
 
+    // live / realtime data banner
+    const info = d.info_full || {};
+    if (info.live && (st.lor === 0 || st.lor == null)) {
+      const banner = h('div', { class: 'alert warn' });
+      banner.append(el(`${icon('radio')} <b>Receiving live ${esc(info.lm || 'realtime')} data</b>${info.lip ? ' from ' + esc(info.lip) : ''}. The effects below are paused until it stops.`));
+      const row = h('div', { class: 'row wrap', style: { marginTop: '8px' } });
+      const o1 = el(`<button class="btn sm">Override until it stops</button>`); o1.onclick = () => send(d, { lor: 1 }).then(() => refreshPanel(d.id, 'control'));
+      const o2 = el(`<button class="btn sm">Override until reboot</button>`); o2.onclick = () => send(d, { lor: 2 }).then(() => refreshPanel(d.id, 'control'));
+      row.append(o1, o2); banner.append(row); root.append(banner);
+    } else if (st.lor) {
+      const banner = h('div', { class: 'alert info' });
+      const allow = el(`<button class="btn sm">Allow live data again</button>`); allow.onclick = () => send(d, { lor: 0 }).then(() => refreshPanel(d.id, 'control'));
+      banner.append(el(`${icon('radio')} Live data is being ignored (override ${st.lor === 2 ? 'until reboot' : 'until it stops'}). `), allow); root.append(banner);
+    }
     // master row
     const power = UI.toggle(!!st.on, (on) => send(d, { on }), 'lg');
     const bri = UI.slider({ label: 'Brightness', min: 1, max: 255, value: st.bri || 128, format: (v) => Math.round(v / 2.55) + '%', onInput: (v) => sendThrottled(d, { bri: v, on: true }), onChange: (v) => send(d, { bri: v, on: true }) });
@@ -157,7 +171,9 @@
     const fxCard = h('div', { class: 'card' });
     const fxBtn = el(`<button class="btn">${icon('wand')}<span class="ellipsis">${esc(fx.name || 'Solid')}</span>${icon('chevronRight')}</button>`);
     fxBtn.onclick = () => pickEffect(d, segId, seg.fx);
-    const palBtn = el(`<button class="btn">${icon('palette')}<span class="ellipsis">${esc((d.palettes || []).find((p) => p.id === seg.pal)?.name || 'Default')}</span>${icon('chevronRight')}</button>`);
+    const curPal = (d.palettes || []).find((p) => p.id === seg.pal);
+    const palGrad = curPal ? paletteGradient(curPal.stops, seg.col) : null;
+    const palBtn = el(`<button class="btn">${icon('palette')}<span class="ellipsis">${esc(curPal?.name || 'Default')}</span>${palGrad ? `<span class="pal-preview" style="width:40px;height:10px;border-radius:5px;background:${palGrad}"></span>` : ''}${icon('chevronRight')}</button>`);
     palBtn.onclick = () => pickPalette(d, segId, seg.pal);
     const flags = fx.flags || {};
     const badges = h('div', { class: 'row', style: { gap: '4px' } });
@@ -239,9 +255,12 @@
     function draw() {
       grid.innerHTML = '';
       const q = search.value.trim().toLowerCase();
+      const seg = segById(d, segId);
       for (const p of d.palettes || []) {
         if (q && !p.name.toLowerCase().includes(q)) continue;
         const o = h('button', { class: 'option' + (p.id === currentId ? ' active' : '') }, h('span', { class: 'name', text: p.name }));
+        const grad = paletteGradient(p.stops, seg.col);
+        o.append(h('div', { class: 'pal-preview', style: grad ? { background: grad } : { background: 'var(--surface-3)' } }));
         o.onclick = async () => { const dev = await send(d, { seg: { id: segId, pal: p.id } }); m.close(); if (dev) refreshPanel(d.id, 'control'); };
         grid.append(o);
       }
@@ -250,6 +269,20 @@
     body.append(search, grid);
     const m = UI.modal({ title: 'Choose a palette', icon: 'palette', body, wide: true });
     draw();
+  }
+  /** Build a CSS gradient from WLED /json/palx stops ([pos,r,g,b] or "r"/"c1".."c3"). */
+  function paletteGradient(stops, segCols) {
+    if (!Array.isArray(stops) || !stops.length) return null;
+    const cols = segCols || [[255, 160, 0], [0, 0, 0], [0, 0, 0]];
+    const parts = [];
+    const n = stops.length;
+    stops.forEach((st, i) => {
+      let rgb, pos;
+      if (Array.isArray(st)) { pos = (st[0] / 255) * 100; rgb = st.slice(1, 4); }
+      else { pos = (i / Math.max(1, n - 1)) * 100; if (st === 'r') rgb = Color.hsvToRgb((i * 137) % 360, 1, 1); else rgb = (cols[({ c1: 0, c2: 1, c3: 2 }[st] || 0)] || [0, 0, 0]).slice(0, 3); }
+      parts.push(`rgb(${rgb[0]},${rgb[1]},${rgb[2]}) ${pos.toFixed(1)}%`);
+    });
+    return `linear-gradient(90deg, ${parts.join(', ')})`;
   }
   async function refreshPanel(id, tab) { const p = panels[id]; if (!p) return; try { p.reloadDevice((await api.get(`/api/devices/${id}`)).device); p.setTab(tab); } catch (e) {} }
 
@@ -398,12 +431,16 @@
     const nlBri = UI.slider({ label: 'Target brightness', min: 0, max: 255, value: nl.tbri || 0, format: (v) => Math.round(v / 2.55) + '%' });
     const nlMode = h('select', { class: 'select' });
     [['1', 'Fade to target'], ['0', 'Switch at the end'], ['2', 'Fade to second colour'], ['3', 'Sunrise']].forEach(([v, t]) => nlMode.append(h('option', { value: v, text: t, selected: String(nl.mode ?? 1) === v })));
-    nlCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Sleep timer' }), nlToggle), el(`<p class="muted small">Gradually dims the lights and turns them off. ${nl.on && nl.rem > 0 ? `<b>Active – ${UI.fmtDuration(nl.rem)} remaining.</b>` : ''}</p>`), nlDur, nlBri, UI.field('Mode', nlMode));
+    const nlStatus = h('p', { class: 'muted small' });
+    const nlStart = Date.now(), nlRem = nl.rem;
+    const tickNl = () => { const left = nl.on && nlRem > 0 ? Math.max(0, nlRem - (Date.now() - nlStart) / 1000) : 0; nlStatus.innerHTML = `Gradually dims the lights and turns them off. ${left > 0 ? `<b>Active – ${UI.fmtDuration(left)} remaining.</b>` : ''}`; };
+    tickNl(); const nlTimer = setInterval(() => { if (!nlStatus.isConnected) return clearInterval(nlTimer); tickNl(); }, 1000);
+    nlCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Sleep timer' }), nlToggle), nlStatus, nlDur, nlBri, UI.field('Mode', nlMode));
     root.append(nlCard);
     // sync
     const udpn = st.udpn || {};
     const syncCard = h('div', { class: 'card' });
-    syncCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Sync with other controllers' })), el(`<p class="muted small">WLED can mirror changes to other WLED devices on the network (UDP sync).</p>`), h('div', { class: 'row wrap', style: { gap: '18px' } }, h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.send, (v) => send(d, { udpn: { send: v } })), h('span', { class: 'small', text: 'Send changes to others' })), h('label', { class: 'row', style: { gap: '8px' } }, h('span', { class: 'small muted', text: `Receive: ${udpn.recv ? 'on' : 'off'} (set in WLED settings)` }))));
+    syncCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Sync with other controllers' })), el(`<p class="muted small">WLED can mirror changes to other WLED devices on the network (UDP sync, group 1).</p>`), h('div', { class: 'row wrap', style: { gap: '18px' } }, h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.send, (v) => send(d, { udpn: { send: v, sgrp: udpn.sgrp || 1 } })), h('span', { class: 'small', text: 'Send changes to others' })), h('label', { class: 'row', style: { gap: '8px' } }, UI.toggle(!!udpn.recv, (v) => send(d, { udpn: { rgrp: v ? (udpn.rgrp || 1) : 0 } })), h('span', { class: 'small', text: 'Receive changes from others' }))));
     const lor = h('select', { class: 'select' });
     [['0', 'Normal'], ['1', 'Override until live data ends'], ['2', 'Override until reboot']].forEach(([v, t]) => lor.append(h('option', { value: v, text: t, selected: String(st.lor ?? 0) === v })));
     lor.onchange = () => send(d, { lor: +lor.value });

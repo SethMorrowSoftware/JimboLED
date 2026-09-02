@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-SLIDER_DEFAULTS = ["Speed", "Intensity", "Custom 1", "Custom 2", "Custom 3", "Check 1", "Check 2", "Check 3"]
+SLIDER_DEFAULTS = ["Speed", "Intensity", "Custom 1", "Custom 2", "Custom 3", "Option 1", "Option 2", "Option 3"]
 SLIDER_KEYS = ["sx", "ix", "c1", "c2", "c3", "o1", "o2", "o3"]
 SLIDER_MAX = {"sx": 255, "ix": 255, "c1": 255, "c2": 255, "c3": 31}
 COLOR_DEFAULTS = ["Color 1", "Color 2", "Color 3"]
@@ -54,7 +54,8 @@ def parse_fxdata(raw: str, effect_id: int = -1) -> Dict[str, Any]:
 
     # --- sliders / checkboxes
     if empty:
-        parts = ["!", "!"]
+        # Legacy sound-reactive effects (id >= 128) used all five sliders.
+        parts = ["!", "!"] if effect_id < 128 else ["!", "!", "!", "!", "!"]
     elif sliders_sec == "":
         parts = []
     else:
@@ -103,6 +104,8 @@ def parse_fxdata(raw: str, effect_id: int = -1) -> Dict[str, Any]:
 
     # --- flags
     flags = "1" if (empty or flags_sec.strip() == "") else flags_sec.strip()
+    if effect_id == 0:
+        flags = ""
 
     # --- defaults
     defaults: Dict[str, int] = {}

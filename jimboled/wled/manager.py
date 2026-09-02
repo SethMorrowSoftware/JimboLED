@@ -54,7 +54,9 @@ class DeviceRecord:
     fxdata: List[str] = field(default_factory=list)
     catalog: List[Dict[str, Any]] = field(default_factory=list)
     presets: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    palette_data: Dict[int, Any] = field(default_factory=dict)
     catalog_key: str = ""
+    presets_key: str = ""
     presets_loaded_at: float = 0.0
     last_seen: float = 0.0
     last_error: str = ""
@@ -342,11 +344,20 @@ class DeviceManager:
             rec.fxdata = rec.client.get_fxdata()
             rec.catalog = build_effect_catalog(rec.effects, rec.fxdata)
             rec.catalog_key = key
+            try:
+                rec.palette_data = rec.client.get_palette_data()
+            except WLEDError:
+                rec.palette_data = {}
             rec.presets = rec.client.get_presets()
             rec.presets_loaded_at = time.monotonic()
-        elif time.monotonic() - rec.presets_loaded_at > PRESET_REFRESH_S:
+            rec.presets_key = _presets_key(info)
+            return
+        # presets.json changed (mtime) or the device rebooted -> reload presets
+        pkey = _presets_key(info)
+        if pkey != rec.presets_key or time.monotonic() - rec.presets_loaded_at > PRESET_REFRESH_S:
             rec.presets = rec.client.get_presets()
             rec.presets_loaded_at = time.monotonic()
+            rec.presets_key = pkey
 
     def _notify(self, device_id: str) -> None:
         if self._on_change:
@@ -450,7 +461,7 @@ class DeviceManager:
             "state_full": rec.state,
             "info_full": rec.info,
             "effects": rec.catalog,
-            "palettes": palette_catalog(rec.palettes, rec.info or {}),
+            "palettes": _with_previews(palette_catalog(rec.palettes, rec.info or {}), rec.palette_data),
             "presets": _presets_list(rec.presets),
         })
         return base
@@ -550,6 +561,13 @@ class DeviceManager:
         return self._get(device_id).client
 
 
+def _presets_key(info: Dict[str, Any]) -> str:
+    """Changes when presets.json is rewritten or the device reboots (pmt resets to 0)."""
+    fs = info.get("fs") or {}
+    boot = int(time.time() - float(info.get("uptime") or 0)) // 5  # 5 s tolerance
+    return f"{fs.get('pmt')}|{boot}"
+
+
 def _name_at(names: List[str], idx: Any) -> Optional[str]:
     try:
         idx = int(idx)
@@ -558,6 +576,14 @@ def _name_at(names: List[str], idx: Any) -> Optional[str]:
     if 0 <= idx < len(names):
         return names[idx].split("@", 1)[0]
     return None
+
+
+def _with_previews(palettes: List[Dict[str, Any]], data: Dict[int, Any]) -> List[Dict[str, Any]]:
+    for pal in palettes:
+        stops = data.get(pal["id"])
+        if stops:
+            pal["stops"] = stops
+    return palettes
 
 
 def _presets_list(presets: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
