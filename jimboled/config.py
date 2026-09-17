@@ -90,14 +90,26 @@ class ConfigError(Exception):
     pass
 
 
-def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Return ``base`` updated with ``override`` recursively (dicts only)."""
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any], _path: str = "") -> Dict[str, Any]:
+    """Return ``base`` updated with ``override`` recursively (dicts only).
+
+    A value that would replace one of the default *sections* with something
+    that is not an object is dropped and logged. Every consumer treats
+    ``config["gpio"]`` and friends as objects, so a scalar there – a stray
+    ``"gpio": "mock"`` from a hand-edited file – would crash the service on
+    start-up, over and over. Losing one bad key beats never coming up.
+    """
     out = copy.deepcopy(base)
     for key, value in override.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = copy.deepcopy(value)
+        where = f"{_path}{key}"
+        if isinstance(out.get(key), dict):
+            if isinstance(value, dict):
+                out[key] = _deep_merge(out[key], value, f"{where}.")
+            else:
+                log.error("config.json: '%s' should be an object, not %s; using the default",
+                          where, type(value).__name__)
+            continue
+        out[key] = copy.deepcopy(value)
     return out
 
 

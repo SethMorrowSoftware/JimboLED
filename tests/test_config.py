@@ -109,3 +109,39 @@ def test_a_failed_write_leaves_memory_and_disk_agreeing(data_dir, monkeypatch):
     monkeypatch.undo()
     assert store.get()["dashboard"]["title"] == "Good"
     assert json.load(open(data_dir / "config.json"))["dashboard"]["title"] == "Good"
+
+
+def test_a_scalar_where_a_section_belongs_is_dropped(data_dir):
+    """Every consumer treats these as objects; a typo must not crash-loop the service."""
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({
+        "gpio": "mock",
+        "dashboard": ["oops"],
+        "server": {"port": 8080},
+        "devices": [{"id": "x", "host": "1.2.3.4"}],
+    }))
+    store = ConfigStore(data_dir)
+    cfg = store.get()
+    assert cfg["gpio"]["switches"] == [] and cfg["gpio"]["backend"] == "auto"
+    assert cfg["dashboard"]["title"] == "JimboLED"
+    assert cfg["server"]["port"] == 8080      # a good section is still honoured
+    assert cfg["devices"][0]["id"] == "x"
+
+
+def test_the_whole_app_starts_on_a_config_like_that(data_dir):
+    from jimboled import create_app
+
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({"gpio": "mock", "dashboard": 7, "wled": None}))
+    app = create_app(str(data_dir), testing=True)
+    ctx = app.extensions["jimboled"]
+    try:
+        client = app.test_client()
+        client.environ_base["HTTP_X_REQUESTED_WITH"] = "JimboLED"
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/api/state").status_code == 200
+        assert client.get("/").status_code == 200
+    finally:
+        ctx.gpio.stop()
+        ctx.devices.stop()
+        ctx.discovery.listener.stop()
