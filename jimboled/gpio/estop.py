@@ -32,14 +32,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from ..atomicio import write_json_atomic
 from .common import GPIOError, as_bool, check_pin
 
 log = logging.getLogger(__name__)
@@ -52,6 +51,18 @@ STATE_VERSION = 1
 # consecutive watchdog ticks (~200 ms) debounce contact bounce without making
 # a real press feel sluggish.
 INPUT_DEBOUNCE_TICKS = 2
+
+
+def _new_input_state(tripped: bool = False) -> Dict[str, Any]:
+    """Per-input bookkeeping.
+
+    ``tripped`` is what the pin currently says and decides whether a reset is
+    allowed; ``reported`` is whether that trip has already been handed to the
+    manager, so a button that is *already* held when we open the pin still
+    latches on the first poll.
+    """
+    return {"tripped": tripped, "reported": False, "error": "",
+            "streak": INPUT_DEBOUNCE_TICKS if tripped else 0, "value": None}
 
 
 @dataclass
@@ -225,23 +236,12 @@ class LatchStore:
             return out
 
     def save(self, engaged: Dict[str, Dict[str, Any]]) -> None:
-        payload = json.dumps({"version": STATE_VERSION, "engaged": engaged}, indent=2)
         with self._lock:
             try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                fd, tmp = tempfile.mkstemp(prefix=".estop-", suffix=".json", dir=str(self.path.parent))
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                        fh.write(payload)
-                        fh.flush()
-                        os.fsync(fh.fileno())
-                    os.replace(tmp, self.path)
-                finally:
-                    if os.path.exists(tmp):
-                        try:
-                            os.unlink(tmp)
-                        except OSError:
-                            pass
+                # Durable, not merely atomic: a latch that a power cut can undo
+                # is not a latch, and a power cut is the likeliest thing to
+                # happen while an emergency is being written down.
+                write_json_atomic(self.path, {"version": STATE_VERSION, "engaged": engaged}, indent=2)
             except OSError as exc:
                 # Losing the file must never stop us latching in memory.
                 log.error("could not persist emergency stop state: %s", exc)
@@ -317,10 +317,15 @@ class EStopController:
         self._factory = factory
         self.simulated = bool(simulated)
         for item in self.inputs:
-            state = {"tripped": False, "error": "", "streak": 0, "value": None}
+            # Start every input at "tripped": until we have actually read the
+            # pin we do not know whether a button is being held, and a reset
+            # that slips through the gap is a lock-out somebody cleared while
+            # standing on the emergency stop.
+            state = _new_input_state(tripped=True)
             self._input_state[item.id] = state
             if not item.enabled:
-                state["error"] = "disabled"
+                # Disabled on purpose, so it blocks nothing.
+                state.update(tripped=False, streak=0, error="disabled")
                 continue
             if factory is None:
                 state["error"] = "GPIO library unavailable"
@@ -342,6 +347,29 @@ class EStopController:
                 state["error"] = f"{type(exc).__name__}: {exc}"
                 log.error("Could not open emergency stop input GPIO%s ('%s'): %s",
                           item.pin, item.name, state["error"])
+        # One read now, so the state above is the truth rather than a guess by
+        # the time anybody asks whether a reset is allowed.  Trips found here
+        # are reported by the next poll(), which is what latches them.
+        self._prime_inputs()
+
+    def _prime_inputs(self) -> None:
+        """Read every freshly opened input once so its state is real, not assumed."""
+        for item in self.inputs:
+            dev = self._devices.get(item.id)
+            state = self._input_state.get(item.id)
+            if dev is None or state is None or not item.enabled:
+                continue
+            try:
+                value = int(dev.value)
+            except Exception as exc:
+                state["error"] = f"{type(exc).__name__}: {exc}"
+                continue
+            state["value"] = value
+            state["error"] = ""
+            tripped = value != item.healthy_value
+            state["tripped"] = tripped
+            state["reported"] = False
+            state["streak"] = INPUT_DEBOUNCE_TICKS if tripped else 0
 
     @staticmethod
     def _drive_mock(dev: Any, item: EStopInput) -> None:
@@ -461,7 +489,7 @@ class EStopController:
         for item in self.inputs:
             if not item.enabled:
                 continue
-            state = self._input_state.setdefault(item.id, {"tripped": False, "error": "", "streak": 0, "value": None})
+            state = self._input_state.setdefault(item.id, _new_input_state(tripped=True))
             dev = self._devices.get(item.id)
             if dev is None:
                 # Record *why* as well as latching: "cannot read the button" and
@@ -484,15 +512,22 @@ class EStopController:
                 state["streak"] = int(state.get("streak", 0)) + 1
             else:
                 state["streak"] = 0
-            was = bool(state.get("tripped"))
             # Latch after a short debounce; clear immediately so the UI shows a
             # released button at once (the latch itself stays until a reset).
             if tripped and state["streak"] >= INPUT_DEBOUNCE_TICKS:
                 state["tripped"] = True
             elif not tripped:
                 state["tripped"] = False
-            if state["tripped"] and not was:
-                trips.append({"zone": self._input_zone_id(item), "name": item.name, "reason": reason})
+            if state["tripped"]:
+                # ``reported`` rather than the previous value of ``tripped``:
+                # a button already held when the pin was opened starts out
+                # tripped (so it blocks a reset straight away) and must still
+                # be handed over once, so it latches.
+                if not state.get("reported"):
+                    state["reported"] = True
+                    trips.append({"zone": self._input_zone_id(item), "name": item.name, "reason": reason})
+            else:
+                state["reported"] = False
         return trips
 
     # -------------------------------------------------------------- reporting

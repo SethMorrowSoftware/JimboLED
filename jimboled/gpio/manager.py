@@ -51,6 +51,40 @@ MODES = ("toggle", "momentary", "pulse")
 WATCHDOG_TICK_S = 0.1
 DEFAULT_PULSE_MS = 500
 DEFAULT_MAX_ON = {"toggle": 0, "momentary": 60, "pulse": 0}
+# Grace on top of a pin test's own duration before the watchdog takes the pin
+# away from the request that asked for it.
+TEST_PIN_GRACE_S = 1.0
+
+
+class _GuardedLock:
+    """An ``RLock`` that also tells us how deep the current thread is inside it.
+
+    Everything here runs under one lock, which is what makes the safety rules
+    easy to reason about – and exactly why nothing may ever *sleep* while
+    holding it: a single waiting caller would freeze every other switch, the
+    hold-to-run heartbeats, ``all_off`` and the watchdog.  The depth counter
+    lets the one method that does wait (:meth:`GPIOManager._energise`) prove it
+    was called from outside the lock instead of trusting every caller to
+    remember.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    @property
+    def depth(self) -> int:
+        return getattr(self._local, "depth", 0)
+
+    def __enter__(self) -> "_GuardedLock":
+        self._lock.acquire()
+        self._local.depth = self.depth + 1
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        self._local.depth = self.depth - 1
+        self._lock.release()
+        return False
 
 
 @dataclass
@@ -147,6 +181,19 @@ def validate_switches(raw_list: List[Dict[str, Any]]) -> List[SwitchConfig]:
 
 
 @dataclass
+class _TestPin:
+    """A bare pin energised by *Test this pin*, owned by no switch.
+
+    It is registered with the manager before it is driven high so the watchdog
+    and every emergency stop can reach it: a relay nobody owns is exactly the
+    one that must not outlive a stop.
+    """
+
+    device: Any
+    expires_at: float
+
+
+@dataclass
 class _Runtime:
     cfg: SwitchConfig
     device: Any = None            # gpiozero OutputDevice (or None if failed)
@@ -169,8 +216,9 @@ class GPIOManager:
 
     def __init__(self, config_store, *, on_event=None):
         self.store = config_store
-        self._lock = threading.RLock()
+        self._lock = _GuardedLock()
         self._switches: Dict[str, _Runtime] = {}
+        self._test_pins: Dict[int, _TestPin] = {}
         self._group_block_until: Dict[str, float] = {}
         self._events: Deque[Dict[str, Any]] = collections.deque(maxlen=200)
         self._factory = None
@@ -208,6 +256,8 @@ class GPIOManager:
         self.started = False
         self._stop.set()
         with self._lock:
+            for pin in list(self._test_pins):
+                self._release_test_pin(pin)
             for rt in self._switches.values():
                 self._set_off(rt, "shutdown")
                 self._close_device(rt)
@@ -223,6 +273,10 @@ class GPIOManager:
         self._hold_timeout = float(g_after.get("hold_timeout_s", 1.5))
         if g_before.get("backend") != g_after.get("backend"):
             with self._lock:
+                # Every pin has to let go of the old factory before it closes,
+                # including one a pin test is holding.
+                for pin in list(self._test_pins):
+                    self._release_test_pin(pin)
                 for rt in self._switches.values():
                     self._set_off(rt, "reconfigure")
                     self._close_device(rt)
@@ -341,8 +395,13 @@ class GPIOManager:
         """Turn a switch on, honouring interlocks and the group dead time.
 
         The dead-time wait happens *outside* the lock so heartbeats, releases
-        and the watchdog keep running for every other switch meanwhile.
+        and the watchdog keep running for every other switch meanwhile.  Call
+        this only from a caller that has already let the lock go: waiting here
+        while holding it would stall every other relay, ``all_off`` and the
+        emergency stop for as long as the dead time lasts.
         """
+        if self._lock.depth:  # pragma: no cover - guards against a future refactor
+            raise RuntimeError("_energise() must be called without the GPIO lock held")
         deadline = time.monotonic() + 10.0
         while True:
             with self._lock:
@@ -406,8 +465,11 @@ class GPIOManager:
             self._check_estop(rt)
             if rt.cfg.mode == "momentary":
                 raise GPIOError(f"'{rt.cfg.name}' is a hold-to-run switch; use press/heartbeat/release")
-            if rt.cfg.mode == "pulse":
-                return self.pulse(switch_id, source=source)
+            mode = rt.cfg.mode
+        # Both branches below can wait out an interlock dead time, so they run
+        # with the lock released.
+        if mode == "pulse":
+            return self.pulse(switch_id, source=source)
         rt = self._energise(switch_id, source)
         with self._lock:
             return self._snapshot_one(rt)
@@ -424,9 +486,10 @@ class GPIOManager:
         with self._lock:
             rt = self._get(switch_id)
             if rt.on:
+                # Turning off never waits, so it can stay under the lock.
                 return self.turn_off(switch_id, source)
             self._check_estop(rt)
-            return self.turn_on(switch_id, source)
+        return self.turn_on(switch_id, source)
 
     def pulse(self, switch_id: str, duration_ms: Optional[int] = None, source: str = "api") -> Dict[str, Any]:
         with self._lock:
@@ -522,6 +585,14 @@ class GPIOManager:
                     rt.device.off()
                 except Exception as exc:
                     log.error("emergency stop could not drive GPIO%s off: %s", rt.cfg.pin, exc)
+        # A pin held by *Test this pin* belongs to no switch, so the loop above
+        # cannot see it.  A master stop covers the whole header, and a relay
+        # nobody owns is exactly the one that must not outlive a stop.
+        if self._test_pins and any(z.scope == "all" and self.estop.is_engaged(z.id)
+                                   for z in self.estop.all_zones()):
+            for pin in list(self._test_pins):
+                stopped.append(f"GPIO{pin} (pin test)")
+                self._release_test_pin(pin)
         return stopped
 
     def engage_estop(self, zone_id: str = MASTER_ZONE_ID, reason: str = "", source: str = "web") -> Dict[str, Any]:
@@ -565,6 +636,20 @@ class GPIOManager:
         with self._lock:
             return self.estop.snapshot([rt.cfg for rt in self._switches.values()])
 
+    def _release_test_pin(self, pin: int) -> None:
+        """Drive a pin-test output off and let go of the pin.  Caller holds the lock."""
+        entry = self._test_pins.pop(pin, None)
+        if entry is None:
+            return
+        try:
+            entry.device.off()
+        except Exception as exc:
+            log.error("could not turn pin test on GPIO%s off: %s", pin, exc)
+        try:
+            entry.device.close()
+        except Exception:
+            pass
+
     def test_pin(self, pin: int, active_high: bool, duration_ms: int = 300) -> bool:
         """Briefly pulse a pin so the user can identify the relay."""
         duration_ms = max(20, min(int(duration_ms), 2000))
@@ -591,21 +676,27 @@ class GPIOManager:
                 for item in self.estop.inputs:
                     if item.pin == pin:
                         raise GPIOError(f"GPIO{pin} is the '{item.name}' emergency stop input, not an output")
+                if pin in self._test_pins:
+                    raise GPIOError(f"GPIO{pin} is already being tested")
                 from gpiozero import OutputDevice
 
                 dev = OutputDevice(pin, active_high=active_high, initial_value=False, pin_factory=self._factory)
-                dev.on()
+                # Registered *before* it is energised, so from this moment on an
+                # emergency stop and the watchdog can both take it away again.
+                self._test_pins[pin] = _TestPin(
+                    device=dev, expires_at=time.monotonic() + duration_ms / 1000.0 + TEST_PIN_GRACE_S)
+                try:
+                    dev.on()
+                except Exception:
+                    self._release_test_pin(pin)
+                    raise
         if configured is not None:
             self.pulse(configured, duration_ms, source="test")
             return True
-        try:
-            time.sleep(duration_ms / 1000.0)
-        finally:
-            with self._lock:
-                try:
-                    dev.off()
-                finally:
-                    dev.close()
+        # ``_stop`` rather than sleep(): a shutdown mid-test releases the pin at once.
+        self._stop.wait(duration_ms / 1000.0)
+        with self._lock:
+            self._release_test_pin(pin)
         return True
 
     # ------------------------------------------------------------- watchdog
@@ -633,6 +724,12 @@ class GPIOManager:
                             log.exception("gpio event callback failed")
                     self._enforce_estop(force=True, reason="estop-hardware")
             self._enforce_estop()
+            # A pin test whose request thread died (a dropped connection, a
+            # worker killed mid-pulse) must not leave the pin driving a relay.
+            for pin, entry in list(self._test_pins.items()):
+                if now > entry.expires_at:
+                    log.warning("pin test on GPIO%s outlived its window; releasing it", pin)
+                    self._release_test_pin(pin)
             for rt in self._switches.values():
                 cfg = rt.cfg
                 if rt.on:

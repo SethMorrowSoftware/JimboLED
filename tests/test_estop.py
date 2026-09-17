@@ -187,6 +187,30 @@ def test_test_pin_is_refused_while_latched(data_dir):
         m.stop()
 
 
+def test_a_stop_cuts_a_pin_test_that_is_already_running(data_dir):
+    """The pin under test belongs to no switch, so nothing else can reach it."""
+    import threading
+
+    _, m = make_manager(data_dir, [BED])
+    try:
+        tester = threading.Thread(target=m.test_pin, args=(23, True, 1500))
+        tester.start()
+        deadline = time.time() + 1.0
+        while 23 not in m._test_pins and time.time() < deadline:
+            time.sleep(0.01)
+        dev = m._test_pins[23].device
+        pin = dev.pin  # keep the pin itself: releasing closes the device
+        assert dev.value == 1
+
+        result = m.engage_estop(MASTER_ZONE_ID, reason="mid-test")
+        assert dev.closed and pin.state == 0
+        assert 23 not in m._test_pins
+        assert any("GPIO23" in name for name in result["stopped"])
+        tester.join(timeout=5)
+    finally:
+        m.stop()
+
+
 # --------------------------------------------------------- hardware inputs
 def hardware_manager(data_dir, **input_cfg):
     cfg = {"id": "e1", "name": "Bedside button", "pin": 26, "zone": MASTER_ZONE_ID,
@@ -212,6 +236,35 @@ def test_hardware_button_latches_and_blocks_reset_while_held(data_dir):
         time.sleep(0.3)
         m.reset_estop(MASTER_ZONE_ID)
         assert m.turn_on("up")["on"]
+    finally:
+        m.stop()
+
+
+def test_reopening_inputs_reads_them_instead_of_assuming(data_dir):
+    """Reopening the inputs used to blank their state until the next poll.
+
+    In that gap ``blocking_inputs()`` said "nothing is holding this down", so a
+    phone could clear a lock-out while somebody stood on the mushroom button.
+    """
+    store, m = hardware_manager(data_dir)
+    try:
+        # Any estop edit reopens every input.
+        store.update(lambda c: c["gpio"]["estop"].update({"master_name": "Everything"}))
+        assert m.estop._input_state["e1"]["value"] is not None, "state must come from a read, not a guess"
+    finally:
+        m.stop()
+
+
+def test_a_button_already_held_when_the_pin_opens_still_latches(data_dir):
+    """A trip found by the priming read must still be handed over once."""
+    _, m = hardware_manager(data_dir)
+    try:
+        m.estop._devices["e1"].pin.drive_high()   # as if held from boot
+        m.estop._prime_inputs()
+        assert m.estop.blocking_inputs(MASTER_ZONE_ID) == ["Bedside button"]
+        time.sleep(0.4)
+        assert m.snapshot()["estop"]["engaged_zones"] == [MASTER_ZONE_ID]
+        assert not state(m, "up")["available"] or not state(m, "up")["on"]
     finally:
         m.stop()
 
