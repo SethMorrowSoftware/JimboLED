@@ -58,18 +58,57 @@ curl -s -X POST -H 'X-Requested-With: JimboLED' -H 'Content-Type: application/js
 | PUT | `/api/gpio/switches/<id>` | same fields |
 | DELETE | `/api/gpio/switches/<id>` | |
 | POST | `/api/gpio/switches/<id>/action` | `{"action":"on"|"off"|"toggle"|"pulse"}`; hold-to-run: `{"action":"press"}` → returns `switch.token`, then `{"action":"heartbeat","token":…}` at least every second, then `{"action":"release","token":…}` |
-| POST | `/api/gpio/all-off` | release every relay |
+| POST | `/api/gpio/all-off` | release every relay (does **not** latch – see the emergency stop below) |
 | POST | `/api/gpio/test` | `{"pin":22,"active_high":true,"duration_ms":400}` – pulse an unconfigured pin |
 | GET | `/api/gpio/events` | recent on/off log with reasons |
 
 A momentary switch **cannot** be turned on with `on`; it only runs while
 heartbeats arrive, and it always has a maximum on-time.
 
+## Emergency stop
+
+`all-off` and `shutdown-all` release everything, and the next request can turn
+it straight back on. An **emergency stop** latches: every relay it covers is
+held off and every attempt to energise one is refused with **409** until the
+stop is reset.
+
+| Method | Path | Body / notes |
+| --- | --- | --- |
+| GET | `/api/estop` | `engaged`, `engaged_zones[]`, `zones[]` (each with what it covers and whether a button is holding it), `inputs[]` |
+| POST | `/api/estop/engage` | `{"zone":"all","reason":"optional note"}` – `zone` defaults to `all`. Idempotent. |
+| POST | `/api/estop/reset` | `{"zone":"all"}` – **400** while a physical button is still held |
+| GET / POST | `/api/estop/zones` | `{"name":"Bed","scope":"group"\|"switch","refs":["bed-head"],"icon":"bed","color":"#f87171"}` |
+| PUT / DELETE | `/api/estop/zones/<id>` | the built-in `all` zone cannot be edited or removed |
+| POST | `/api/estop/inputs` | `{"name":"Bedside button","pin":26,"zone":"all","normally_closed":true,"pull":"up"}` |
+| PUT / DELETE | `/api/estop/inputs/<id>` | |
+| PUT | `/api/estop/settings` | `master_name` |
+
+```bash
+# stop the bed, then read back what is locked out
+curl -s -X POST -H 'X-Requested-With: JimboLED' -H 'Content-Type: application/json' \
+  http://jimboled.local/api/estop/engage -d '{"zone":"stop-1a2b3c4d","reason":"motor stuck"}'
+```
+
+A request refused by a latch answers with the zone, so a client can offer the
+right reset without another round trip:
+
+```json
+{ "error": "Emergency stop \u201cBed\u201d is engaged \u2026", "estop": true,
+  "zone": "stop-1a2b3c4d", "zone_name": "Bed" }
+```
+
+Each switch in `/api/state` and `/api/gpio` also carries `locked_out`,
+`locked_by` and `locked_zone`.
+
+The latch lives in `estop.json` next to `config.json`, so it survives a
+restart, a crash and a power cut. It is runtime state, not configuration, so
+it is deliberately **not** part of a backup.
+
 ## Dashboard, scenes, settings
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET / PUT | `/api/dashboard` | `title`, `subtitle`, `theme` (midnight/graphite/ocean/oled), `accent`, `density`, `show_offline`, `show_clock`, `tiles[]`, `scenes[]` |
+| GET / PUT | `/api/dashboard` | `title`, `subtitle`, `theme` (`auto`/midnight/graphite/ocean/oled/daylight/paper), `accent`, `density` (comfortable/compact/roomy), `radius` (sharp/soft/round), `text_scale` (85–150 %), `show_offline`, `show_clock`, `show_estop`, `tiles[]`, `scenes[]` |
 | POST | `/api/dashboard/tiles` | add a `heading`, `note`, `clock` or `all` tile |
 | PUT / DELETE | `/api/dashboard/tiles/<id>` | `size` (s/m/l/xl), `hidden`, `name`, `icon`, `color`, `opts` |
 | POST | `/api/dashboard/order` | `{"ids":[…]}` |
@@ -90,5 +129,5 @@ heartbeats arrive, and it always has a maximum on-time.
 | POST | `/api/restore` | upload a backup (multipart `file` or raw JSON body) |
 | GET | `/api/backups` · POST `/api/backups/<name>/restore` | automatic snapshots |
 | POST | `/api/system/restart`, `/reboot`, `/update/check`, `/update` | need the installed helper |
-| POST | `/api/system/shutdown-all` | panic: every relay off, every light off |
+| POST | `/api/system/shutdown-all` | *All off*: every relay off, every light off. Convenience, not a latch. |
 | GET | `/healthz` | `{"ok":true,"version":"…"}` |

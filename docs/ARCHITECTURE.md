@@ -16,6 +16,7 @@ waitress (8 threads) ──► Flask app (jimboled/)
                           ├── /api/state       aggregate snapshot polled by browsers every 2 s
                           ├── /api/devices     WLED CRUD, control, presets, discovery
                           ├── /api/gpio        switch CRUD, press/heartbeat/release, all-off
+                          ├── /api/estop       emergency-stop zones, inputs, engage/reset
                           ├── /api/dashboard   tiles, appearance, scenes
                           ├── /api/settings    polling, safety, password
                           └── /api/system      info, logs, backup/restore, restart/update/reboot
@@ -24,6 +25,7 @@ waitress (8 threads) ──► Flask app (jimboled/)
                           │     └── WLEDClient (wled/client.py)   requests.Session, short timeouts, busy retry
                           ├── DiscoveryService (wled/discovery.py) avahi / built-in mDNS / UDP 65506 / sweep
                           ├── GPIOManager     (gpio/manager.py)  gpiozero OutputDevices + 100 ms watchdog
+                          │     └── EStopController (gpio/estop.py) latch state + DigitalInputDevices
                           └── ConfigStore     (config.py)        atomic JSON + rolling backups
 ```
 
@@ -42,7 +44,7 @@ front end re-fetches the (larger) dashboard layout only when `cfg_rev` moves.
 | `/opt/jimboled/app` | application code, rsynced from the git clone by `install.sh` |
 | `/opt/jimboled/venv` | Python virtualenv (`--system-site-packages` so apt's gpiozero/lgpio are used) |
 | `/opt/jimboled/app/bin/jimboled-helper` | root-only helper reachable via a one-line sudoers rule |
-| `/var/lib/jimboled` | **user data**: `config.json`, `backups/` – never touched by installs |
+| `/var/lib/jimboled` | **user data**: `config.json`, `estop.json`, `backups/` – never touched by installs |
 | `/etc/jimboled/install.env` | install metadata (clone path, owner, port, git revision) |
 | `/etc/jimboled/jimboled.env` | optional service overrides loaded by systemd |
 | `/etc/systemd/system/jimboled.service` | service unit |
@@ -68,6 +70,40 @@ Two more helper commands keep relays safe outside the Python process:
 * `bootpins` – writes `gpio=<pin>=op,<dl|dh>` lines into `config.txt` so the
   firmware holds relays off from power-on until the service starts.
 
+## Emergency stop
+
+`all_off()` is a convenience: it releases every relay, and the next request can
+energise one again. An emergency stop *latches*, which is a different thing and
+lives in `gpio/estop.py`.
+
+* A **zone** says what a stop covers: the built-in `all` zone covers every
+  switch; user zones cover an `interlock_group` or a list of switch ids. So a
+  caravan can stop the awning without locking out the bed.
+* `GPIOManager._check_estop()` guards every energising path – `turn_on`,
+  `toggle`, `pulse`, `press`, scene actions and `test_pin` – and is re-checked
+  inside `_energise`'s retry loop, so a stop that latches during an interlock
+  dead time still blocks. `turn_off`, `release` and `all_off` are never
+  blocked: safety only ever runs one way.
+* The watchdog polls hardware inputs first on every 100 ms tick, then drives
+  every covered relay off again, so a wedged output cannot outlive a stop.
+* **Hardware inputs** are `gpiozero.DigitalInputDevice`s. gpiozero reports
+  `value == 1` for "active" – a LOW pin under a pull-up, a HIGH pin under a
+  pull-down – so one rule covers both wirings: a closed normally-closed loop
+  reads 1, and anything else (a press, a cut wire, an unreadable pin) latches
+  after two consecutive ticks of debounce.
+* In simulation the mock pin is parked at the level a healthy button would
+  hold, because a mock pin floats at its pull level and would otherwise boot a
+  laptop straight into a latch nobody can clear.
+* Latch state lives in `estop.json`, not in `config.json`: it must survive a
+  crash and a restart, it must not churn the configuration backups, and
+  restoring last week's settings must not restore last week's emergency.
+  Writing it never happens while the GPIO lock is held, which keeps the
+  config-store and GPIO locks strictly ordered.
+
+`gpio/common.py` holds the pin tables and error types both `manager.py` and
+`estop.py` need; `manager.py` re-exports every name, so
+`from jimboled.gpio.manager import GPIOError` still works.
+
 ## Safety model for GPIO
 
 * Every switch has a `mode`: `toggle`, `momentary` (hold-to-run) or `pulse`.
@@ -85,6 +121,7 @@ Two more helper commands keep relays safe outside the Python process:
   active-low output is claimed *with* its safe level (no LOW blip).
 * Without GPIO hardware/libraries the app uses gpiozero's mock factory and the
   UI shows a clear "simulated" badge.
+* A latched emergency stop outranks all of the above; see the section above.
 
 ## WLED integration notes
 
@@ -98,6 +135,25 @@ Two more helper commands keep relays safe outside the Python process:
   JSON buffer) and HTTP 503 "busy" answers are retried briefly.
 * The effect metadata parser mirrors WLED's own UI rules so each effect shows
   exactly the sliders, checkboxes, colour slots and palette it uses.
+
+## Front-end layers
+
+No build step: the browser loads the files in `static/js/` in order and each
+attaches one global (`UI`, `api`, `GPIO`, `EStop`, `Device`, `Settings`,
+`Wizard`, `App`).
+
+`static/css/app.css` is layered deliberately:
+
+1. **Foundation** – type, spacing, radius, elevation and motion scales. Type is
+   a rem scale driven by `--text-scale`, so Settings → Appearance → Text size
+   scales the whole interface; spacing stays in px so that never reflows the
+   grid.
+2. **Theme** – every theme defines the same complete token set, including
+   `--on-accent`, `--sheen`, `--shadow-color` and per-status foregrounds, so a
+   component rule never needs to know whether it is light or dark. Theme
+   selectors are scoped to `:root` (or an explicit `.theme-swatch`, which is
+   how the Settings chips preview their own palette).
+3. **Components** – built only from layers 1 and 2.
 
 ## Config file
 

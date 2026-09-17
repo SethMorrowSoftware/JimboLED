@@ -52,6 +52,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "interlock_dead_time_ms": 250,
         # Seconds without a heartbeat before a held (momentary) switch releases.
         "hold_timeout_s": 1.5,
+        # Emergency stop.  ``zones`` are extra, scoped stops on top of the
+        # built-in master stop; ``inputs`` are physical buttons wired to GPIO
+        # inputs.  The latch itself is runtime state and lives in estop.json.
+        "estop": {
+            "master_name": "All relays",
+            "confirm_engage": False,
+            "zones": [],
+            "inputs": [],
+        },
     },
     "wled": {
         "poll_interval_s": 3.0,
@@ -61,11 +70,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dashboard": {
         "title": "JimboLED",
         "subtitle": "",
-        "theme": "midnight",     # midnight | graphite | oled
+        "theme": "midnight",     # see dashboard.THEMES; "auto" follows the device
         "accent": "#7c5cff",
-        "density": "comfortable",  # comfortable | compact
+        "density": "comfortable",  # comfortable | compact | roomy
+        "text_scale": 100,         # 85-150 %, for readability at arm's length
+        "radius": "soft",          # sharp | soft | round
         "show_offline": True,
         "show_clock": True,
+        "show_estop": True,        # the red emergency-stop button in the header
         "tiles": [],              # ordered list of tile descriptors, see dashboard.py
         "quick_presets": [],      # [{"id":..., "name":..., "actions":[...]}]
     },

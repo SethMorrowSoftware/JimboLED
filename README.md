@@ -19,8 +19,9 @@
 
 * **Controls any number of WLED controllers** – power, brightness, colours (incl. white / CCT), every effect with its own sliders and options, palettes, presets & playlists, segments, sleep timer, sync, reboot… Finds them on your network automatically.
 * **Drives relays from the Pi's GPIO pins** – on/off switches, tap (pulse) buttons and *hold‑to‑run* buttons that only move a motor while your finger is on the screen. Built‑in safety rules (interlocks, time limits, watchdog) so an adjustable bed can never run away.
-* **Customisable dashboard** – drag tiles into any order, resize, hide, rename, add headings, notes, a clock, and one‑tap **scenes** ("Goodnight" = all lights off + bed flat). Four dark themes and any accent colour.
-* **Made for non‑technical users** – a setup wizard, plain‑language settings, confirmations where they matter, an **All off** panic button, automatic backups, one‑click updates.
+* **Latching emergency stops** – a red **E‑stop** in the header, and optionally a real mushroom button wired to the Pi. Unlike *All off*, a stop **latches**: the relays it covers stay locked out until somebody resets it. Give the bed and the awning separate stops so one does not lock out the other.
+* **Customisable dashboard** – drag tiles into any order, resize, hide, rename, add headings, notes, a clock, and one‑tap **scenes** ("Goodnight" = all lights off + bed flat). Four dark themes, two light ones, one that follows your phone, any accent colour, and text you can scale up to 150 %.
+* **Made for non‑technical users** – a setup wizard, plain‑language settings, confirmations where they matter, an **All off** button, automatic backups, one‑click updates.
 
 ## Install (Raspberry Pi)
 
@@ -48,6 +49,7 @@ See **[docs/WIRING.md](docs/WIRING.md)** for the full guide. The short version:
 * Use a common opto‑isolated **5 V relay module**; power its coils from 5 V, its logic (VCC) from the Pi's 3.3 V, and connect each `IN` pin to a GPIO.
 * Wire each relay's contacts **in parallel with a button of the bed's wired remote** (most beds: the remote just closes a low‑voltage contact). The bed's own control box keeps all its safety features; the original remote keeps working.
 * In JimboLED, use the **Bed template** (Settings → Switches): two *hold‑to‑run* switches, interlocked so "up" and "down" can never be energised together, with a 60‑second limit.
+* Optionally wire a **normally‑closed emergency‑stop button** between a spare GPIO and GND (Settings → Emergency stop). Pressing it – or a broken wire – cuts and locks the relays within about a fifth of a second.
 
 <p align="center">
   <img src="docs/screenshots/device-panel.png" width="560" alt="Controller panel"> <img src="docs/screenshots/mobile.png" width="200" alt="Mobile view">
@@ -59,7 +61,20 @@ See **[docs/WIRING.md](docs/WIRING.md)** for the full guide. The short version:
 * Every switch can have a maximum on‑time. Hold‑to‑run switches always have one.
 * Switches in the same **interlock group** are mutually exclusive, with a dead time between switching.
 * All relays are released when JimboLED starts, stops, restarts, or crashes – and the installer records the pins in `config.txt` so they stay off from power‑on.
-* **All off** in the header releases every relay and turns every light off at once.
+* **All off** in the header releases every relay and turns every light off at once. It is a convenience: anything can be switched straight back on.
+
+### Emergency stops
+
+An emergency stop is the one that **latches**:
+
+* While a stop is engaged, every relay it covers is held off and every attempt to energise one is refused – from every phone, every scene, and the REST API – until somebody resets it.
+* **Zones** decide what a stop covers: the built‑in master covers everything, and you can add one per moving thing (*Bed*, *Awning*) so stopping one leaves the others working.
+* A **physical button** can be wired to a GPIO input. The recommended normally‑closed wiring means a press, a pulled plug or a chewed cable all latch the stop; a button JimboLED cannot read counts as pressed.
+* Resetting is refused while a physical button is still held, so a stop cannot be cleared from a phone while somebody is holding it down.
+* The latch survives a restart, a crash and a power cut – a lock‑out that clears itself on restart is not a lock‑out.
+* Turning things **off** is never blocked. Safety only ever runs one way.
+
+See **[docs/WIRING.md](docs/WIRING.md) § 6** for the button, and *Settings → Emergency stop* for zones.
 
 ## Running elsewhere (development)
 
@@ -77,11 +92,15 @@ Tests: `pip install pytest && pytest`. A fake WLED controller for demos: `python
 
 Everything is in one file: `/var/lib/jimboled/config.json` (or `./data/config.json` in development). Back it up from Settings → Backup. Automatic snapshots are kept in `backups/`.
 
+Next to it, `estop.json` records which emergency stops are currently latched. That is runtime state rather than configuration, so it is deliberately not part of a backup – restoring last week's settings must not also restore last week's emergency.
+
 | Setting | Where |
 | --- | --- |
 | Port, dashboard password | Settings → Security / System (or `server.port` in config.json) |
 | Polling speed, time‑outs | Settings → Controllers |
 | Relay safety (dead time, hold time‑out, GPIO driver) | Settings → Switches |
+| Emergency stop zones and physical buttons | Settings → Emergency stop |
+| Theme, accent, spacing, corners, text size | Settings → Appearance |
 | Service overrides (`JIMBOLED_THREADS`, `GPIOZERO_PIN_FACTORY=mock`) | `/etc/jimboled/jimboled.env` |
 
 ## Troubleshooting

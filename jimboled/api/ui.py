@@ -9,12 +9,36 @@ from .. import __version__, get_ctx
 bp = Blueprint("ui", __name__)
 
 
+# Browser chrome colour per theme, so the phone's status bar matches the page.
+THEME_COLORS = {
+    "midnight": "#0b0d14", "graphite": "#111214", "oled": "#000000", "ocean": "#061019",
+    "daylight": "#f4f5f9", "paper": "#efece6", "auto": "#0b0d14",
+}
+
+
+def _appearance(dash: dict) -> dict:
+    """The handful of values the first paint needs, so nothing flashes."""
+    theme = dash.get("theme") or "midnight"
+    try:
+        scale = max(85, min(150, int(dash.get("text_scale") or 100))) / 100.0
+    except (TypeError, ValueError):
+        scale = 1.0
+    return {
+        "title": dash.get("title") or "JimboLED",
+        "accent": dash.get("accent") or "#7c5cff",
+        "theme": theme,
+        "density": dash.get("density") or "comfortable",
+        "radius": dash.get("radius") or "soft",
+        "text_scale": f"{scale:.3f}",
+        "theme_color": THEME_COLORS.get(theme, "#0b0d14"),
+    }
+
+
 @bp.get("/")
 def index():
     ctx = get_ctx()
     dash = ctx.store.section("dashboard") or {}
-    return render_template("index.html", version=__version__, title=dash.get("title") or "JimboLED",
-                           accent=dash.get("accent") or "#7c5cff", theme=dash.get("theme") or "midnight")
+    return render_template("index.html", version=__version__, **_appearance(dash))
 
 
 @bp.route("/login", methods=["GET", "POST"])
@@ -36,8 +60,7 @@ def login():
             return redirect(nxt)
         error = "Wrong password, try again."
     dash = ctx.store.section("dashboard") or {}
-    return render_template("login.html", error=error, title=dash.get("title") or "JimboLED",
-                           accent=dash.get("accent") or "#7c5cff", theme=dash.get("theme") or "midnight"), (401 if error else 200)
+    return render_template("login.html", error=error, **_appearance(dash)), (401 if error else 200)
 
 
 @bp.get("/logout")

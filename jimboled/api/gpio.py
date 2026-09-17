@@ -14,6 +14,17 @@ from .dashboard import ensure_tile, remove_tile
 bp = Blueprint("gpio", __name__)
 
 
+def _check_estop_pin(cfg: Dict[str, Any], pin: int) -> None:
+    """Refuse a relay pin that an emergency-stop *input* already owns.
+
+    Driving that pin as an output would fight the button's pull resistor and
+    silently disarm the stop, so the clash is rejected rather than resolved.
+    """
+    for item in (cfg.get("gpio", {}).get("estop", {}) or {}).get("inputs", []):
+        if item.get("pin") == pin:
+            raise APIError(f"GPIO{pin} is used by the emergency stop button '{item.get('name') or item.get('id')}'")
+
+
 @bp.get("/gpio")
 def gpio_status():
     return ok(get_ctx().gpio.snapshot())
@@ -44,6 +55,7 @@ def add_switch():
 
     def mutate(c):
         switches = c["gpio"].setdefault("switches", [])
+        _check_estop_pin(c, cfg.pin)
         validate_switches(switches + [cfg.to_dict()])
         switches.append(cfg.to_dict())
         ensure_tile(c, "switch", cfg.id, cfg.name)
@@ -65,6 +77,7 @@ def update_switch(switch_id):
             if s.get("id") == switch_id:
                 merged = {**s, **{k: v for k, v in data.items() if k != "id"}}
                 cfg = SwitchConfig.from_dict(merged)
+                _check_estop_pin(c, cfg.pin)
                 candidate = switches[:i] + [cfg.to_dict()] + switches[i + 1:]
                 validate_switches(candidate)
                 switches[i] = cfg.to_dict()

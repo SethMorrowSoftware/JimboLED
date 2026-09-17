@@ -48,7 +48,12 @@
         const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'heartbeat', token: this.token });
         if (!r.switch.held) { this.stopLocal(); this.btn.classList.remove('active'); if (this.opts.onState) this.opts.onState(r.switch); }
         else if (this.opts.onTick) this.opts.onTick(r.switch);
-      } catch (err) { /* keep trying; server watchdog will release if we are cut off */ }
+      } catch (err) {
+        // A 409 means an emergency stop latched mid-hold – the relay is already
+        // off, so stop beating.  Anything else: keep trying, the server
+        // watchdog releases us if we really are cut off.
+        if (err && err.status === 409) { this.stopLocal(); this.btn.classList.remove('active'); UI.notifyError(err); App.refresh(true); }
+      }
     }
     release(reason) {
       if (this.pending && !this.token) { this.released = true; return; }
@@ -114,7 +119,9 @@
       Object.assign(sw, s);
       const label = btn.querySelector('.label');
       btn.classList.toggle('on', !!s.on);
-      btn.disabled = !s.available;
+      // A latched emergency stop is the one thing the tile refuses outright:
+      // the server would reject the press anyway, so do not pretend otherwise.
+      btn.disabled = !s.available || !!s.locked_out;
       if (sw.mode === 'toggle') label.textContent = s.on ? 'On' : 'Off';
       else if (sw.mode === 'momentary') label.textContent = s.on ? 'Running…' : 'Hold';
       const prog = btn.querySelector('.progress');
@@ -122,6 +129,7 @@
       else if (s.on) { prog.style.width = '100%'; timerEl.textContent = `on ${UI.fmtDuration(s.on_for)}`; }
       else { prog.style.width = '0'; timerEl.textContent = s.last_off_reason && /timeout|max-on/.test(s.last_off_reason) ? (s.last_off_reason === 'heartbeat-timeout' ? 'auto-released' : 'time limit reached') : ''; }
       if (!s.available) { timerEl.textContent = s.error || 'unavailable'; }
+      if (s.locked_out) { label.textContent = 'Stopped'; timerEl.textContent = 'emergency stop'; }
     };
     root.update(sw);
     root.destroy = () => holder && holder.destroy();

@@ -61,7 +61,7 @@
     opts = opts || {};
     const root = document.getElementById('modal-root');
     const backdrop = el(`<div class="modal-backdrop"></div>`);
-    const box = h('div', { class: 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : ''), role: 'dialog', 'aria-modal': 'true' });
+    const box = h('div', { class: 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : '') + (opts.tone ? ' tone-' + opts.tone : ''), role: 'dialog', 'aria-modal': 'true' });
     const head = h('div', { class: 'modal-head' });
     if (opts.icon) head.append(el(`<span class="tile-icon">${icon(opts.icon)}</span>`));
     const title = h('h2', { text: opts.title || '' });
@@ -86,7 +86,11 @@
     backdrop.addEventListener('pointerdown', (e) => { if (e.target === backdrop && !opts.sticky) api.close(); });
     stack.push(api);
     if (typeof opts.body === 'function') opts.body(body, api);
-    setTimeout(() => { const f = box.querySelector('input:not([type=hidden]), select, textarea, button.primary'); if (f && opts.autofocus !== false && window.matchMedia('(min-width: 640px)').matches) f.focus(); }, 30);
+    // Focus something worth typing into.  Sliders, checkboxes and colour
+    // inputs are skipped: landing on a brightness slider means the first
+    // arrow key nudges the lights instead of moving through the dialog.
+    const FOCUSABLE = 'input:not([type=hidden]):not([type=range]):not([type=checkbox]):not([type=radio]):not([type=color]), select, textarea, button.primary';
+    setTimeout(() => { const f = box.querySelector(FOCUSABLE); if (f && opts.autofocus !== false && window.matchMedia('(min-width: 640px)').matches) f.focus(); }, 30);
     return api;
   }
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && stack.length) { const top = stack[stack.length - 1]; if (!top.sticky) top.close(); } });
