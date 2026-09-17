@@ -588,6 +588,9 @@ class GPIOManager:
                     raise GPIOError("GPIO library unavailable")
                 if pin not in PIN_NOTES or pin in RESERVED_PINS:
                     raise GPIOError(f"GPIO{pin} cannot be used")
+                for item in self.estop.inputs:
+                    if item.pin == pin:
+                        raise GPIOError(f"GPIO{pin} is the '{item.name}' emergency stop input, not an output")
                 from gpiozero import OutputDevice
 
                 dev = OutputDevice(pin, active_high=active_high, initial_value=False, pin_factory=self._factory)

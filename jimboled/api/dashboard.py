@@ -14,8 +14,11 @@ bp = Blueprint("dashboard", __name__)
 
 TILE_TYPES = ("device", "switch", "scene", "all", "clock", "heading", "note")
 TILE_SIZES = ("s", "m", "l", "xl")
-THEMES = ("midnight", "graphite", "oled", "ocean")
-DENSITIES = ("comfortable", "compact")
+# "auto" follows the device's light/dark setting; the rest are explicit.
+THEMES = ("auto", "midnight", "graphite", "oled", "ocean", "daylight", "paper")
+DENSITIES = ("comfortable", "compact", "roomy")
+RADII = ("sharp", "soft", "round")
+TEXT_SCALE_RANGE = (85, 150)
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -166,9 +169,22 @@ def update_dashboard():
             dash["accent"] = data["accent"]
         if "density" in data:
             if data["density"] not in DENSITIES:
-                raise APIError("density must be comfortable or compact")
+                raise APIError(f"density must be one of {', '.join(DENSITIES)}")
             dash["density"] = data["density"]
-        for flag in ("show_offline", "show_clock"):
+        if "radius" in data:
+            if data["radius"] not in RADII:
+                raise APIError(f"radius must be one of {', '.join(RADII)}")
+            dash["radius"] = data["radius"]
+        if "text_scale" in data:
+            lo, hi = TEXT_SCALE_RANGE
+            try:
+                scale = int(data["text_scale"])
+            except (TypeError, ValueError):
+                raise APIError("text_scale must be a number")
+            if not lo <= scale <= hi:
+                raise APIError(f"text_scale must be between {lo} and {hi}")
+            dash["text_scale"] = scale
+        for flag in ("show_offline", "show_clock", "show_estop"):
             if flag in data:
                 dash[flag] = bool(data[flag])
         if "tiles" in data:

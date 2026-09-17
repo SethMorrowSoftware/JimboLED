@@ -61,7 +61,7 @@
     opts = opts || {};
     const root = document.getElementById('modal-root');
     const backdrop = el(`<div class="modal-backdrop"></div>`);
-    const box = h('div', { class: 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : ''), role: 'dialog', 'aria-modal': 'true' });
+    const box = h('div', { class: 'modal' + (opts.wide ? ' wide' : '') + (opts.full ? ' full' : '') + (opts.tone ? ' tone-' + opts.tone : ''), role: 'dialog', 'aria-modal': 'true' });
     const head = h('div', { class: 'modal-head' });
     if (opts.icon) head.append(el(`<span class="tile-icon">${icon(opts.icon)}</span>`));
     const title = h('h2', { text: opts.title || '' });

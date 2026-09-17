@@ -286,3 +286,31 @@ def test_estop_state_is_in_the_aggregate_snapshot(client):
     assert gpio["estop"]["engaged"] is True
     assert gpio["switches"][0]["locked_out"] is True
     assert gpio["switches"][0]["locked_by"] == "All relays"
+
+
+def test_switch_cannot_steal_an_estop_input_pin(client):
+    assert client.post("/api/estop/inputs", json={"name": "Panic", "pin": 26}).status_code == 201
+    r = client.post("/api/gpio/switches", json={"name": "Lamp", "pin": 26, "mode": "toggle"})
+    assert r.status_code == 400 and "emergency stop button" in r.get_json()["error"]
+
+    sw = _add_switch(client, name="Lamp", pin=17)
+    r = client.put(f"/api/gpio/switches/{sw['id']}", json={"pin": 26})
+    assert r.status_code == 400 and "emergency stop button" in r.get_json()["error"]
+    # Testing that pin as a relay output would fight the button's pull resistor.
+    r = client.post("/api/gpio/test", json={"pin": 26, "active_high": True})
+    assert r.status_code == 400 and "not an output" in r.get_json()["error"]
+
+
+def test_appearance_settings_round_trip(client):
+    r = client.put("/api/dashboard", json={"theme": "daylight", "density": "roomy",
+                                           "radius": "round", "text_scale": 125})
+    assert r.status_code == 200
+    dash = r.get_json()["dashboard"]
+    assert (dash["theme"], dash["density"], dash["radius"], dash["text_scale"]) == ("daylight", "roomy", "round", 125)
+    # The first paint must carry them, so nothing flashes on load.
+    html = client.get("/").get_data(as_text=True)
+    assert 'data-theme="daylight"' in html and 'data-radius="round"' in html
+    assert "--text-scale: 1.250" in html
+
+    for bad in ({"theme": "neon"}, {"density": "airy"}, {"radius": "blobby"}, {"text_scale": 400}):
+        assert client.put("/api/dashboard", json=bad).status_code == 400

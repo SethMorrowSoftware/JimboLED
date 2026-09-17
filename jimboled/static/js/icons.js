@@ -45,6 +45,11 @@
     upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5M12 3v12"/>',
     play: '<path d="m6 4 14 8-14 8z"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    estop: '<path d="M8.6 2h6.8L22 8.6v6.8L15.4 22H8.6L2 15.4V8.6z"/><path d="M12 7.5v5M12 16.2h.01"/>',
+    unlock: '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/>',
+    awning: '<path d="M2 11 5 4h14l3 7z"/><path d="M2 11h20"/><path d="M6 11v9M18 11v9"/><path d="M6 15h12"/>',
+    contrast: '<circle cx="12" cy="12" r="9"/><path d="M12 3v18a9 9 0 0 0 0-18z" fill="currentColor" stroke="none"/>',
+    textSize: '<path d="M3 7V5h10v2M8 5v14M6 19h4"/><path d="M14 12v-1h7v1M17.5 11v8M16 19h3"/>',
     hand: '<path d="M18 11V6a2 2 0 0 0-4 0v1"/><path d="M14 10V4a2 2 0 0 0-4 0v2"/><path d="M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 0 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-5.9-2.6L3.2 15.6a2 2 0 0 1 3.1-2.5L8 15"/>',
     switch: '<rect x="2" y="6" width="20" height="12" rx="6"/><circle cx="16" cy="12" r="3"/>',
     fan: '<path d="M12 12a3 3 0 1 0 0 .01"/><path d="M12 9c0-4 2-6 4-6s3 2 1 4-3 2-5 2M15 12c4 0 6 2 6 4s-2 3-4 1-2-3-2-5M12 15c0 4-2 6-4 6s-3-2-1-4 3-2 5-2M9 12c-4 0-6-2-6-4s2-3 4-1 2 3 2 5"/>',
@@ -87,5 +92,5 @@
     const path = P[name] || P.bulb;
     return '<svg class="ico ' + (cls || '') + '" viewBox="0 0 24 24" aria-hidden="true">' + path + '</svg>';
   };
-  window.ICON_CHOICES = ['bulb', 'strip', 'lamp', 'sun', 'moon', 'sparkles', 'rainbow', 'star', 'heart', 'bed', 'switch', 'plug', 'fan', 'tv', 'music', 'film', 'coffee', 'door', 'garage', 'home', 'zap', 'power', 'hand', 'up', 'down', 'timer', 'bell', 'smile', 'palette', 'wand'];
+  window.ICON_CHOICES = ['bulb', 'strip', 'lamp', 'sun', 'moon', 'sparkles', 'rainbow', 'star', 'heart', 'bed', 'switch', 'plug', 'fan', 'tv', 'music', 'film', 'coffee', 'door', 'garage', 'home', 'zap', 'power', 'hand', 'up', 'down', 'timer', 'bell', 'smile', 'palette', 'wand', 'estop', 'shield', 'lock', 'awning'];
 })();

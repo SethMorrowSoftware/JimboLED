@@ -5,6 +5,7 @@
     { id: 'devices', label: 'Controllers', icon: 'bulb' },
     { id: 'switches', label: 'Switches', icon: 'switch' },
     { id: 'scenes', label: 'Scenes', icon: 'sparkles' },
+    { id: 'estop', label: 'Emergency stop', icon: 'estop' },
     { id: 'appearance', label: 'Appearance', icon: 'palette' },
     { id: 'security', label: 'Security', icon: 'lock' },
     { id: 'system', label: 'System', icon: 'cpu' },
@@ -19,7 +20,7 @@
     main.innerHTML = '';
     main.append(h('div', { class: 'row between', style: { marginBottom: '12px' } }, h('h2', { text: 'Settings' }), el(`<a class="btn" href="#/">${icon('arrowLeft')} Back to dashboard</a>`)));
     main.append(h('div', { class: 'settings' }, nav, body));
-    ({ devices: devicesSection, switches: switchesSection, scenes: scenesSection, appearance: appearanceSection, security: securitySection, system: systemSection, backup: backupSection })[section](body);
+    ({ devices: devicesSection, switches: switchesSection, scenes: scenesSection, estop: estopSection, appearance: appearanceSection, security: securitySection, system: systemSection, backup: backupSection })[section](body);
   }
 
   // ---------------------------------------------------------- devices
@@ -227,24 +228,305 @@
     save.onclick = () => UI.busy(save, (async () => { scene.name = name.value.trim(); if (existing) await api.put(`/api/scenes/${existing.id}`, scene); else await api.post('/api/scenes', scene); UI.toast('Scene saved', 'success'); m.close(); onDone && onDone(); if (window.App) App.refresh(); })().catch(UI.notifyError));
   }
 
+
+  // ---------------------------------------------------- emergency stop
+  const SCOPE_LABEL = { all: 'Every relay', group: 'An interlock group', switch: 'Chosen switches' };
+
+  /** A <select> of usable BCM pins, annotated with what already owns them. */
+  async function pinSelect(current, skipId) {
+    const sel = h('select', { class: 'select' });
+    sel.append(h('option', { value: '', text: 'Choose a GPIO pin…', disabled: true, selected: current == null }));
+    const { pins } = await api.get('/api/gpio/pins');
+    for (const p of pins) {
+      if (p.reserved) continue;
+      const taken = p.in_use_by && p.bcm !== current;
+      sel.append(h('option', {
+        value: String(p.bcm), disabled: !!taken, selected: p.bcm === current,
+        text: `GPIO${p.bcm} (pin #${p.physical})` + (taken ? ` — used by ${p.in_use_by}` : p.recommended ? ' — recommended' : ''),
+      }));
+    }
+    return sel;
+  }
+
+  function zoneDialog(existing, switches, onSaved) {
+    const z = Object.assign({ name: '', scope: 'group', refs: [], icon: 'estop', color: '' }, existing || {});
+    const name = h('input', { class: 'input', value: z.name, maxlength: 60, placeholder: 'e.g. Bed' });
+    const scope = h('select', { class: 'select' });
+    for (const v of ['group', 'switch']) scope.append(h('option', { value: v, text: SCOPE_LABEL[v], selected: z.scope === v }));
+    const refsWrap = h('div', { class: 'stack' });
+    let refs = new Set(z.refs || []);
+    function drawRefs() {
+      refsWrap.innerHTML = '';
+      const chips = h('div', { class: 'chips' });
+      const options = scope.value === 'group'
+        ? [...new Set(switches.map((s) => s.interlock_group).filter(Boolean))].map((g) => [g, g])
+        : switches.map((s) => [s.id, s.name]);
+      if (!options.length) {
+        refsWrap.append(el(`<div class="alert warn">${scope.value === 'group'
+          ? 'No interlock groups yet. Give the bed\'s up/down switches the same interlock group first (Settings → Switches).'
+          : 'No switches yet — add one under Settings → Switches.'}</div>`));
+        return;
+      }
+      for (const [value, label] of options) {
+        const c = h('button', { type: 'button', class: 'chip' + (refs.has(value) ? ' active' : ''), text: label });
+        c.onclick = () => { refs.has(value) ? refs.delete(value) : refs.add(value); c.classList.toggle('active', refs.has(value)); };
+        chips.append(c);
+      }
+      refsWrap.append(chips);
+    }
+    scope.onchange = () => { refs = new Set(); drawRefs(); };
+    drawRefs();
+    let iconName = z.icon, color = z.color;
+    const body = h('div', { class: 'stack' },
+      UI.field('Name', name, 'What this stop is called on the button and in the log.'),
+      UI.field('Covers', scope),
+      UI.field('Which ones', refsWrap, 'Tap to include. Anything not covered keeps working normally.'),
+      h('h4', { text: 'Appearance' }),
+      UI.iconPicker(iconName || 'estop', (n) => { iconName = n; }),
+      UI.colorPicker(color, (c) => { color = c; }));
+    const cancel = el(`<button class="btn">Cancel</button>`);
+    const save = el(`<button class="btn primary" data-busy="Saving…">${existing ? 'Save changes' : 'Add stop'}</button>`);
+    const m = UI.modal({ title: existing ? 'Edit emergency stop' : 'Add an emergency stop', icon: 'estop', body, footer: [cancel, save], wide: true, sticky: true });
+    cancel.onclick = m.close;
+    save.onclick = () => UI.busy(save, (async () => {
+      const payload = { name: name.value.trim(), scope: scope.value, refs: [...refs], icon: iconName, color };
+      if (!payload.name) throw new Error('Give this stop a name');
+      if (!payload.refs.length) throw new Error('Pick at least one switch or group for this stop to cover');
+      if (existing) await api.put(`/api/estop/zones/${existing.id}`, payload);
+      else await api.post('/api/estop/zones', payload);
+      UI.toast('Saved', 'success'); m.close(); onSaved && onSaved();
+    })().catch(UI.notifyError));
+  }
+
+  async function inputDialog(existing, zones, onSaved) {
+    const i = Object.assign({ name: 'Emergency stop button', pin: null, zone: 'all', normally_closed: true, pull: 'up', enabled: true }, existing || {});
+    const name = h('input', { class: 'input', value: i.name, maxlength: 60 });
+    const pin = await pinSelect(existing ? i.pin : null);
+    const zone = h('select', { class: 'select' });
+    for (const z of zones) zone.append(h('option', { value: z.id, text: z.name, selected: z.id === i.zone }));
+    const wiring = h('select', { class: 'select' },
+      h('option', { value: 'nc', text: 'Normally closed (recommended) — a press or a broken wire stops everything', selected: i.normally_closed }),
+      h('option', { value: 'no', text: 'Normally open — only an actual press stops it', selected: !i.normally_closed }));
+    const pull = h('select', { class: 'select' },
+      h('option', { value: 'up', text: 'Pull-up — wire the button between the pin and GND', selected: i.pull === 'up' }),
+      h('option', { value: 'down', text: 'Pull-down — wire the button between the pin and 3.3 V', selected: i.pull === 'down' }));
+    const enabled = h('input', { type: 'checkbox', checked: i.enabled !== false });
+    const body = h('div', { class: 'stack' },
+      el(`<div class="alert info">Wire a <b>normally-closed</b> mushroom button between your chosen GPIO pin and a ground pin. Leave the pull-up on. The closed button holds the pin at 0 V; pressing it — or cutting the cable — breaks the loop and stops the relays within about a fifth of a second.</div>`),
+      h('div', { class: 'form-grid' },
+        UI.field('Name', name),
+        UI.field('Stops', zone, 'Which emergency stop this button engages.'),
+        h('div', { class: 'full' }, UI.field('GPIO pin', pin)),
+        h('div', { class: 'full' }, UI.field('Button type', wiring)),
+        h('div', { class: 'full' }, UI.field('Resistor', pull))),
+      h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
+    const cancel = el(`<button class="btn">Cancel</button>`);
+    const save = el(`<button class="btn primary" data-busy="Saving…">${existing ? 'Save changes' : 'Add button'}</button>`);
+    const m = UI.modal({ title: existing ? 'Edit emergency stop button' : 'Add a physical emergency stop', icon: 'estop', body, footer: [cancel, save], wide: true, sticky: true });
+    cancel.onclick = m.close;
+    save.onclick = () => UI.busy(save, (async () => {
+      if (!pin.value) throw new Error('Pick a GPIO pin');
+      const payload = { name: name.value.trim() || 'Emergency stop', pin: +pin.value, zone: zone.value,
+                        normally_closed: wiring.value === 'nc', pull: pull.value, enabled: enabled.checked };
+      if (existing) await api.put(`/api/estop/inputs/${existing.id}`, payload);
+      else await api.post('/api/estop/inputs', payload);
+      UI.toast('Saved', 'success'); m.close(); onSaved && onSaved();
+    })().catch(UI.notifyError));
+  }
+
+  async function estopSection(body) {
+    const zonesCard = h('div', { class: 'card' });
+    const inputsCard = h('div', { class: 'card' });
+    body.append(
+      el(`<div class="alert info"><b>All off</b> switches everything off — and anything can be switched straight back on. An <b>emergency stop</b> latches: it cuts its relays and keeps them locked out, from every phone and every scene, until somebody resets it here.</div>`),
+      zonesCard, inputsCard,
+      h('div', { class: 'card' },
+        h('div', { class: 'card-title' }, h('h3', { text: 'Wiring a physical button' })),
+        el(`<p class="muted small">See <a href="https://github.com/SethMorrowSoftware/JimboLED/blob/main/docs/WIRING.md" target="_blank" rel="noopener">docs/WIRING.md</a> for the full guide, including which pins are safe during power-up.</p>`)));
+
+    async function draw() {
+      const [estop, gpio] = await Promise.all([api.get('/api/estop'), api.get('/api/gpio')]);
+      const switches = gpio.switches || [];
+
+      // ---- zones
+      zonesCard.innerHTML = '';
+      const addZone = el(`<button class="btn primary">${icon('plus')} Add a stop</button>`);
+      addZone.onclick = () => zoneDialog(null, switches, draw);
+      zonesCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Emergency stops' }), addZone));
+      const list = h('div', { class: 'list' });
+      for (const z of estop.zones) {
+        const item = h('div', { class: 'list-item' });
+        item.append(el(`<span class="tile-icon" style="--tile-color:${esc(z.color || 'var(--danger)')}">${icon(z.engaged ? 'lock' : (z.icon || 'estop'))}</span>`));
+        const covered = (z.switches || []).map((id) => (switches.find((s) => s.id === id) || {}).name).filter(Boolean);
+        item.append(h('div', { class: 'grow' },
+          h('span', { class: 'title', text: z.name }),
+          h('span', { class: 'sub', text: (z.builtin ? 'Built in · ' : '') + (covered.length ? `covers ${covered.join(', ')}` : 'covers nothing yet') })));
+        if (z.engaged) item.append(el(`<span class="badge danger">engaged</span>`));
+        if (!z.builtin) {
+          const edit = el(`<button class="btn icon sm ghost" title="Edit">${icon('edit')}</button>`);
+          edit.onclick = () => zoneDialog(z, switches, draw);
+          const del = el(`<button class="btn icon sm ghost" title="Remove">${icon('trash')}</button>`);
+          del.onclick = async () => {
+            if (!await UI.confirm({ title: 'Remove stop', message: `Remove “${z.name}”? Its relays go back to being covered only by the master stop.`, okText: 'Remove', danger: true })) return;
+            try { await api.del(`/api/estop/zones/${z.id}`); UI.toast('Removed', 'success'); draw(); } catch (e) { UI.notifyError(e); }
+          };
+          item.append(edit, del);
+        }
+        list.append(item);
+      }
+      zonesCard.append(list);
+      if (estop.zones.length === 1) {
+        zonesCard.append(el(`<p class="muted small">Right now one button stops everything. Add a stop per moving thing — <b>Bed</b>, <b>Awning</b> — so stopping one does not lock out the other.</p>`));
+      }
+
+      // ---- hardware inputs
+      inputsCard.innerHTML = '';
+      const addInput = el(`<button class="btn">${icon('plus')} Add a button</button>`);
+      addInput.onclick = () => inputDialog(null, estop.zones, draw);
+      inputsCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Physical buttons' }), addInput));
+      if (!estop.inputs.length) {
+        inputsCard.append(el(`<p class="muted small">None wired. The on-screen stop works on its own — but a real button beside the bed works when the phone is asleep, out of reach or out of battery.</p>`));
+      }
+      const ilist = h('div', { class: 'list' });
+      for (const i of estop.inputs) {
+        const item = h('div', { class: 'list-item' });
+        const bad = !!i.error || i.tripped;
+        item.append(el(`<span class="status-dot ${bad ? 'bad' : 'ok'}"></span>`));
+        const zoneName = (estop.zones.find((z) => z.id === i.zone) || {}).name || i.zone;
+        const detail = i.error ? i.error : i.tripped ? 'pressed / circuit open' : 'healthy';
+        item.append(h('div', { class: 'grow' },
+          h('span', { class: 'title', text: i.name }),
+          h('span', { class: 'sub', text: `GPIO${i.pin} · ${i.normally_closed ? 'normally closed' : 'normally open'} · stops “${zoneName}” · ${detail}` })));
+        if (i.simulated) item.append(el(`<span class="badge warn" title="No GPIO hardware: this button is not read">sim</span>`));
+        const edit = el(`<button class="btn icon sm ghost" title="Edit">${icon('edit')}</button>`);
+        edit.onclick = () => inputDialog(i, estop.zones, draw);
+        const del = el(`<button class="btn icon sm ghost" title="Remove">${icon('trash')}</button>`);
+        del.onclick = async () => {
+          if (!await UI.confirm({ title: 'Remove button', message: `Remove “${i.name}”? The relays lose this physical stop.`, okText: 'Remove', danger: true })) return;
+          try { await api.del(`/api/estop/inputs/${i.id}`); UI.toast('Removed', 'success'); draw(); } catch (e) { UI.notifyError(e); }
+        };
+        item.append(edit, del);
+        ilist.append(item);
+      }
+      inputsCard.append(ilist);
+    }
+    draw().catch(UI.notifyError);
+  }
+
   // ------------------------------------------------------- appearance
+  const THEME_GROUPS = [
+    ['Follow my device', [['auto', 'Auto (light / dark)']]],
+    ['Dark', [['midnight', 'Midnight'], ['graphite', 'Graphite'], ['ocean', 'Ocean'], ['oled', 'Pure black (OLED)']]],
+    ['Light', [['daylight', 'Daylight'], ['paper', 'Paper']]],
+  ];
+  const ACCENTS = ['#7c5cff', '#22d3ee', '#34d399', '#fbbf24', '#f97316', '#f87171', '#ec4899', '#60a5fa', '#a3e635', '#e2e8f0'];
+
+  /** A row of chips bound to one value, previewed live on <html>. */
+  function chipGroup(options, current, onPick) {
+    const wrap = h('div', { class: 'chips' });
+    for (const [value, label] of options) {
+      const c = h('button', { type: 'button', class: 'chip' + (current === value ? ' active' : ''), text: label });
+      c.onclick = () => {
+        wrap.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
+        c.classList.add('active');
+        onPick(value);
+      };
+      wrap.append(c);
+    }
+    return wrap;
+  }
+
   async function appearanceSection(body) {
     const dash = (await api.get('/api/dashboard')).dashboard;
+    const root = document.documentElement;
+    const live = { theme: dash.theme, accent: dash.accent, density: dash.density,
+                   radius: dash.radius || 'soft', text_scale: dash.text_scale || 100 };
+    // Everything previews on the real page as you pick it, and is put back if
+    // you navigate away without saving.
+    const original = { ...live };
+    const apply = () => {
+      root.dataset.theme = live.theme;
+      root.dataset.density = live.density;
+      root.dataset.radius = live.radius;
+      root.style.setProperty('--accent', live.accent);
+      root.style.setProperty('--text-scale', (live.text_scale / 100).toFixed(3));
+    };
+
     const title = h('input', { class: 'input', value: dash.title, maxlength: 40 });
     const subtitle = h('input', { class: 'input', value: dash.subtitle || '', maxlength: 80, placeholder: 'e.g. Jim\'s room' });
-    const themes = h('div', { class: 'chips' });
-    let theme = dash.theme, accent = dash.accent, density = dash.density;
-    for (const [id, label] of [['midnight', 'Midnight'], ['graphite', 'Graphite'], ['ocean', 'Ocean'], ['oled', 'Pure black (OLED)']]) { const c = h('button', { class: 'chip' + (theme === id ? ' active' : ''), text: label }); c.onclick = () => { theme = id; themes.querySelectorAll('.chip').forEach((x) => x.classList.remove('active')); c.classList.add('active'); document.documentElement.dataset.theme = id; }; themes.append(c); }
+
+    const themeWrap = h('div', { class: 'stack' });
+    for (const [groupName, opts] of THEME_GROUPS) {
+      const chips = chipGroup(opts, live.theme, (v) => {
+        live.theme = v; apply();
+        themeWrap.querySelectorAll('.chip').forEach((x) => x.classList.toggle('active', x.dataset.theme === v));
+      });
+      // 'theme-swatch' opts each chip into rendering with its own palette,
+      // so the choice looks like what it will do.
+      chips.querySelectorAll('.chip').forEach((c, i) => { c.dataset.theme = opts[i][0]; c.classList.add('theme-swatch'); });
+      themeWrap.append(h('div', { class: 'stack', style: { gap: '4px' } },
+        h('span', { class: 'hint', text: groupName }), chips));
+    }
+
     const accentRow = h('div', { class: 'row wrap' });
-    for (const c of ['#7c5cff', '#22d3ee', '#34d399', '#fbbf24', '#f97316', '#f87171', '#ec4899', '#60a5fa', '#a3e635', '#e2e8f0']) { const b = h('button', { class: 'swatch lg' + (c === accent ? ' active' : ''), style: { background: c } }); b.onclick = () => { accent = c; accentRow.querySelectorAll('.swatch').forEach((x) => x.classList.remove('active')); b.classList.add('active'); custom.value = c; document.documentElement.style.setProperty('--accent', c); }; accentRow.append(b); }
-    const custom = h('input', { class: 'input mono', value: accent, maxlength: 7, style: { width: '110px' } }); custom.onchange = () => { const v = custom.value.trim().toLowerCase(); if (/^#[0-9a-f]{6}$/.test(v)) { custom.classList.remove('invalid'); accent = v; document.documentElement.style.setProperty('--accent', accent); } else { custom.classList.add('invalid'); UI.toast('Use a 6-digit hex colour like #7c5cff', 'error'); } };
+    const markAccent = () => accentRow.querySelectorAll('.swatch').forEach((x) => x.classList.toggle('active', x.dataset.color === live.accent));
+    for (const c of ACCENTS) {
+      const b = h('button', { type: 'button', class: 'swatch lg', style: { background: c }, dataset: { color: c },
+                              title: c, 'aria-label': `Accent colour ${c}` });
+      b.onclick = () => { live.accent = c; custom.value = c; custom.classList.remove('invalid'); apply(); markAccent(); };
+      accentRow.append(b);
+    }
+    const custom = h('input', { class: 'input mono', value: live.accent, maxlength: 7, style: { width: '110px' },
+                                'aria-label': 'Custom accent colour, hex' });
+    custom.onchange = () => {
+      const v = custom.value.trim().toLowerCase();
+      if (/^#[0-9a-f]{6}$/.test(v)) { custom.classList.remove('invalid'); live.accent = v; apply(); markAccent(); }
+      else { custom.classList.add('invalid'); UI.toast('Use a 6-digit hex colour like #7c5cff', 'error'); }
+    };
     accentRow.append(custom);
-    const dens = h('select', { class: 'select' }); [['comfortable', 'Comfortable'], ['compact', 'Compact']].forEach(([v, t]) => dens.append(h('option', { value: v, text: t, selected: density === v }))); dens.onchange = () => { density = dens.value; document.documentElement.dataset.density = density; };
+    markAccent();
+
+    const density = chipGroup([['comfortable', 'Comfortable'], ['compact', 'Compact'], ['roomy', 'Roomy']],
+      live.density, (v) => { live.density = v; apply(); });
+    const radius = chipGroup([['sharp', 'Sharp'], ['soft', 'Soft'], ['round', 'Round']],
+      live.radius, (v) => { live.radius = v; apply(); });
+
+    const scale = UI.slider({
+      icon: 'textSize', min: 85, max: 150, step: 5, value: live.text_scale,
+      format: (v) => `${v}%`,
+      onInput: (v) => { live.text_scale = +v; apply(); },
+      onChange: (v) => { live.text_scale = +v; apply(); },
+    });
+
     const showOffline = h('input', { type: 'checkbox', checked: dash.show_offline !== false });
     const showClock = h('input', { type: 'checkbox', checked: dash.show_clock !== false });
+    const showEstop = h('input', { type: 'checkbox', checked: dash.show_estop !== false });
+
     const save = el(`<button class="btn primary" data-busy="Saving…">Save appearance</button>`);
-    save.onclick = () => UI.busy(save, api.put('/api/dashboard', { title: title.value.trim(), subtitle: subtitle.value.trim(), theme, accent, density, show_offline: showOffline.checked, show_clock: showClock.checked }).then(() => { UI.toast('Saved', 'success'); if (window.App) App.refresh(true); }).catch(UI.notifyError));
-    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Appearance' })), h('div', { class: 'form-grid' }, UI.field('Dashboard title', title), UI.field('Subtitle', subtitle)), UI.field('Theme', themes), UI.field('Accent colour', accentRow), UI.field('Density', dens), h('label', { class: 'check' }, showOffline, h('span', { text: 'Show controllers that are offline' })), h('label', { class: 'check' }, showClock, h('span', { text: 'Show the clock in the header' })), h('div', { class: 'row end' }, save)));
+    save.onclick = () => UI.busy(save, api.put('/api/dashboard', {
+      title: title.value.trim(), subtitle: subtitle.value.trim(),
+      theme: live.theme, accent: live.accent, density: live.density,
+      radius: live.radius, text_scale: live.text_scale,
+      show_offline: showOffline.checked, show_clock: showClock.checked, show_estop: showEstop.checked,
+    }).then(() => { Object.assign(original, live); UI.toast('Saved', 'success'); if (window.App) App.refresh(true); }).catch(UI.notifyError));
+
+    const revert = el(`<button class="btn ghost">Undo changes</button>`);
+    revert.onclick = () => { Object.assign(live, original); apply(); render(document.getElementById('main'), 'appearance'); };
+
+    body.append(h('div', { class: 'card' },
+      h('div', { class: 'card-title' }, h('h3', { text: 'Appearance' }),
+        h('span', { class: 'hint', text: 'Previewed live — nothing is kept until you save' })),
+      h('div', { class: 'form-grid' }, UI.field('Dashboard title', title), UI.field('Subtitle', subtitle)),
+      UI.field('Theme', themeWrap, 'Auto follows your phone or computer between light and dark.'),
+      UI.field('Accent colour', accentRow),
+      UI.field('Spacing', density, 'How much room each tile gets.'),
+      UI.field('Corners', radius),
+      UI.field('Text size', scale, 'Larger text for reading the dashboard at arm\'s length.'),
+      h('label', { class: 'check' }, showOffline, h('span', { text: 'Show controllers that are offline' })),
+      h('label', { class: 'check' }, showClock, h('span', { text: 'Show the clock in the header' })),
+      h('label', { class: 'check' }, showEstop, h('span', { text: 'Show the emergency stop button in the header' })),
+      h('div', { class: 'row end' }, revert, save)));
+
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Dashboard layout' })), el(`<p class="muted small">Use <b>Edit layout</b> on the dashboard to drag tiles into any order, resize them, hide the ones you don't need, rename them, and add headings, notes or a clock.</p>`), h('div', { class: 'row' }, el(`<a class="btn" href="#/?edit=1">${icon('edit')} Edit the layout</a>`))));
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Add to home screen' })), el(`<p class="muted small">On a phone or tablet, open this page in Safari or Chrome and choose <b>Add to Home Screen</b>. JimboLED then opens like an app, full screen.</p>`)));
   }

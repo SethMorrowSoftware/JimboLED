@@ -50,15 +50,20 @@
   App.patchDevice = (dev) => { const i = App.state.devices.findIndex((d) => d.id === dev.id); if (i >= 0) App.state.devices[i] = { ...App.state.devices[i], ...dev }; else App.state.devices.push(dev); updateTiles(); };
   function setOffline(off) { document.getElementById('topbar').classList.toggle('offline', off); const st = document.getElementById('topbar-status'); if (off) st.innerHTML = `<span class="pill"><span class="dot bad"></span>Reconnecting to JimboLED…</span>`; }
   function applyTheme(dash) {
-    document.documentElement.dataset.theme = dash.theme || 'midnight';
-    document.documentElement.dataset.density = dash.density || 'comfortable';
-    document.documentElement.style.setProperty('--accent', dash.accent || '#7c5cff');
+    const root = document.documentElement;
+    root.dataset.theme = dash.theme || 'midnight';
+    root.dataset.density = dash.density || 'comfortable';
+    root.dataset.radius = dash.radius || 'soft';
+    // Stored as a percentage; the stylesheet wants a plain multiplier.
+    root.style.setProperty('--text-scale', ((dash.text_scale || 100) / 100).toFixed(3));
+    root.style.setProperty('--accent', dash.accent || '#7c5cff');
     document.getElementById('brand-title').textContent = dash.title || 'JimboLED';
     document.getElementById('brand-sub').textContent = dash.subtitle || '';
     document.title = dash.title || 'JimboLED';
   }
 
   // ---------------------------------------------------------- topbar
+  let estopBtn = null;
   function renderTopbar() {
     const st = document.getElementById('topbar-status');
     const devs = App.state.devices, online = devs.filter((d) => d.online).length;
@@ -67,24 +72,38 @@
     if (devs.length) pieces.push(`<span class="pill clickable" id="pill-devices" title="Controllers"><span class="dot ${online === devs.length ? 'ok' : online ? 'warn' : 'bad'}"></span>${online}/${devs.length} online</span>`);
     if (onSwitches.length) pieces.push(`<span class="pill" title="Relays energised"><span class="dot ok"></span>${esc(onSwitches.map((s) => s.name).join(', '))} on</span>`);
     if (App.state.gpio.simulated && (App.state.gpio.switches || []).length) pieces.push(`<span class="pill" title="No GPIO hardware – switches are simulated"><span class="dot warn"></span>GPIO simulated</span>`);
+    const latched = (window.EStop ? EStop.engagedZones() : []);
+    if (latched.length) pieces.unshift(`<span class="pill" id="pill-estop" title="Relays are locked out"><span class="dot bad"></span>${esc(latched.map((z) => z.name).join(', '))} stopped</span>`);
     if (App.state.dashboard && App.state.dashboard.show_clock !== false) pieces.push(`<span class="pill nowrap" id="pill-clock">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`);
     st.innerHTML = pieces.join('');
     const pd = document.getElementById('pill-devices'); if (pd) pd.onclick = () => { location.hash = '#/settings/devices'; };
     const actions = document.getElementById('topbar-actions');
-    if (actions.dataset.rendered !== App.route.view + App.editMode) {
-      actions.dataset.rendered = App.route.view + App.editMode;
+    const sig = App.route.view + App.editMode + showEstop();
+    if (actions.dataset.rendered !== sig) {
+      actions.dataset.rendered = sig;
       actions.innerHTML = '';
+      estopBtn = null;
       if (App.route.view === 'dashboard') {
-        const panic = el(`<button class="btn danger sm" title="Turn every relay and every light off">${icon('power')}<span class="hide-sm">All off</span></button>`);
+        const panic = el(`<button class="btn danger sm" title="Turn every relay and every light off (they can be switched straight back on)">${icon('power')}<span class="hide-sm">All off</span></button>`);
         panic.onclick = async () => { try { await api.post('/api/system/shutdown-all'); UI.toast('Everything switched off', 'success'); refresh(); } catch (e) { UI.notifyError(e); } };
         const edit = el(`<button class="btn sm ${App.editMode ? 'primary' : ''}" title="Rearrange, resize and hide tiles">${icon(App.editMode ? 'check' : 'edit')}<span class="hide-sm">${App.editMode ? 'Done' : 'Edit layout'}</span></button>`);
         edit.onclick = () => setEditMode(!App.editMode);
         const settings = el(`<a class="btn icon sm ghost" href="#/settings" title="Settings">${icon('settings')}</a>`);
         actions.append(panic, edit, settings);
-      } else {
+      } else if (App.route.view === 'settings') {
         actions.append(el(`<a class="btn sm" href="#/">${icon('grid')}<span class="hide-sm">Dashboard</span></a>`));
       }
+      // The emergency stop is reachable from every view, and is added last so
+      // it sits closest to the thumb on a phone.
+      if (showEstop()) { estopBtn = EStop.headerButton(); actions.append(estopBtn); }
     }
+    if (estopBtn) estopBtn.update();
+  }
+  function showEstop() {
+    if (!window.EStop) return false;
+    const dash = App.state.dashboard;
+    if (dash && dash.show_estop === false) return EStop.engagedZones().length > 0;
+    return ((App.state.gpio.switches || []).length > 0) || EStop.engagedZones().length > 0;
   }
   setInterval(() => { const c = document.getElementById('pill-clock'); if (c) c.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); const t = document.querySelector('.tile.clock .time'); if (t) { t.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); t.nextElementSibling.textContent = new Date().toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' }); } }, 1000);
 
@@ -102,6 +121,7 @@
   function renderDashboard() {
     if (App.route.view !== 'dashboard' || !App.state.dashboard) return;
     if (!grid || !grid.isConnected) { main.innerHTML = ''; grid = h('div', { class: 'grid' }); main.append(grid); destroyTiles(); }
+    renderEstopBanner();
     const dash = App.state.dashboard;
     const tiles = dash.tiles || [];
     const devById = Object.fromEntries(App.state.devices.map((d) => [d.id, d]));
@@ -129,6 +149,19 @@
     if (App.editMode) grid.append(addTileButton());
     else { const b = grid.querySelector('.add-tile'); if (b) b.remove(); }
     main.classList.toggle('editing', App.editMode);
+  }
+  let estopBannerSig = null;
+  function renderEstopBanner() {
+    const latched = window.EStop ? EStop.engagedZones() : [];
+    const sig = latched.map((z) => `${z.id}:${z.since}:${(z.blocked_by || []).join()}`).join('|');
+    const existing = main.querySelector('.estop-banner');
+    // Rebuilding the grid wipes the banner, so redraw whenever the DOM and the
+    // state disagree, not only when the state itself changed.
+    if (sig === estopBannerSig && !!existing === !!sig) return;
+    estopBannerSig = sig;
+    if (existing) existing.remove();
+    const node = EStop.banner();
+    if (node) main.insertBefore(node, main.firstChild);
   }
   function destroyTiles() { for (const ent of App.tiles.values()) { try { ent.destroy && ent.destroy(); } catch (e) {} } App.tiles.clear(); }
   function tileSignature(t) { return [t.type, t.ref, t.size, t.hidden, t.name, t.icon, t.color, JSON.stringify(t.opts || {})].join('|'); }
@@ -202,8 +235,16 @@
       const shell = tileShell(t, { icon: t.icon || GPIO.switchIcon(s), name: t.name || s.name, sub: `GPIO${s.pin} · ${GPIO.MODE_LABEL[s.mode] || s.mode}${s.interlock_group ? ' · interlocked' : ''}`, headRight: App.state.gpio.simulated ? el(`<span class="badge warn" title="No GPIO hardware">sim</span>`) : null });
       if (!t.color && s.color) shell.node.style.setProperty('--tile-color', s.color);
       const ctl = GPIO.control(s, { big: t.size !== 's' });
-      shell.node.append(ctl);
-      return { el: shell.node, update: (ss) => { shell.node.classList.toggle('is-on', !!ss.on); ctl.update(ss); shell.title.querySelector('.name').textContent = t.name || ss.name; }, destroy: () => ctl.destroy && ctl.destroy() };
+      const lock = h('div', { class: 'lock-note hidden' });
+      shell.node.append(ctl, lock);
+      return { el: shell.node, update: (ss) => {
+        shell.node.classList.toggle('is-on', !!ss.on);
+        shell.node.classList.toggle('locked', !!ss.locked_out);
+        lock.classList.toggle('hidden', !ss.locked_out);
+        if (ss.locked_out) lock.innerHTML = icon('lock') + `<span>Locked out by \u201c${esc(ss.locked_by)}\u201d</span>`;
+        ctl.update(ss);
+        shell.title.querySelector('.name').textContent = t.name || ss.name;
+      }, destroy: () => ctl.destroy && ctl.destroy() };
     }
     if (t.type === 'scene') {
       const sc = sceneById[t.ref]; if (!sc) return null;
@@ -324,6 +365,5 @@
     polling = setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
   }
-  const style = document.createElement('style'); style.textContent = '@media (max-width: 560px) { .hide-sm { display:none } .topbar-status .pill:not(#pill-devices) { display:none } }'; document.head.append(style);
   boot();
 })();

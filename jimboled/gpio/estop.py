@@ -359,7 +359,7 @@ class EStopController:
     # ----------------------------------------------------------------- zones
     def all_zones(self) -> List[EStopZone]:
         master = EStopZone(id=MASTER_ZONE_ID, name=self.master_name, scope="all",
-                           refs=[], icon="stop", builtin=True)
+                           refs=[], icon="estop", builtin=True)
         return [master] + list(self.zones)
 
     def zone(self, zone_id: str) -> EStopZone:
