@@ -24,16 +24,20 @@
 
   // ------------------------------------------------------------ data
   let polling = null, inflight = false, failures = 0;
+  // Shorter than the default: a snapshot that takes longer than this is stale
+  // anyway, and giving up lets the next tick through instead of stalling the
+  // whole loop behind one bad request.
+  const STATE_TIMEOUT_MS = 10000;
   async function refresh(full) {
     if (inflight) return; inflight = true;
     try {
-      const s = await api.get('/api/state');
+      const s = await api.get('/api/state', { timeout: STATE_TIMEOUT_MS });
       failures = 0;
       const prevCfg = App.state.cfgRev;
       App.state.devices = s.devices; App.state.gpio = s.gpio; App.state.rev = s.rev; App.state.cfgRev = s.cfg_rev; App.state.discovery_running = s.discovery_running;
       // The layout only changes when the configuration changes, so fetch it lazily.
       if (full || !App.state.dashboard || s.cfg_rev !== prevCfg) {
-        const d = await api.get('/api/dashboard');
+        const d = await api.get('/api/dashboard', { timeout: STATE_TIMEOUT_MS });
         App.state.dashboard = d.dashboard; App.state.setupComplete = d.setup_complete;
         applyTheme(d.dashboard);
       }

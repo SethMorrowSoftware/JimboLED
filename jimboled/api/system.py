@@ -9,38 +9,59 @@ import platform
 import shutil
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from flask import Blueprint, Response, request, send_file, session
+from flask import Blueprint, request, send_file, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .. import __version__, get_ctx
 from ..gpio.backend import is_raspberry_pi, pi_model
+from ..gpio.estop import MASTER_ZONE_ID, validate_inputs, validate_zones
 from ..gpio.manager import validate_switches
 from ..wled.discovery import local_ipv4_addresses
 from ..wled.manager import normalise_device
 from . import APIError, body, ok
+from .dashboard import clean_scene, clean_tile
 
 import collections
 import threading
 
 # Simple login throttle: after 5 failures from one address, wait 30 s.
-_login_failures: Dict[str, collections.deque] = collections.defaultdict(lambda: collections.deque(maxlen=5))
+LOGIN_ATTEMPTS = 5
+LOGIN_LOCKOUT_S = 30
+# The table is keyed by remote address, which the caller chooses, so it is
+# bounded and swept.  An unbounded dict on a 512 MB Pi Zero is a way to take the
+# dashboard down without ever guessing the password.
+MAX_TRACKED_ADDRESSES = 512
+_login_failures: Dict[str, collections.deque] = {}
 _login_lock = threading.Lock()
+
+
+def _sweep_login_failures(now: float) -> None:
+    """Forget addresses whose lockout has expired.  Caller holds the lock."""
+    for addr in [a for a, q in _login_failures.items() if not q or now - q[-1] > LOGIN_LOCKOUT_S]:
+        _login_failures.pop(addr, None)
 
 
 def _login_blocked(addr: str) -> bool:
     with _login_lock:
-        q = _login_failures[addr]
-        return len(q) >= 5 and time.monotonic() - q[0] < 30
+        q = _login_failures.get(addr)
+        return bool(q) and len(q) >= LOGIN_ATTEMPTS and time.monotonic() - q[0] < LOGIN_LOCKOUT_S
 
 
 def _login_failed(addr: str) -> None:
+    now = time.monotonic()
     with _login_lock:
-        _login_failures[addr].append(time.monotonic())
+        _sweep_login_failures(now)
+        q = _login_failures.get(addr)
+        if q is None:
+            if len(_login_failures) >= MAX_TRACKED_ADDRESSES:
+                # Full of live lockouts: drop the oldest rather than grow.
+                _login_failures.pop(min(_login_failures, key=lambda a: _login_failures[a][-1]), None)
+            q = _login_failures[addr] = collections.deque(maxlen=LOGIN_ATTEMPTS)
+        q.append(now)
 
 
 def _login_ok(addr: str) -> None:
@@ -190,8 +211,13 @@ def api_login():
 @bp.get("/auth")
 def auth_status():
     ctx = get_ctx()
-    needs = bool((ctx.store.section("server") or {}).get("password_hash"))
-    return ok({"password_set": needs, "authed": (not needs) or session.get("auth") == "ok"})
+    server_cfg = ctx.store.section("server") or {}
+    needs = bool(server_cfg.get("password_hash"))
+    # Same test the request guard applies, session version included: saying
+    # "signed in" for a session the guard will reject sends the UI in circles.
+    session_ok = (session.get("auth") == "ok"
+                  and int(session.get("sv") or 0) == int(server_cfg.get("session_version") or 0))
+    return ok({"password_set": needs, "authed": (not needs) or session_ok})
 
 
 @bp.post("/logout")
@@ -227,13 +253,15 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     data["devices"] = devices
     gpio = data.get("gpio") if isinstance(data.get("gpio"), dict) else {}
     try:
-        gpio["switches"] = [s.to_dict() for s in validate_switches(gpio.get("switches", []))]
+        switches = validate_switches(gpio.get("switches", []))
     except Exception as exc:
         raise APIError(f"Backup contains invalid GPIO settings: {exc}")
+    gpio["switches"] = [s.to_dict() for s in switches]
     if str(gpio.get("backend", "auto")) not in ("auto", "mock", "lgpio", "rpigpio", "pigpio", "native"):
         gpio["backend"] = "auto"
     gpio["interlock_dead_time_ms"] = int(_num(gpio.get("interlock_dead_time_ms", 250), 0, 5000, "interlock_dead_time_ms"))
     gpio["hold_timeout_s"] = _num(gpio.get("hold_timeout_s", 1.5), 0.5, 10.0, "hold_timeout_s")
+    gpio["estop"] = _validated_estop(gpio.get("estop"), switches)
     data["gpio"] = gpio
     wled = data.get("wled") if isinstance(data.get("wled"), dict) else {}
     for key, lo, hi, default in (("poll_interval_s", 1, 120, 3.0), ("offline_poll_interval_s", 3, 600, 15.0), ("request_timeout_s", 1, 30, 4.0)):
@@ -249,11 +277,49 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     server["allowed_hosts"] = [str(h).lower()[:253] for h in hosts if isinstance(h, str)][:50] if isinstance(hosts, list) else []
     data["server"] = server
     dash = data["dashboard"]
-    if not isinstance(dash.get("tiles"), list):
-        dash["tiles"] = []
-    if not isinstance(dash.get("scenes"), list):
-        dash["scenes"] = []
+    # Tiles and scenes are cosmetic, so a bad one is dropped rather than
+    # failing the whole restore – but it is dropped *here*, not left to blow up
+    # later when somebody taps it.
+    dash["tiles"] = _keep_valid(dash.get("tiles"), clean_tile)
+    dash["scenes"] = _keep_valid(dash.get("scenes"), clean_scene)
     return data
+
+
+def _keep_valid(items: Any, clean) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for raw in items if isinstance(items, list) else []:
+        try:
+            out.append(clean(raw))
+        except Exception as exc:
+            log.warning("dropping an unusable entry from the backup: %s", exc)
+    return out
+
+
+def _validated_estop(raw: Any, switches) -> Dict[str, Any]:
+    """Validate the emergency-stop section of a backup.
+
+    Unlike tiles, this one is refused rather than repaired: silently dropping a
+    zone or a physical button would restore a configuration that looks right in
+    the UI while the stop it promises no longer exists.
+    """
+    estop = dict(raw) if isinstance(raw, dict) else {}
+    try:
+        zones = validate_zones(estop.get("zones", []))
+        inputs = validate_inputs(estop.get("inputs", []),
+                                 taken_pins={s.pin: s.name for s in switches})
+    except Exception as exc:
+        raise APIError(f"Backup contains invalid emergency stop settings: {exc}")
+    known = {z.id for z in zones} | {MASTER_ZONE_ID}
+    for item in inputs:
+        if item.zone not in known:
+            # Better the master stop than a button wired to a zone that is gone.
+            log.warning("emergency stop button '%s' pointed at a missing zone; using the master stop", item.name)
+            item.zone = MASTER_ZONE_ID
+    estop["zones"] = [z.to_dict() for z in zones]
+    estop["inputs"] = [i.to_dict() for i in inputs]
+    estop["master_name"] = str(estop.get("master_name") or "All relays")[:60]
+    estop["confirm_engage"] = bool(estop.get("confirm_engage", False))
+    return estop
 
 
 @bp.post("/restore")

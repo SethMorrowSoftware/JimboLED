@@ -35,7 +35,12 @@ def data_dir(tmp_path):
 @pytest.fixture
 def app(data_dir):
     from jimboled import create_app
+    from jimboled.api import system as system_api
 
+    # Process-global in production (one app per process); reset per test so a
+    # lockout earned by one test cannot fail the next.
+    with system_api._login_lock:
+        system_api._login_failures.clear()
     application = create_app(str(data_dir), testing=True)
     ctx = application.extensions["jimboled"]
     ctx.store.update(lambda c: c["wled"].update({"poll_interval_s": 1, "offline_poll_interval_s": 3, "request_timeout_s": 2}))

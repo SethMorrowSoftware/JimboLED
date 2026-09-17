@@ -21,6 +21,14 @@ log = logging.getLogger(__name__)
 
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-_:\[\]]+$")
 
+# The largest WLED document we ever ask for is /json on a big install, which is
+# well under 200 kB.  The cap exists because a Pi Zero has 512 MB and the thing
+# on the other end of the socket is whatever answered on port 80: a device that
+# is broken, replaced or hostile must not be able to read the service out of
+# memory and take the relays' watchdog down with it.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_READ_CHUNK = 64 * 1024
+
 
 class WLEDError(Exception):
     """Any failure talking to a controller."""
@@ -69,9 +77,9 @@ class WLEDClient:
         for attempt in range(3):
             try:
                 if method == "GET":
-                    resp = self.session.get(url, timeout=self.timeout)
+                    resp = self.session.get(url, timeout=self.timeout, stream=True)
                 else:
-                    resp = self.session.post(url, data=data, timeout=self.timeout,
+                    resp = self.session.post(url, data=data, timeout=self.timeout, stream=True,
                                              headers={"Content-Type": "application/json"})
             except (requests.ConnectionError, requests.Timeout, socket.gaierror) as exc:
                 raise WLEDUnreachable(_short_error(exc)) from exc
@@ -79,21 +87,26 @@ class WLEDClient:
                 raise WLEDError(_short_error(exc)) from exc
             # WLED has a single JSON buffer; it answers 503 {"error":3} when busy.
             if resp.status_code == 503 and attempt < 2:
+                resp.close()
                 time.sleep(0.25 * (attempt + 1))
                 continue
             break
-        if resp.status_code == 404:
-            raise WLEDError(f"{path} not found on this device (old firmware?)")
-        if resp.status_code == 503:
-            raise WLEDBusy("device busy, try again")
-        if resp.status_code >= 400:
-            raise WLEDError(f"HTTP {resp.status_code} from {path}: {_error_text(resp)}")
-        if not resp.content:
-            return {}
         try:
-            return resp.json()
-        except ValueError as exc:
-            raise WLEDError(f"invalid JSON from {path}") from exc
+            if resp.status_code == 404:
+                raise WLEDError(f"{path} not found on this device (old firmware?)")
+            if resp.status_code == 503:
+                raise WLEDBusy("device busy, try again")
+            body = _read_capped(resp, path)
+            if resp.status_code >= 400:
+                raise WLEDError(f"HTTP {resp.status_code} from {path}: {_error_text(body, resp)}")
+            if not body:
+                return {}
+            try:
+                return json.loads(body)
+            except ValueError as exc:
+                raise WLEDError(f"invalid JSON from {path}") from exc
+        finally:
+            resp.close()
 
     def get(self, path: str) -> Any:
         return self._request("GET", path)
@@ -259,13 +272,34 @@ WLED_ERRORS = {
 }
 
 
-def _error_text(resp) -> str:
+def _read_capped(resp, path: str) -> bytes:
+    """Read a response body, refusing one too big to be from a WLED controller."""
+    chunks: List[bytes] = []
+    total = 0
     try:
-        doc = resp.json()
+        for chunk in resp.iter_content(_READ_CHUNK):
+            total += len(chunk)
+            if total > MAX_RESPONSE_BYTES:
+                raise WLEDError(f"{path} returned more than {MAX_RESPONSE_BYTES // 1024} kB; "
+                                "that is not a WLED controller")
+            chunks.append(chunk)
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise WLEDUnreachable(_short_error(exc)) from exc
+    except requests.RequestException as exc:
+        raise WLEDError(_short_error(exc)) from exc
+    return b"".join(chunks)
+
+
+def _error_text(body: bytes, resp) -> str:
+    try:
+        doc = json.loads(body)
         code = int(doc.get("error"))
         return WLED_ERRORS.get(code, f"error {code}")
     except Exception:
-        return resp.text[:120]
+        try:
+            return body.decode(resp.encoding or "utf-8", "replace")[:120]
+        except Exception:
+            return f"HTTP {resp.status_code}"
 
 
 def _short_error(exc: Exception) -> str:

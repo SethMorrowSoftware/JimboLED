@@ -1,5 +1,3 @@
-import time
-
 import pytest
 
 from jimboled.config import ConfigStore
@@ -103,3 +101,45 @@ def test_device_manager_lifecycle(fake_wled, data_dir):
         assert not dm.has("ghost")
     finally:
         dm.stop()
+
+
+def test_a_device_answering_with_nonsense_does_not_break_the_snapshot(fake_wled, data_dir):
+    """/api/state is polled every two seconds; one odd controller must not take it down."""
+    a = fake_wled("A", 60, "aabbccdd0009")
+    store = ConfigStore(data_dir)
+    store.update(lambda c: c.update({"devices": [{"id": "a", "name": "A", "host": a.host, "enabled": True}]}))
+    dm = DeviceManager(store)
+    dm.start()
+    try:
+        dm.refresh("a")
+        rec = dm._get("a")
+        for junk in ([1, 2, 3], "not a document", None,
+                     {"seg": [1, 2], "mainseg": 0},
+                     {"seg": "everything", "mainseg": 7}):
+            dm._absorb(rec, junk, {"leds": ["nope"], "wifi": 3})
+            summary = dm.summary("a")
+            assert summary["id"] == "a"
+            assert dm.snapshot() and dm.full("a")
+    finally:
+        dm.stop()
+
+
+def test_palette_catalog_survives_a_silly_device(data_dir):
+    from jimboled.wled.fxdata import palette_catalog
+
+    # Counts arrive over the network; a few billion custom palettes must not be
+    # taken at face value on a machine with 512 MB.
+    out = palette_catalog(["Default"], {"cpalcount": 10 ** 9, "umpalcount": "lots", "umpalnames": {"a": 1}})
+    assert len(out) < 300
+    assert palette_catalog(["Default"], {"cpalcount": None}) == [{"id": 0, "name": "Default"}]
+
+
+def test_client_refuses_a_response_too_big_to_be_wled(fake_wled, monkeypatch):
+    import jimboled.wled.client as client_mod
+
+    srv = fake_wled("Big", 30, "aabbccdd000a")
+    monkeypatch.setattr(client_mod, "MAX_RESPONSE_BYTES", 64)
+    c = WLEDClient(srv.host, timeout=2)
+    with pytest.raises(WLEDError, match="not a WLED controller"):
+        c.get_info()
+    c.close()

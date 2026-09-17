@@ -150,8 +150,21 @@ def build_effect_catalog(effects: List[str], fxdata: List[str]) -> List[Dict[str
     return out
 
 
+# A WLED palette id is a byte, so no count above this can mean anything. The
+# clamp matters because these numbers come straight off the network: a device
+# reporting a few billion custom palettes would otherwise build the list.
+MAX_CUSTOM_PALETTES = 256
+
+
 def is_moonmodules(info: Dict[str, Any]) -> bool:
     return info.get("product") == "MoonModules" or "rel" in info or "-mdev" in str(info.get("ver", ""))
+
+
+def _count(value: Any) -> int:
+    try:
+        return max(0, min(int(value or 0), MAX_CUSTOM_PALETTES))
+    except (TypeError, ValueError):
+        return 0
 
 
 def is_v16_plus(info: Dict[str, Any]) -> bool:
@@ -165,15 +178,16 @@ def is_v16_plus(info: Dict[str, Any]) -> bool:
 def palette_catalog(palettes: List[str], info: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Built-in palettes plus synthesised names for custom palettes."""
     out = [{"id": i, "name": n.split("@", 1)[0]} for i, n in enumerate(palettes) if n and not n.startswith("RSVD")]
-    cpal = int(info.get("cpalcount") or 0)
+    cpal = _count(info.get("cpalcount"))
     if cpal > 0:
         # Upstream 16.0+ (build 2605010) counts custom palettes down from 200;
         # 0.14/0.15 and WLED-MM count down from 255.
         base = 200 if is_v16_plus(info) else 255
         for n in range(cpal):
             out.append({"id": base - n, "name": f"Custom {n}", "custom": True})
-    umpal = int(info.get("umpalcount") or 0)
-    names = info.get("umpalnames") or []
+    umpal = _count(info.get("umpalcount"))
+    names = info.get("umpalnames")
+    names = names if isinstance(names, list) else []
     for n in range(umpal):
         label = names[n] if n < len(names) else f"Usermod {n}"
         out.append({"id": 255 - n, "name": str(label), "custom": True})

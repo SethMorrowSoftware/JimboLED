@@ -7,7 +7,7 @@ from flask import Blueprint
 
 from .. import get_ctx
 from ..config import new_id
-from ..gpio.manager import GPIOError, SwitchConfig, validate_switches
+from ..gpio.manager import SwitchConfig, validate_switches
 from . import APIError, body, ok
 from .dashboard import ensure_tile, remove_tile
 

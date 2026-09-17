@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from flask import Blueprint
 
@@ -67,7 +67,7 @@ def sync_tiles(cfg: Dict[str, Any]) -> None:
             ensure_tile(cfg, "scene", s["id"], s.get("name", ""))
 
 
-def _clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
+def clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise APIError("tile must be an object")
     t = str(raw.get("type") or "")
@@ -94,7 +94,7 @@ def _clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
+def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise APIError("scene must be an object")
     name = str(raw.get("name") or "").strip()[:60]
@@ -137,7 +137,6 @@ def _clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
 def get_dashboard():
     ctx = get_ctx()
     cfg = ctx.store.get()
-    sync_needed = False
     dash = cfg["dashboard"]
     before = list(dash.get("tiles", []))
     sync_tiles(cfg)
@@ -190,12 +189,12 @@ def update_dashboard():
         if "tiles" in data:
             if not isinstance(data["tiles"], list):
                 raise APIError("tiles must be a list")
-            dash["tiles"] = [_clean_tile(t) for t in data["tiles"]]
+            dash["tiles"] = [clean_tile(t) for t in data["tiles"]]
             sync_tiles(cfg)
         if "scenes" in data:
             if not isinstance(data["scenes"], list):
                 raise APIError("scenes must be a list")
-            dash["scenes"] = [_clean_scene(s) for s in data["scenes"]]
+            dash["scenes"] = [clean_scene(s) for s in data["scenes"]]
             sync_tiles(cfg)
 
     ctx.store.update(mutate, backup_reason="dashboard")
@@ -206,7 +205,7 @@ def update_dashboard():
 def add_tile():
     ctx = get_ctx()
     data = body()
-    tile = _clean_tile(data)
+    tile = clean_tile(data)
     if tile["type"] in ("device", "switch", "scene"):
         raise APIError("device, switch and scene tiles are created automatically")
 
@@ -227,7 +226,7 @@ def update_tile(tile_id):
         for i, tile in enumerate(cfg["dashboard"].get("tiles", [])):
             if tile.get("id") == tile_id:
                 merged = {**tile, **{k: v for k, v in data.items() if k in ("size", "hidden", "name", "icon", "color", "opts")}}
-                cfg["dashboard"]["tiles"][i] = _clean_tile(merged)
+                cfg["dashboard"]["tiles"][i] = clean_tile(merged)
                 return
         raise APIError("unknown tile", 404)
 
@@ -282,7 +281,7 @@ def list_scenes():
 @bp.post("/scenes")
 def add_scene():
     ctx = get_ctx()
-    scene = _clean_scene(body())
+    scene = clean_scene(body())
 
     def mutate(cfg):
         cfg["dashboard"].setdefault("scenes", []).append(scene)
@@ -301,7 +300,7 @@ def update_scene(scene_id):
         scenes = cfg["dashboard"].setdefault("scenes", [])
         for i, s in enumerate(scenes):
             if s.get("id") == scene_id:
-                scenes[i] = _clean_scene({**s, **data, "id": scene_id})
+                scenes[i] = clean_scene({**s, **data, "id": scene_id})
                 for tile in cfg["dashboard"].get("tiles", []):
                     if tile.get("type") == "scene" and tile.get("ref") == scene_id:
                         tile["title"] = scenes[i]["name"]

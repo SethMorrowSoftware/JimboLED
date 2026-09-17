@@ -80,7 +80,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "show_clock": True,
         "show_estop": True,        # the red emergency-stop button in the header
         "tiles": [],              # ordered list of tile descriptors, see dashboard.py
-        "quick_presets": [],      # [{"id":..., "name":..., "actions":[...]}]
+        "scenes": [],             # [{"id":..., "name":..., "actions":[...]}], see dashboard.py
     },
     "setup_complete": False,
 }
