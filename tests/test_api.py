@@ -207,3 +207,82 @@ def test_open_redirect_blocked(client):
     client.post("/api/settings/password", json={"password": "abcd1"})
     r = client.post("/login?next=/\\evil.com", data={"password": "abcd1"})
     assert r.status_code == 302 and r.headers["Location"].endswith("/")
+
+
+# ------------------------------------------------------------ emergency stop
+def _add_switch(client, name="Bed up", pin=17, **kw):
+    payload = {"name": name, "pin": pin, "mode": "toggle"}
+    payload.update(kw)
+    r = client.post("/api/gpio/switches", json=payload)
+    assert r.status_code == 201, r.get_json()
+    return r.get_json()["switch"]
+
+
+def test_estop_engage_blocks_switch_api(client):
+    sw = _add_switch(client, interlock_group="bed")
+    assert client.post(f"/api/gpio/switches/{sw['id']}/action", json={"action": "on"}).status_code == 200
+
+    assert client.post("/api/estop/engage", json={"zone": "all", "reason": "bed ran away"}).status_code == 200
+    status = client.get("/api/estop").get_json()
+    assert status["engaged"] and status["engaged_zones"] == ["all"]
+
+    r = client.post(f"/api/gpio/switches/{sw['id']}/action", json={"action": "on"})
+    assert r.status_code == 409
+    payload = r.get_json()
+    assert payload["estop"] is True and payload["zone"] == "all"
+
+    # Off always works, even latched.
+    assert client.post(f"/api/gpio/switches/{sw['id']}/action", json={"action": "off"}).status_code == 200
+
+    assert client.post("/api/estop/reset", json={"zone": "all"}).status_code == 200
+    assert client.post(f"/api/gpio/switches/{sw['id']}/action", json={"action": "on"}).status_code == 200
+
+
+def test_estop_zone_crud(client):
+    _add_switch(client, name="Awning out", pin=22, interlock_group="awning")
+    r = client.post("/api/estop/zones", json={"name": "Awning", "scope": "group", "refs": ["awning"]})
+    assert r.status_code == 201
+    zone_id = r.get_json()["zone"]["id"]
+    assert client.put(f"/api/estop/zones/{zone_id}", json={"name": "Awning motor"}).status_code == 200
+    assert any(z["name"] == "Awning motor" for z in client.get("/api/estop").get_json()["zones"])
+
+    # The master stop is not editable or removable.
+    assert client.put("/api/estop/zones/all", json={"name": "x"}).status_code == 400
+    assert client.delete("/api/estop/zones/all").status_code == 400
+
+    assert client.delete(f"/api/estop/zones/{zone_id}").status_code == 200
+    assert [z["id"] for z in client.get("/api/estop").get_json()["zones"]] == ["all"]
+
+
+def test_estop_input_rejects_a_pin_a_switch_uses(client):
+    _add_switch(client, pin=17)
+    r = client.post("/api/estop/inputs", json={"name": "Panic", "pin": 17})
+    assert r.status_code == 400 and "already used" in r.get_json()["error"]
+    assert client.post("/api/estop/inputs", json={"name": "Panic", "pin": 26}).status_code == 201
+    pins = {p["bcm"]: p for p in client.get("/api/gpio/pins").get_json()["pins"]}
+    assert "emergency stop" in (pins[26]["in_use_by"] or "")
+
+
+def test_estop_blocks_scenes(client):
+    sw = _add_switch(client)
+    r = client.post("/api/scenes", json={"name": "Sit up", "actions": [
+        {"type": "switch", "ref": sw["id"], "action": "on"}]})
+    assert r.status_code == 201
+    scene_id = r.get_json()["scene"]["id"]
+
+    client.post("/api/estop/engage", json={"zone": "all"})
+    result = client.post(f"/api/scenes/{scene_id}/run").get_json()
+    assert result["failed"], "a scene must not drive a latched relay"
+    assert "Emergency stop" in result["failed"][0]["error"]
+
+    client.post("/api/estop/reset", json={"zone": "all"})
+    assert not client.post(f"/api/scenes/{scene_id}/run").get_json()["failed"]
+
+
+def test_estop_state_is_in_the_aggregate_snapshot(client):
+    _add_switch(client)
+    client.post("/api/estop/engage", json={"zone": "all", "reason": "testing"})
+    gpio = client.get("/api/state").get_json()["gpio"]
+    assert gpio["estop"]["engaged"] is True
+    assert gpio["switches"][0]["locked_out"] is True
+    assert gpio["switches"][0]["locked_by"] == "All relays"

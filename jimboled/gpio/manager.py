@@ -15,6 +15,8 @@ Safety rules (all enforced here, never in the browser):
   energises
 * ``max_on_seconds`` caps any on-time (0 disables the cap for toggle switches)
 * every relay is driven off at start-up, at shutdown and on process exit
+* a latched **emergency stop** (see :mod:`jimboled.gpio.estop`) can lock out
+  any zone of relays until somebody explicitly resets it
 * a watchdog thread re-checks the rules every 100 ms
 """
 from __future__ import annotations
@@ -26,9 +28,22 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from .backend import pi_model, select_pin_factory
+from .common import (  # noqa: F401  (re-exported: importers use jimboled.gpio.manager)
+    PHYSICAL_PIN,
+    PIN_NOTES,
+    PULL_UP_AT_BOOT,
+    RECOMMENDED_PINS,
+    RESERVED_PINS,
+    EStopEngaged,
+    GPIOError,
+    as_bool,
+    check_pin,
+)
+from .estop import MASTER_ZONE_ID, EStopController
 
 log = logging.getLogger(__name__)
 
@@ -36,72 +51,6 @@ MODES = ("toggle", "momentary", "pulse")
 WATCHDOG_TICK_S = 0.1
 DEFAULT_PULSE_MS = 500
 DEFAULT_MAX_ON = {"toggle": 0, "momentary": 60, "pulse": 0}
-
-# BCM pins exposed on the 40-pin header, with notes for the pin picker.
-PIN_NOTES: Dict[int, str] = {
-    0: "Reserved: HAT ID EEPROM (do not use)",
-    1: "Reserved: HAT ID EEPROM (do not use)",
-    2: "I2C SDA – has a fixed pull-up resistor",
-    3: "I2C SCL – has a fixed pull-up resistor",
-    4: "General purpose (1-Wire by default if enabled)",
-    5: "General purpose",
-    6: "General purpose",
-    7: "SPI CE1 (fine if SPI is disabled)",
-    8: "SPI CE0 (fine if SPI is disabled)",
-    9: "SPI MISO (fine if SPI is disabled)",
-    10: "SPI MOSI (fine if SPI is disabled)",
-    11: "SPI SCLK (fine if SPI is disabled)",
-    12: "General purpose (PWM0)",
-    13: "General purpose (PWM1)",
-    14: "UART TX – avoid if the serial console is enabled",
-    15: "UART RX – avoid if the serial console is enabled",
-    16: "General purpose",
-    17: "General purpose – recommended",
-    18: "General purpose (PCM/PWM)",
-    19: "General purpose (PCM)",
-    20: "General purpose (PCM)",
-    21: "General purpose (PCM)",
-    22: "General purpose – recommended",
-    23: "General purpose – recommended",
-    24: "General purpose – recommended",
-    25: "General purpose – recommended",
-    26: "General purpose",
-    27: "General purpose – recommended",
-}
-RECOMMENDED_PINS = (17, 27, 22, 23, 24, 25, 5, 6, 12, 13, 16, 19, 20, 21, 26)
-RESERVED_PINS = (0, 1)
-# Power-on default pulls (BCM2835/6/7): GPIO0-8 pull UP, GPIO9-27 pull DOWN.
-# Until the firmware applies config.txt (a few seconds) the pin sits at this
-# level, so an active-LOW relay board is safest on a pull-up pin (4, 5, 6) and
-# an active-HIGH board on a pull-down pin (9-27).
-PULL_UP_AT_BOOT = frozenset(range(0, 9))
-
-# Physical header position for each BCM pin (40-pin header, J8).
-PHYSICAL_PIN: Dict[int, int] = {
-    2: 3, 3: 5, 4: 7, 14: 8, 15: 10, 17: 11, 18: 12, 27: 13, 22: 15, 23: 16,
-    24: 18, 10: 19, 9: 21, 25: 22, 11: 23, 8: 24, 7: 26, 0: 27, 1: 28, 5: 29,
-    6: 31, 12: 32, 13: 33, 19: 35, 16: 36, 26: 37, 20: 38, 21: 40,
-}
-
-
-class GPIOError(Exception):
-    """Raised for invalid switch configuration or disallowed actions."""
-
-
-def as_bool(value: Any, default: bool = False) -> bool:
-    """Lenient boolean: accepts JSON bools, 0/1 and 'true'/'false'/'on'/'off' strings."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "on", "t", "y"):
-        return True
-    if text in ("0", "false", "no", "off", "f", "n", ""):
-        return False
-    raise GPIOError(f"'{value}' is not a valid yes/no value")
 
 
 @dataclass
@@ -128,14 +77,7 @@ class SwitchConfig:
         if not sid:
             raise GPIOError("switch id is required")
         name = str(raw.get("name") or sid).strip()[:60]
-        try:
-            pin = int(raw.get("pin"))
-        except (TypeError, ValueError):
-            raise GPIOError(f"{name}: pin must be a BCM number (e.g. 17)")
-        if pin not in PIN_NOTES:
-            raise GPIOError(f"{name}: GPIO{pin} is not on the 40-pin header")
-        if pin in RESERVED_PINS:
-            raise GPIOError(f"{name}: GPIO{pin} is reserved for the HAT EEPROM")
+        pin = check_pin(raw.get("pin"), name)
         mode = str(raw.get("mode") or "toggle")
         if mode not in MODES:
             raise GPIOError(f"{name}: mode must be one of {', '.join(MODES)}")
@@ -234,6 +176,7 @@ class GPIOManager:
         self._factory = None
         self.factory_name = "unavailable"
         self.simulated = True
+        self.estop = EStopController(Path(config_store.data_dir) / "estop.json")
         self._stop = threading.Event()
         self._watchdog: Optional[threading.Thread] = None
         self._on_event = on_event
@@ -245,6 +188,10 @@ class GPIOManager:
         self._factory, self.factory_name, self.simulated = select_pin_factory(cfg.get("backend", "auto"))
         self._dead_time = float(cfg.get("interlock_dead_time_ms", 250)) / 1000.0
         self._hold_timeout = float(cfg.get("hold_timeout_s", 1.5))
+        # A latch persisted by a previous run is restored *before* any relay can
+        # be claimed: a lock-out must survive a crash, a restart and a power cut.
+        self.estop.load()
+        self.estop.configure(cfg.get("estop") or {}, self._factory, self.simulated)
         self._apply_config(cfg.get("switches", []))
         self._stop.clear()
         self._watchdog = threading.Thread(target=self._watchdog_loop, name="gpio-watchdog", daemon=True)
@@ -265,6 +212,7 @@ class GPIOManager:
                 self._set_off(rt, "shutdown")
                 self._close_device(rt)
             self._switches.clear()
+            self.estop.close()
         log.info("GPIO manager stopped; all relays released")
 
     def _on_config_change(self, before: Dict[str, Any], after: Dict[str, Any]) -> None:
@@ -287,6 +235,11 @@ class GPIOManager:
                 except Exception:
                     pass
             self._factory, self.factory_name, self.simulated = select_pin_factory(g_after.get("backend", "auto"))
+            with self._lock:
+                self.estop.configure(g_after.get("estop") or {}, self._factory, self.simulated)
+        elif g_before.get("estop") != g_after.get("estop"):
+            with self._lock:
+                self.estop.configure(g_after.get("estop") or {}, self._factory, self.simulated)
         self._apply_config(g_after.get("switches", []))
 
     def _apply_config(self, raw_switches: List[Dict[str, Any]]) -> None:
@@ -363,6 +316,17 @@ class GPIOManager:
             raise GPIOError(f"'{rt.cfg.name}' is unavailable: {rt.error or 'no pin'}")
         return rt
 
+    def _check_estop(self, rt: _Runtime) -> None:
+        """Refuse to energise a relay a latched emergency stop covers.
+
+        Caller holds the lock.  Turning *off* is never refused.
+        """
+        zone = self.estop.covering(rt.cfg)
+        if zone is not None:
+            raise EStopEngaged(
+                f"Emergency stop \u201c{zone.name}\u201d is engaged \u2013 reset it before using \u201c{rt.cfg.name}\u201d",
+                zone.id, zone.name)
+
     def _record(self, rt: _Runtime, action: str, source: str, reason: str = "") -> None:
         evt = {"ts": time.time(), "switch": rt.cfg.id, "name": rt.cfg.name,
                "action": action, "source": source, "reason": reason}
@@ -383,6 +347,7 @@ class GPIOManager:
         while True:
             with self._lock:
                 rt = self._get(switch_id)
+                self._check_estop(rt)
                 if rt.on:
                     return rt
                 group = rt.cfg.interlock_group
@@ -438,6 +403,7 @@ class GPIOManager:
     def turn_on(self, switch_id: str, source: str = "api") -> Dict[str, Any]:
         with self._lock:
             rt = self._get(switch_id)
+            self._check_estop(rt)
             if rt.cfg.mode == "momentary":
                 raise GPIOError(f"'{rt.cfg.name}' is a hold-to-run switch; use press/heartbeat/release")
             if rt.cfg.mode == "pulse":
@@ -459,11 +425,13 @@ class GPIOManager:
             rt = self._get(switch_id)
             if rt.on:
                 return self.turn_off(switch_id, source)
+            self._check_estop(rt)
             return self.turn_on(switch_id, source)
 
     def pulse(self, switch_id: str, duration_ms: Optional[int] = None, source: str = "api") -> Dict[str, Any]:
         with self._lock:
             rt = self._get(switch_id)
+            self._check_estop(rt)
             try:
                 ms = int(duration_ms) if duration_ms else rt.cfg.pulse_ms
             except (TypeError, ValueError):
@@ -491,6 +459,7 @@ class GPIOManager:
         """Start holding a momentary switch.  Returns snapshot incl. hold token."""
         with self._lock:
             rt = self._get(switch_id)
+            self._check_estop(rt)
             if rt.cfg.mode != "momentary":
                 raise GPIOError(f"'{rt.cfg.name}' is not a hold-to-run switch")
         self._energise(switch_id, source)
@@ -530,16 +499,90 @@ class GPIOManager:
                 self._set_off(rt, f"all-off:{source}")
             return self.snapshot()
 
+    # --------------------------------------------------------- emergency stop
+    def _enforce_estop(self, *, force: bool = False, reason: str = "estop") -> List[str]:
+        """Drive every locked-out relay off.  Caller holds the lock.
+
+        ``force`` also re-writes the pin of a relay we already believe is off –
+        used the moment a stop engages, so a wedged output cannot survive it.
+        Returns the names of the relays that were actually running.
+        """
+        stopped: List[str] = []
+        if not self.estop.any_engaged():
+            return stopped
+        for rt in self._switches.values():
+            zone = self.estop.covering(rt.cfg)
+            if zone is None:
+                continue
+            if rt.on:
+                stopped.append(rt.cfg.name)
+                self._set_off(rt, f"{reason}:{zone.id}")
+            elif force and rt.device is not None:
+                try:
+                    rt.device.off()
+                except Exception as exc:
+                    log.error("emergency stop could not drive GPIO%s off: %s", rt.cfg.pin, exc)
+        return stopped
+
+    def engage_estop(self, zone_id: str = MASTER_ZONE_ID, reason: str = "", source: str = "web") -> Dict[str, Any]:
+        """Latch an emergency stop and release everything it covers, at once."""
+        with self._lock:
+            zone = self.estop.zone(zone_id)
+            newly = self.estop.engage(zone_id, reason, source)
+            stopped = self._enforce_estop(force=True, reason="estop")
+            if newly:
+                self._events.append({"ts": time.time(), "switch": "", "name": zone.name,
+                                     "action": "estop-engaged", "source": source,
+                                     "reason": reason or "manual"})
+                if self._on_event:
+                    try:
+                        self._on_event(self._events[-1])
+                    except Exception:
+                        log.exception("gpio event callback failed")
+            snap = self.snapshot()
+            snap["stopped"] = stopped
+            snap["newly_engaged"] = newly
+            return snap
+
+    def reset_estop(self, zone_id: str = MASTER_ZONE_ID, source: str = "web") -> Dict[str, Any]:
+        """Clear a latched emergency stop.  Relays stay off until asked for."""
+        with self._lock:
+            zone = self.estop.zone(zone_id)
+            cleared = self.estop.reset(zone_id, source)
+            if cleared:
+                self._events.append({"ts": time.time(), "switch": "", "name": zone.name,
+                                     "action": "estop-reset", "source": source, "reason": ""})
+                if self._on_event:
+                    try:
+                        self._on_event(self._events[-1])
+                    except Exception:
+                        log.exception("gpio event callback failed")
+            snap = self.snapshot()
+            snap["cleared"] = cleared
+            return snap
+
+    def estop_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return self.estop.snapshot([rt.cfg for rt in self._switches.values()])
+
     def test_pin(self, pin: int, active_high: bool, duration_ms: int = 300) -> bool:
         """Briefly pulse a pin so the user can identify the relay."""
         duration_ms = max(20, min(int(duration_ms), 2000))
         with self._lock:
             for rt in self._switches.values():
                 if rt.cfg.pin == pin and rt.device is not None:
+                    self._check_estop(rt)
                     configured = rt.cfg.id
                     break
             else:
                 configured = None
+                for zone in self.estop.all_zones():
+                    # A master stop locks the whole header, including pins that
+                    # are not (yet) attached to a switch.
+                    if zone.scope == "all" and self.estop.is_engaged(zone.id):
+                        raise EStopEngaged(
+                            f"Emergency stop \u201c{zone.name}\u201d is engaged \u2013 reset it before testing pins",
+                            zone.id, zone.name)
             if configured is None:
                 if self._factory is None:
                     raise GPIOError("GPIO library unavailable")
@@ -573,6 +616,20 @@ class GPIOManager:
     def _watchdog_tick(self) -> None:
         now = time.monotonic()
         with self._lock:
+            # A physical emergency stop outranks everything else, so it is read
+            # first and latched before any other rule gets a chance to run.
+            for trip in self.estop.poll():
+                if self.estop.engage(trip["zone"], trip["reason"], source=f"hardware:{trip['name']}"):
+                    evt = {"ts": time.time(), "switch": "", "name": trip["name"],
+                           "action": "estop-engaged", "source": "hardware", "reason": trip["reason"]}
+                    self._events.append(evt)
+                    if self._on_event:
+                        try:
+                            self._on_event(evt)
+                        except Exception:
+                            log.exception("gpio event callback failed")
+                    self._enforce_estop(force=True, reason="estop-hardware")
+            self._enforce_estop()
             for rt in self._switches.values():
                 cfg = rt.cfg
                 if rt.on:
@@ -602,6 +659,7 @@ class GPIOManager:
     def _snapshot_one(self, rt: _Runtime) -> Dict[str, Any]:
         now = time.monotonic()
         cfg = rt.cfg
+        zone = self.estop.covering(cfg)
         remaining = None
         if rt.on and cfg.max_on_seconds:
             remaining = max(0.0, cfg.max_on_seconds - (now - rt.since))
@@ -625,6 +683,9 @@ class GPIOManager:
             "pulse_ms": cfg.pulse_ms,
             "last_off_reason": rt.last_off_reason,
             "activations": rt.activations,
+            "locked_out": zone is not None,
+            "locked_by": zone.name if zone is not None else "",
+            "locked_zone": zone.id if zone is not None else "",
         }
 
     def snapshot(self) -> Dict[str, Any]:
@@ -635,6 +696,7 @@ class GPIOManager:
                 "pi_model": pi_model(),
                 "hold_timeout_s": self._hold_timeout if self.started else None,
                 "switches": [self._snapshot_one(rt) for rt in self._switches.values()],
+                "estop": self.estop.snapshot([rt.cfg for rt in self._switches.values()]),
             }
 
     def events(self, limit: int = 50) -> List[Dict[str, Any]]:
@@ -644,6 +706,7 @@ class GPIOManager:
     def pin_map(self) -> List[Dict[str, Any]]:
         with self._lock:
             in_use = {rt.cfg.pin: rt.cfg.name for rt in self._switches.values()}
+            in_use.update({i.pin: f"{i.name} (emergency stop input)" for i in self.estop.inputs})
         out = []
         for bcm, note in sorted(PIN_NOTES.items()):
             out.append({

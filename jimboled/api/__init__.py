@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from flask import Flask, jsonify, request
 
 from ..config import ConfigError
-from ..gpio.manager import GPIOError
+from ..gpio.common import EStopEngaged, GPIOError
 from ..wled.client import WLEDError
 from ..wled.manager import DeviceError
 
@@ -39,11 +39,12 @@ def ok(payload: Optional[Any] = None, status: int = 200, **kwargs):
 
 
 def register_blueprints(app: Flask) -> None:
-    from . import dashboard, devices, gpio, system, ui
+    from . import dashboard, devices, estop, gpio, system, ui
 
     app.register_blueprint(ui.bp)
     app.register_blueprint(devices.bp, url_prefix="/api")
     app.register_blueprint(gpio.bp, url_prefix="/api")
+    app.register_blueprint(estop.bp, url_prefix="/api")
     app.register_blueprint(dashboard.bp, url_prefix="/api")
     app.register_blueprint(system.bp, url_prefix="/api")
 
@@ -58,6 +59,13 @@ def register_blueprints(app: Flask) -> None:
     @app.errorhandler(WLEDError)
     def _wled_error(exc):
         return jsonify({"error": str(exc)}), 502
+
+    @app.errorhandler(EStopEngaged)
+    def _estop_engaged(exc: EStopEngaged):
+        # 409: the request is valid, the system is just latched out.  The zone
+        # lets the dashboard offer the right "reset" button straight away.
+        return jsonify({"error": str(exc), "estop": True,
+                        "zone": exc.zone_id, "zone_name": exc.zone_name}), 409
 
     @app.errorhandler(GPIOError)
     def _gpio_error(exc):
