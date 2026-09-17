@@ -20,6 +20,8 @@ DENSITIES = ("comfortable", "compact", "roomy")
 RADII = ("sharp", "soft", "round")
 TEXT_SCALE_RANGE = (85, 150)
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# Total time one scene run may spend waiting, across all of its delay actions.
+SCENE_DELAY_BUDGET_S = 30.0
 
 
 # ------------------------------------------------------------ tile helpers
@@ -344,6 +346,11 @@ def run_scene_actions(ctx, scene: Dict[str, Any]) -> List[Dict[str, Any]]:
     from ..gpio.manager import GPIOError
     from ..wled.manager import DeviceError
 
+    # A scene runs on the request's own worker thread, and there are only eight
+    # of them.  Each delay is capped at 10 s, but nothing capped how many a
+    # scene could string together; the budget keeps one scene from holding a
+    # worker (and the dashboard's share of them) for minutes.
+    budget = SCENE_DELAY_BUDGET_S
     results = []
     for action in scene.get("actions", []):
         kind = action.get("type")
@@ -367,7 +374,12 @@ def run_scene_actions(ctx, scene: Dict[str, Any]) -> List[Dict[str, Any]]:
                 elif act == "pulse":
                     ctx.gpio.pulse(action["ref"], source="scene")
             elif kind == "delay":
-                _time.sleep(min(10.0, action.get("ms", 0) / 1000.0))
+                wait = max(0.0, min(10.0, action.get("ms", 0) / 1000.0, budget))
+                budget -= wait
+                if wait:
+                    _time.sleep(wait)
+                elif action.get("ms"):
+                    entry["error"] = "skipped: this scene has already waited long enough"
         except (DeviceError, GPIOError) as exc:
             entry["error"] = str(exc)
         results.append(entry)

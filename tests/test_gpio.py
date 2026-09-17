@@ -237,6 +237,23 @@ def test_pin_test_releases_its_pin(data_dir):
         m.stop()
 
 
+def test_pin_test_on_a_configured_interlocked_switch(data_dir):
+    """This path goes through pulse(), which may wait out a dead time."""
+    _, m = make_manager(data_dir, [
+        {"id": "up", "name": "Up", "pin": 17, "mode": "toggle", "interlock_group": "bed"},
+        {"id": "down", "name": "Down", "pin": 27, "mode": "toggle", "interlock_group": "bed"},
+    ])
+    try:
+        m.turn_on("up")
+        assert m.test_pin(27, True, 60) is True
+        assert not state(m, "up")["on"], "the interlock still applies to a pin test"
+        time.sleep(0.3)
+        assert not state(m, "down")["on"]
+        assert not m._test_pins, "a configured pin is pulsed as a switch, not claimed separately"
+    finally:
+        m.stop()
+
+
 def test_watchdog_reclaims_an_abandoned_pin_test(data_dir):
     """If the request thread dies mid-pulse, the pin must not keep driving a relay."""
     from gpiozero import OutputDevice

@@ -17,9 +17,19 @@ systemctl daemon-reload
 systemctl reset-failed jimboled.service >/dev/null 2>&1 || true
 rm -rf /opt/jimboled
 for c in /boot/firmware/config.txt /boot/config.txt; do
-  if [ -f "$c" ] && grep -q '^# BEGIN JimboLED' "$c"; then
-    tmp="$(mktemp)"; awk '/^# BEGIN JimboLED/{skip=1} !skip{print} /^# END JimboLED/{skip=0}' "$c" > "$tmp"; cat "$tmp" > "$c"; rm -f "$tmp"
+  [ -f "$c" ] && grep -q '^# BEGIN JimboLED' "$c" || continue
+  # Only touch a properly closed block. A BEGIN without its END would take the
+  # rest of config.txt with it, and that is the file the Pi needs to boot.
+  if [ "$(grep -c '^# BEGIN JimboLED' "$c")" != "$(grep -c '^# END JimboLED' "$c")" ]; then
+    echo "! leaving $c alone: the JimboLED block is not closed properly" >&2
+    continue
   fi
+  tmp="$(mktemp)"
+  awk '/^# BEGIN JimboLED/{skip=1} !skip{print} /^# END JimboLED/{skip=0}' "$c" > "$tmp"
+  cp -p "$c" "$c.jimboled.bak"
+  cat "$tmp" > "$c"
+  rm -f "$tmp"
+  sync "$c" 2>/dev/null || sync || true
 done
 if [ "$PURGE" = 1 ]; then
   rm -rf /var/lib/jimboled /etc/jimboled

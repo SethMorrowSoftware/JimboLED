@@ -399,3 +399,19 @@ def test_auth_status_agrees_with_the_request_guard(client):
     assert client.post("/api/settings/password", json={"current": "secret1", "password": "secret2"}).status_code == 200
     assert other.get("/api/state").status_code == 401
     assert other.get("/api/auth").json["authed"] is False
+
+
+def test_a_scene_cannot_hold_a_worker_thread_for_minutes(client, monkeypatch):
+    from jimboled.api import dashboard as dash_api
+
+    monkeypatch.setattr(dash_api, "SCENE_DELAY_BUDGET_S", 0.3)
+    actions = [{"type": "delay", "ms": 200} for _ in range(10)]
+    actions.append({"type": "all", "state": {"on": False}})
+    sc = client.post("/api/scenes", json={"name": "Slow", "actions": actions}).json["scene"]["id"]
+    t0 = time.monotonic()
+    r = client.post(f"/api/scenes/{sc}/run")
+    elapsed = time.monotonic() - t0
+    assert r.status_code == 200 and elapsed < 3, elapsed
+    # The waits stop, but the actions after them still run.
+    assert any(x["type"] == "all" and not x.get("error") for x in r.json["results"])
+    assert any("waited long enough" in (x.get("error") or "") for x in r.json["results"])
