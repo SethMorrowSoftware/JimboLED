@@ -260,3 +260,23 @@ def test_lenient_booleans():
     assert SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "1"}).active_high is True
     with pytest.raises(GPIOError):
         SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "maybe"})
+
+
+def test_a_hand_edited_config_does_not_stop_the_manager_starting(data_dir):
+    """Failing to start is the one state in which nothing is watching the relays."""
+    store = ConfigStore(data_dir)
+    store.update(lambda c: c["gpio"].update({
+        "backend": "mock", "interlock_dead_time_ms": "two hundred", "hold_timeout_s": None,
+        "switches": [{"id": "lamp", "name": "Lamp", "pin": 22, "mode": "toggle"}],
+    }))
+    m = GPIOManager(store)
+    m.start()
+    try:
+        assert m.snapshot()["hold_timeout_s"] == 1.5
+        assert m.turn_on("lamp")["on"]
+        # A later edit that is just as bad must not take the manager down either.
+        store.update(lambda c: c["gpio"].update({"hold_timeout_s": float("nan"),
+                                                 "interlock_dead_time_ms": -5}))
+        assert m.snapshot()["hold_timeout_s"] == 1.5
+    finally:
+        m.stop()

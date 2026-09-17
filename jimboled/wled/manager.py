@@ -8,6 +8,7 @@ from WLED's verbose response so the UI never shows stale values.
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import re
 import threading
@@ -225,6 +226,7 @@ class DeviceManager:
         self._stop.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="wled-scheduler", daemon=True)
         self._thread.start()
+        atexit.register(self.stop)
         self.started = True
 
     def stop(self) -> None:

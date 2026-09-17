@@ -78,6 +78,16 @@ case "$cmd" in
     # power-on until the service starts. The managed block is idempotent.
     [ -n "$CONFIG_TXT" ] || { echo "no config.txt found (not a Raspberry Pi?)"; exit 0; }
     spec="${2:-none}"
+    # Only strip the managed block when it is properly closed. A BEGIN without
+    # its END (a half-written file, someone editing by hand) would otherwise
+    # take the whole rest of config.txt with it, and that is the file the Pi
+    # needs to boot.
+    begins="$(grep -c '^# BEGIN JimboLED' "$CONFIG_TXT" || true)"
+    ends="$(grep -c '^# END JimboLED' "$CONFIG_TXT" || true)"
+    if [ "$begins" != "$ends" ]; then
+      echo "refusing to edit $CONFIG_TXT: the JimboLED block is not closed properly" >&2
+      exit 1
+    fi
     tmp="$(mktemp "${CONFIG_TXT}.jimboled.XXXXXX")"
     awk '/^# BEGIN JimboLED/{skip=1} !skip{print} /^# END JimboLED/{skip=0}' "$CONFIG_TXT" > "$tmp"
     if [ "$spec" != "none" ] && [ -n "$spec" ]; then
@@ -96,8 +106,12 @@ case "$cmd" in
       } >> "$tmp"
     fi
     if ! cmp -s "$tmp" "$CONFIG_TXT"; then
+      # A truncated config.txt is a Pi that does not come back, so keep the
+      # target's own mode and flush before swapping it in.
+      chmod --reference="$CONFIG_TXT" "$tmp" 2>/dev/null || chmod 0755 "$tmp" 2>/dev/null || true
       cp -p "$CONFIG_TXT" "${CONFIG_TXT}.jimboled.bak"
       mv -f "$tmp" "$CONFIG_TXT"
+      sync "$CONFIG_TXT" 2>/dev/null || sync || true
       echo "updated $CONFIG_TXT (takes effect after the next reboot)"
     else
       rm -f "$tmp"
@@ -114,7 +128,10 @@ case "$cmd" in
            /bin/bash -c 'git fetch -q origin 2>&1 && b=$(git rev-parse --abbrev-ref HEAD) && l=$(git rev-parse --short HEAD) && r=$(git rev-parse --short "origin/$b" 2>/dev/null || echo "$l") && n=$(git rev-list --count "HEAD..origin/$b" 2>/dev/null || echo 0) && echo "OK $l $r $n"' 2>&1 || true)"
     case "$out" in
       OK*)
-        set -- $out; local_rev="$2"; remote_rev="$3"; behind="$4"
+        # Defaults matter: `set -u` turns a short reply into a hard failure,
+        # and "could not check" is a better answer than a 500.
+        # shellcheck disable=SC2086  # splitting the "OK a b c" line is the point
+        set -- $out; local_rev="${2:-}"; remote_rev="${3:-}"; behind="${4:-0}"
         if [ "${behind:-0}" -gt 0 ]; then
           echo "{\"update_available\":true,\"local\":\"$local_rev\",\"remote\":\"$remote_rev\",\"behind\":$behind,\"message\":\"$behind new change(s) available.\"}"
         else

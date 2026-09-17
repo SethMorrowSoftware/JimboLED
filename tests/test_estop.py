@@ -334,3 +334,16 @@ def test_reset_says_what_it_cannot_read(data_dir):
             m.reset_estop(MASTER_ZONE_ID)
     finally:
         m.stop()
+
+
+def test_invalid_input_config_keeps_the_working_buttons(data_dir):
+    """Refusing a bad edit must not answer it by disarming the physical stop."""
+    store, m = hardware_manager(data_dir)
+    try:
+        assert [i.name for i in m.estop.inputs] == ["Bedside button"]
+        store.update(lambda c: c["gpio"]["estop"].__setitem__(
+            "inputs", [{"id": "e1", "name": "Bedside button", "pin": 999}]))
+        assert [i.name for i in m.estop.inputs] == ["Bedside button"]
+        assert m.estop._devices.get("e1") is not None
+    finally:
+        m.stop()

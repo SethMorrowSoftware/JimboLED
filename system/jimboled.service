@@ -28,7 +28,10 @@ EnvironmentFile=-/etc/jimboled/jimboled.env
 ExecStart=__VENV__/bin/python -m jimboled
 # Belt and braces: after the process is gone (even SIGKILL), drive every relay pin to its OFF level.
 ExecStopPost=+__APP__/bin/jimboled-helper pins-safe
-Restart=on-failure
+# always, not on-failure: this is an appliance that drives a bed motor, and a
+# clean exit for a reason nobody predicted still leaves nobody in control of
+# the relays. `systemctl stop` is still respected.
+Restart=always
 RestartSec=5
 TimeoutStopSec=20
 KillSignal=SIGTERM

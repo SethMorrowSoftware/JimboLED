@@ -285,15 +285,18 @@ class EStopController:
         cfg = cfg or {}
         self.master_name = str(cfg.get("master_name") or "All relays")[:60]
         self.confirm_engage = bool(cfg.get("confirm_engage", False))
+        # A section that will not validate keeps whatever was already working.
+        # Throwing the inputs away instead would answer "this configuration is
+        # wrong" by disarming the physical emergency stop, which is the one
+        # outcome worse than refusing the edit.
         try:
             self.zones = validate_zones(cfg.get("zones", []))
         except GPIOError as exc:
-            log.error("Invalid emergency stop zones ignored: %s", exc)
+            log.error("Invalid emergency stop zones ignored, keeping the previous ones: %s", exc)
         try:
             self.inputs = validate_inputs(cfg.get("inputs", []))
         except GPIOError as exc:
-            log.error("Invalid emergency stop inputs ignored: %s", exc)
-            self.inputs = []
+            log.error("Invalid emergency stop inputs ignored, keeping the previous ones: %s", exc)
         # Drop latches for zones that no longer exist so the UI cannot show a
         # stop nobody is able to reset.
         known = {z.id for z in self.all_zones()}

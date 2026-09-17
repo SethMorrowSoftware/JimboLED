@@ -56,6 +56,17 @@ DEFAULT_MAX_ON = {"toggle": 0, "momentary": 60, "pulse": 0}
 TEST_PIN_GRACE_S = 1.0
 
 
+def _positive(value: Any, default: float, lo: float, hi: float) -> float:
+    """A number from the config file, clamped, with a fallback for nonsense."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    if out != out:  # NaN compares false against everything, including the clamp
+        return default
+    return max(lo, min(out, hi))
+
+
 class _GuardedLock:
     """An ``RLock`` that also tells us how deep the current thread is inside it.
 
@@ -234,8 +245,7 @@ class GPIOManager:
     def start(self) -> None:
         cfg = self.store.section("gpio") or {}
         self._factory, self.factory_name, self.simulated = select_pin_factory(cfg.get("backend", "auto"))
-        self._dead_time = float(cfg.get("interlock_dead_time_ms", 250)) / 1000.0
-        self._hold_timeout = float(cfg.get("hold_timeout_s", 1.5))
+        self._read_timings(cfg)
         # A latch persisted by a previous run is restored *before* any relay can
         # be claimed: a lock-out must survive a crash, a restart and a power cut.
         self.estop.load()
@@ -269,8 +279,7 @@ class GPIOManager:
         g_before, g_after = before.get("gpio", {}), after.get("gpio", {})
         if g_before == g_after:
             return
-        self._dead_time = float(g_after.get("interlock_dead_time_ms", 250)) / 1000.0
-        self._hold_timeout = float(g_after.get("hold_timeout_s", 1.5))
+        self._read_timings(g_after)
         if g_before.get("backend") != g_after.get("backend"):
             with self._lock:
                 # Every pin has to let go of the old factory before it closes,
@@ -295,6 +304,16 @@ class GPIOManager:
             with self._lock:
                 self.estop.configure(g_after.get("estop") or {}, self._factory, self.simulated)
         self._apply_config(g_after.get("switches", []))
+
+    def _read_timings(self, cfg: Dict[str, Any]) -> None:
+        """Pick up the safety timings, falling back rather than refusing to start.
+
+        These come out of a file a person can edit. A typo must not stop the
+        manager coming up, because the process failing to start is the one
+        state in which nothing is watching the relays at all.
+        """
+        self._dead_time = _positive(cfg.get("interlock_dead_time_ms"), 250.0, 0.0, 5000.0) / 1000.0
+        self._hold_timeout = _positive(cfg.get("hold_timeout_s"), 1.5, 0.1, 30.0)
 
     def _apply_config(self, raw_switches: List[Dict[str, Any]]) -> None:
         try:
