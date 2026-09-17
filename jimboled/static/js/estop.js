@@ -12,6 +12,17 @@
   function master() { return zones().find((z) => z.id === 'all'); }
 
   async function engage(zoneId, reason) {
+    // Off by default: in an emergency a dialog is an obstacle. Some people
+    // still want one against a pocket-tap, so it is theirs to turn on.
+    if ((App.state.gpio.estop || {}).confirm_engage) {
+      const zone = zones().find((z) => z.id === zoneId);
+      const ok = await UI.confirm({
+        title: 'Emergency stop',
+        message: `Cut and lock out ${zone ? `\u201c${zone.name}\u201d` : 'every relay'}?`,
+        okText: 'Stop now', danger: true,
+      });
+      if (!ok) return false;
+    }
     try {
       const r = await api.post('/api/estop/engage', { zone: zoneId, reason: reason || '' });
       if (navigator.vibrate) navigator.vibrate([40, 60, 40]);
@@ -82,7 +93,10 @@
     let detail = latched.length === 1
       ? `${(latched[0].switches || []).length} switch${(latched[0].switches || []).length === 1 ? '' : 'es'} locked out. Nothing can be switched on until you reset it.`
       : 'Several zones are locked out. Nothing they cover can be switched on until you reset them.';
-    if (hw.length) detail = `Held by the physical button (${hw.join(', ')}). Release it, then reset here.`;
+    // A stop held down by hardware cannot be reset from here, so say why
+    // rather than offering a button that will only be refused.
+    const blockedBy = latched.map((z) => z.blocked_reason).filter(Boolean);
+    if (blockedBy.length) detail = `Cannot reset yet \u2013 ${blockedBy.join('; ')}.`;
     else if (reasons.length) detail += ` Reason: ${reasons.join('; ')}.`;
     node.append(
       el(icon('estop')),
@@ -110,8 +124,9 @@
         const covered = (z.switches || []).map((id) => swNames[id]).filter(Boolean);
         row.append(el(`<span class="tile-icon">${icon(z.engaged ? 'lock' : (z.icon || 'estop'))}</span>`));
         const meta = z.engaged
-          ? `Engaged ${UI.fmtAgo(z.since)}${z.reason ? ` · ${z.reason}` : ''}${(z.blocked_by || []).length ? ` · held by ${z.blocked_by.join(', ')}` : ''}`
+          ? `Engaged ${UI.fmtAgo(z.since)}${z.reason ? ` \u00b7 ${z.reason}` : ''}${z.blocked_reason ? ` \u00b7 ${z.blocked_reason}` : ''}`
           : (covered.length ? `Covers ${covered.join(', ')}` : 'Covers nothing yet');
+
         row.append(h('div', { class: 'grow' },
           h('span', { class: 'title', text: z.name }),
           h('span', { class: 'meta', text: meta })));

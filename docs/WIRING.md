@@ -133,11 +133,65 @@ The template creates the switches interlocked (up and down can never be on
 together) with a 60 s limit. A full head or foot travel takes 25–35 s, so 60 s
 is a comfortable ceiling; lower it in the switch settings if you like.
 
-## 6. Good to know
+## 6. A physical emergency stop (recommended)
+
+The on-screen **E-stop** works from any phone on the network. A wired button
+works when the phone is asleep, across the room, or flat — and it is the one
+you reach for without looking. JimboLED reads it on a GPIO **input**.
+
+### Parts
+
+A **normally-closed** (NC) emergency-stop button: the red mushroom kind with a
+twist-to-release head, marked `NC` or `1 NC`. A plain NC pushbutton works too.
+Two wires, no resistors — the Pi's internal pull-up does that job.
+
+### Wiring
+
+| Button | Raspberry Pi header |
+| --- | --- |
+| one terminal | your chosen GPIO (e.g. GPIO26, physical pin 37) |
+| other terminal | any GND (e.g. pin 39) |
+
+That is the whole circuit. While the button is out, its closed contact holds
+the pin at 0 V. Pressing it opens the contact, the Pi's pull-up lets the pin
+rise to 3.3 V, and JimboLED latches the stop within about a fifth of a second.
+
+**Why normally closed?** Because a broken wire, a pulled connector or a
+corroded terminal looks exactly like a press. A normally-*open* button would
+fail the other way: the fault would sit there silently and you would only find
+out when you needed the button. Use NC unless you have a reason not to.
+
+### Set it up
+
+1. Settings → **Emergency stop** → *Physical buttons* → **Add a button**.
+2. Pick the GPIO pin, leave *Normally closed* and *Pull-up* as they are, and
+   choose what it stops — **All relays**, or one zone such as *Bed*.
+3. Press the button. The dashboard should turn red within a second and the
+   relays it covers should refuse to run.
+4. Twist the button back out, then press **Reset** in the dashboard. JimboLED
+   refuses to reset while the button is still held, so it cannot be cleared
+   from a phone while somebody is holding it down.
+
+A pin used by an emergency-stop button cannot also be used by a relay — driving
+it as an output would fight the pull-up and quietly disarm the stop — so
+JimboLED rejects that combination.
+
+### Zones
+
+One stop for everything is the default. If more than one thing moves, give
+each its own stop (Settings → Emergency stop → **Add a stop**) so stopping the
+awning does not also lock out the bed. A zone can cover an interlock group
+(both bed directions at once) or individual switches.
+
+## 7. Good to know
 
 * JimboLED releases every relay when it starts, stops, restarts or crashes,
   when a held button loses contact with the phone for 1.5 s, and when you press
   **All off**.
+* **All off** and an **emergency stop** are different things. All off releases
+  everything and anything can be switched straight back on. An emergency stop
+  latches: what it covers stays locked out — from every phone, every scene, the
+  API — until somebody resets it, including across a restart or a power cut.
 * A short click from the relays during a Pi reboot is harmless with a control
   box (it ignores blips shorter than a real press), but it is avoided anyway by
   the boot‑safe pin choice and the `config.txt` entries JimboLED maintains.

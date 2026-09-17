@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .common import GPIOError, PIN_NOTES, RESERVED_PINS, as_bool, check_pin
+from .common import GPIOError, as_bool, check_pin
 
 log = logging.getLogger(__name__)
 
@@ -261,6 +261,7 @@ class EStopController:
         self.zones: List[EStopZone] = []
         self.inputs: List[EStopInput] = []
         self.master_name = "All relays"
+        self.confirm_engage = False
         self._engaged: Dict[str, Dict[str, Any]] = {}
         self._devices: Dict[str, Any] = {}
         self._input_state: Dict[str, Dict[str, Any]] = {}
@@ -283,6 +284,7 @@ class EStopController:
         """Apply the ``gpio.estop`` configuration section and (re)open inputs."""
         cfg = cfg or {}
         self.master_name = str(cfg.get("master_name") or "All relays")[:60]
+        self.confirm_engage = bool(cfg.get("confirm_engage", False))
         try:
             self.zones = validate_zones(cfg.get("zones", []))
         except GPIOError as exc:
@@ -394,25 +396,48 @@ class EStopController:
         return True
 
     def blocking_inputs(self, zone_id: str) -> List[str]:
-        """Names of hardware buttons that must be released before a reset."""
+        """Names of hardware buttons that must be cleared before a reset.
+
+        A *disabled* input is not one of them – it is switched off on purpose,
+        and letting it block would make the stop impossible to reset.
+        """
         blocking = []
         for item in self.inputs:
-            if self._input_zone_id(item) != zone_id:
+            if not item.enabled or self._input_zone_id(item) != zone_id:
                 continue
             state = self._input_state.get(item.id) or {}
             if state.get("tripped") or state.get("error"):
                 blocking.append(item.name)
         return blocking
 
+    def blocking_reason(self, zone_id: str) -> str:
+        """A sentence naming what is holding ``zone_id`` down, or ''."""
+        held, broken = [], []
+        for item in self.inputs:
+            if not item.enabled or self._input_zone_id(item) != zone_id:
+                continue
+            state = self._input_state.get(item.id) or {}
+            if state.get("error"):
+                broken.append(f"{item.name} ({state['error']})")
+            elif state.get("tripped"):
+                held.append(item.name)
+        parts = []
+        if held:
+            parts.append(f"release the physical emergency stop first ({', '.join(held)})")
+        if broken:
+            parts.append(f"JimboLED cannot read {', '.join(broken)}")
+        return "; ".join(parts)
+
     def reset(self, zone_id: str, source: str = "web") -> bool:
         """Clear ``zone_id``.  Raises if a hardware button is still holding it."""
         zone = self.zone(zone_id)
         if zone.id not in self._engaged:
             return False
-        blocking = self.blocking_inputs(zone.id)
-        if blocking:
-            raise GPIOError(
-                f"Release the physical emergency stop first ({', '.join(blocking)}), then reset again")
+        # blocking_reason() is empty exactly when blocking_inputs() is, so one
+        # pass answers both "may I?" and "why not?".
+        reason = self.blocking_reason(zone.id)
+        if reason:
+            raise GPIOError(f"Cannot reset yet \u2013 {reason}.")
         self._engaged.pop(zone.id, None)
         self._persist()
         log.warning("Emergency stop reset: %s (by %s)", zone.name, source)
@@ -439,7 +464,10 @@ class EStopController:
             state = self._input_state.setdefault(item.id, {"tripped": False, "error": "", "streak": 0, "value": None})
             dev = self._devices.get(item.id)
             if dev is None:
-                reason = state.get("error") or "input unavailable"
+                # Record *why* as well as latching: "cannot read the button" and
+                # "the button is pressed" need different things from the user.
+                state["error"] = state.get("error") or "input unavailable"
+                reason = state["error"]
                 tripped = True
             else:
                 try:
@@ -491,16 +519,20 @@ class EStopController:
                 "source": latch["source"] if latch else "",
                 "switches": by_zone.get(z.id, []),
                 "blocked_by": self.blocking_inputs(z.id) if latch else [],
+                "blocked_reason": self.blocking_reason(z.id) if latch else "",
             })
         inputs = []
         for item in self.inputs:
             state = self._input_state.get(item.id) or {}
             inputs.append({**item.to_dict(),
+                           "blocking": item.enabled and bool(state.get("tripped") or state.get("error")),
                            "tripped": bool(state.get("tripped")),
                            "error": state.get("error", ""),
                            "available": item.id in self._devices,
                            "simulated": self.simulated})
         return {
+            "confirm_engage": self.confirm_engage,
+            "master_name": self.master_name,
             "engaged": self.any_engaged(),
             "engaged_zones": sorted(self._engaged),
             "zones": zones,

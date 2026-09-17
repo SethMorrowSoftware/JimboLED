@@ -205,7 +205,7 @@ def test_hardware_button_latches_and_blocks_reset_while_held(data_dir):
         time.sleep(0.5)
         assert m.snapshot()["estop"]["engaged_zones"] == [MASTER_ZONE_ID]
         assert not state(m, "up")["on"]
-        with pytest.raises(GPIOError, match="Release the physical emergency stop"):
+        with pytest.raises(GPIOError, match="release the physical emergency stop"):
             m.reset_estop(MASTER_ZONE_ID)
 
         m.estop._devices["e1"].pin.drive_low()    # button pulled back out
@@ -255,5 +255,29 @@ def test_hardware_input_can_latch_one_zone_only(data_dir):
         time.sleep(0.5)
         assert m.snapshot()["estop"]["engaged_zones"] == ["bed"]
         assert state(m, "awn")["on"], "a bed stop must leave the awning alone"
+    finally:
+        m.stop()
+
+
+def test_a_disabled_input_does_not_block_reset(data_dir):
+    """A button switched off on purpose must not make a stop unresettable."""
+    _, m = hardware_manager(data_dir, enabled=False)
+    try:
+        time.sleep(0.3)
+        assert not m.snapshot()["estop"]["engaged"], "a disabled input must not latch"
+        m.engage_estop(MASTER_ZONE_ID, reason="by hand")
+        m.reset_estop(MASTER_ZONE_ID)
+        assert m.turn_on("up")["on"]
+    finally:
+        m.stop()
+
+
+def test_reset_says_what_it_cannot_read(data_dir):
+    _, m = hardware_manager(data_dir)
+    try:
+        m.estop._devices.pop("e1").close()
+        time.sleep(0.4)
+        with pytest.raises(GPIOError, match="cannot read"):
+            m.reset_estop(MASTER_ZONE_ID)
     finally:
         m.stop()

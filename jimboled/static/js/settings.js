@@ -337,9 +337,10 @@
   async function estopSection(body) {
     const zonesCard = h('div', { class: 'card' });
     const inputsCard = h('div', { class: 'card' });
+    const prefsCard = h('div', { class: 'card' });
     body.append(
       el(`<div class="alert info"><b>All off</b> switches everything off — and anything can be switched straight back on. An <b>emergency stop</b> latches: it cuts its relays and keeps them locked out, from every phone and every scene, until somebody resets it here.</div>`),
-      zonesCard, inputsCard,
+      zonesCard, inputsCard, prefsCard,
       h('div', { class: 'card' },
         h('div', { class: 'card-title' }, h('h3', { text: 'Wiring a physical button' })),
         el(`<p class="muted small">See <a href="https://github.com/SethMorrowSoftware/JimboLED/blob/main/docs/WIRING.md" target="_blank" rel="noopener">docs/WIRING.md</a> for the full guide, including which pins are safe during power-up.</p>`)));
@@ -409,6 +410,21 @@
         ilist.append(item);
       }
       inputsCard.append(ilist);
+
+      // ---- preferences
+      prefsCard.innerHTML = '';
+      const masterName = h('input', { class: 'input', value: estop.master_name || 'All relays', maxlength: 60 });
+      const confirmChk = h('input', { type: 'checkbox', checked: !!estop.confirm_engage });
+      const savePrefs = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
+      savePrefs.onclick = () => UI.busy(savePrefs, api.put('/api/estop/settings', {
+        master_name: masterName.value.trim() || 'All relays', confirm_engage: confirmChk.checked,
+      }).then(() => { UI.toast('Saved', 'success'); if (window.App) App.refresh(true); draw(); }).catch(UI.notifyError));
+      prefsCard.append(
+        h('div', { class: 'card-title' }, h('h3', { text: 'Options' })),
+        UI.field('Name of the master stop', masterName, 'What the built-in stop is called on the button and in the log.'),
+        h('label', { class: 'check' }, confirmChk, h('span', { text: 'Ask "are you sure?" before engaging a stop' })),
+        el(`<p class="muted small">Off by default. In a real emergency a dialog is one more thing between you and the motor — turn this on only if you keep catching the button by accident.</p>`),
+        h('div', { class: 'row end' }, savePrefs));
     }
     draw().catch(UI.notifyError);
   }
