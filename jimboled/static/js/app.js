@@ -271,7 +271,8 @@
     }
     if (t.type === 'heading') {
       const shell = tileShell(t, { name: '' }); shell.node.classList.add('heading'); shell.node.querySelector('.tile-head').remove();
-      shell.node.prepend(h('h2', { text: t.name || 'Section' }), (t.opts && t.opts.sub) ? h('div', { class: 'sub', text: t.opts.sub }) : null);
+      const sub = t.opts && t.opts.sub;
+      shell.node.prepend(h('div', {}, h('h2', { text: t.name || 'Section' }), sub ? h('div', { class: 'sub', text: sub }) : null));
       return { el: shell.node, update: () => {} };
     }
     if (t.type === 'note') {
