@@ -16,11 +16,12 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
+
+from .atomicio import write_json_atomic
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "show_clock": True,
         "show_estop": True,        # the red emergency-stop button in the header
         "tiles": [],              # ordered list of tile descriptors, see dashboard.py
-        "quick_presets": [],      # [{"id":..., "name":..., "actions":[...]}]
+        "scenes": [],             # [{"id":..., "name":..., "actions":[...]}], see dashboard.py
     },
     "setup_complete": False,
 }
@@ -89,14 +90,26 @@ class ConfigError(Exception):
     pass
 
 
-def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Return ``base`` updated with ``override`` recursively (dicts only)."""
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any], _path: str = "") -> Dict[str, Any]:
+    """Return ``base`` updated with ``override`` recursively (dicts only).
+
+    A value that would replace one of the default *sections* with something
+    that is not an object is dropped and logged. Every consumer treats
+    ``config["gpio"]`` and friends as objects, so a scalar there – a stray
+    ``"gpio": "mock"`` from a hand-edited file – would crash the service on
+    start-up, over and over. Losing one bad key beats never coming up.
+    """
     out = copy.deepcopy(base)
     for key, value in override.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = copy.deepcopy(value)
+        where = f"{_path}{key}"
+        if isinstance(out.get(key), dict):
+            if isinstance(value, dict):
+                out[key] = _deep_merge(out[key], value, f"{where}.")
+            else:
+                log.error("config.json: '%s' should be an object, not %s; using the default",
+                          where, type(value).__name__)
+            continue
+        out[key] = copy.deepcopy(value)
     return out
 
 
@@ -159,26 +172,9 @@ class ConfigStore:
         raw["version"] = CONFIG_VERSION
         return raw
 
-    def _write_locked(self) -> None:
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(self._data, indent=2, sort_keys=False)
-        fd, tmp_path = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=str(self.data_dir))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, self.path)
-        finally:
-            if os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+    def _write_locked(self, data: Dict[str, Any] | None = None) -> None:
+        write_json_atomic(self.path, self._data if data is None else data,
+                          mode=0o600, indent=2, sort_keys=False)
 
     def backup(self, reason: str = "manual") -> Path:
         """Copy the current config into the backups directory and prune old ones."""
@@ -187,10 +183,15 @@ class ConfigStore:
             safe_reason = re.sub(r"[^a-zA-Z0-9_-]+", "-", reason)[:32] or "backup"
             stamp = time.strftime("%Y%m%d-%H%M%S")
             dest = self.backup_dir / f"config-{stamp}-{safe_reason}.json"
-            fd, tmp_path = tempfile.mkstemp(prefix=".backup-", suffix=".json", dir=str(self.backup_dir))
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, indent=2)
-            os.replace(tmp_path, dest)
+            # Two saves inside the same second would otherwise overwrite each
+            # other, quietly costing one of the snapshots the user expects.
+            if dest.exists():
+                for n in range(2, 100):
+                    candidate = self.backup_dir / f"config-{stamp}-{safe_reason}-{n}.json"
+                    if not candidate.exists():
+                        dest = candidate
+                        break
+            write_json_atomic(dest, self._data, mode=0o600, indent=2)
             backups = sorted(self.backup_dir.glob("config-*.json"))
             for old in backups[:-MAX_BACKUPS]:
                 try:
@@ -234,8 +235,12 @@ class ConfigStore:
                 return copy.deepcopy(working)
             if backup_reason:
                 self.backup(backup_reason)
+            # Persist first, adopt second.  A write that fails (a full disk, a
+            # value that will not serialise) must leave memory and the file
+            # agreeing on the old configuration rather than quietly drifting
+            # apart until the next save commits the bad value.
+            self._write_locked(working)
             self._data = working
-            self._write_locked()
             after = copy.deepcopy(working)
             self._notify_lock.acquire()
             notify = True

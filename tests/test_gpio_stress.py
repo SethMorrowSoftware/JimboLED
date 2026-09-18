@@ -7,8 +7,6 @@ import random
 import threading
 import time
 
-import pytest
-
 from jimboled.config import ConfigStore
 from jimboled.gpio.manager import GPIOError, GPIOManager
 

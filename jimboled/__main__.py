@@ -34,9 +34,20 @@ def main(argv=None) -> int:
     def _shutdown(signum, _frame):
         logging.getLogger("jimboled").info("signal %s received, releasing relays", signum)
         ctx = app.extensions["jimboled"]
-        ctx.gpio.stop()
-        ctx.devices.stop()
-        sys.exit(0)
+        # Relays first, and each step on its own: a failure tidying up the WLED
+        # poller must not be the reason a bed motor stays energised.
+        try:
+            ctx.gpio.stop()
+        finally:
+            try:
+                ctx.devices.stop()
+            except Exception:
+                logging.getLogger("jimboled").exception("error stopping the device poller")
+            try:
+                ctx.discovery.listener.stop()
+            except Exception:
+                pass
+            sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

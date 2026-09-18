@@ -59,7 +59,7 @@ curl -s -X POST -H 'X-Requested-With: JimboLED' -H 'Content-Type: application/js
 | DELETE | `/api/gpio/switches/<id>` | |
 | POST | `/api/gpio/switches/<id>/action` | `{"action":"on"|"off"|"toggle"|"pulse"}`; hold-to-run: `{"action":"press"}` → returns `switch.token`, then `{"action":"heartbeat","token":…}` at least every second, then `{"action":"release","token":…}` |
 | POST | `/api/gpio/all-off` | release every relay (does **not** latch – see the emergency stop below) |
-| POST | `/api/gpio/test` | `{"pin":22,"active_high":true,"duration_ms":400}` – pulse an unconfigured pin |
+| POST | `/api/gpio/test` | `{"pin":22,"active_high":true,"duration_ms":400}` – pulse a pin to find its relay. A pin that belongs to a switch is pulsed *as* that switch (interlocks and all); a bare pin is claimed for the pulse and released by any master emergency stop. |
 | GET | `/api/gpio/events` | recent on/off log with reasons |
 
 A momentary switch **cannot** be turned on with `on`; it only runs while
@@ -81,7 +81,7 @@ stop is reset.
 | PUT / DELETE | `/api/estop/zones/<id>` | the built-in `all` zone cannot be edited or removed |
 | POST | `/api/estop/inputs` | `{"name":"Bedside button","pin":26,"zone":"all","normally_closed":true,"pull":"up"}` |
 | PUT / DELETE | `/api/estop/inputs/<id>` | |
-| PUT | `/api/estop/settings` | `master_name` |
+| PUT | `/api/estop/settings` | `master_name`, `confirm_engage` (ask before engaging; off by default) |
 
 ```bash
 # stop the bed, then read back what is locked out
@@ -114,7 +114,7 @@ it is deliberately **not** part of a backup.
 | POST | `/api/dashboard/order` | `{"ids":[…]}` |
 | GET / POST | `/api/scenes` | `{"name":"Goodnight","icon":"moon","actions":[{"type":"all","state":{"on":false}},{"type":"switch","ref":"sw-…","action":"off"},{"type":"delay","ms":500}]}` |
 | PUT / DELETE | `/api/scenes/<id>` | |
-| POST | `/api/scenes/<id>/run` | |
+| POST | `/api/scenes/<id>/run` | a scene runs on the request thread, so its `delay` actions share a 30 s budget; waits past that are skipped and reported, the actions after them still run |
 | GET / PUT | `/api/settings` | `wled.poll_interval_s`, `wled.request_timeout_s`, `gpio.hold_timeout_s`, `gpio.interlock_dead_time_ms`, `gpio.backend`, `server.port`, `server.allowed_hosts` (extra host names the dashboard answers to), `setup_complete` |
 | POST | `/api/settings/password` | `{"current":"…","password":"new or empty to remove"}` |
 | POST | `/api/login`, `/api/logout` · GET `/api/auth` | |
@@ -126,7 +126,7 @@ it is deliberately **not** part of a backup.
 | GET | `/api/system` | version, Pi model, addresses, uptime, temperature, memory, GPIO backend |
 | GET | `/api/system/logs?limit=200` | in-memory log tail |
 | GET | `/api/backup` | download `config.json` (secret key stripped) |
-| POST | `/api/restore` | upload a backup (multipart `file` or raw JSON body) |
+| POST | `/api/restore` | upload a backup (multipart `file` or raw JSON body). Switches and the whole emergency-stop section must validate or the restore is refused with **400** – a backup must not be able to quietly remove a stop. Unusable tiles and scenes are dropped instead. |
 | GET | `/api/backups` · POST `/api/backups/<name>/restore` | automatic snapshots |
 | POST | `/api/system/restart`, `/reboot`, `/update/check`, `/update` | need the installed helper |
 | POST | `/api/system/shutdown-all` | *All off*: every relay off, every light off. Convenience, not a latch. |

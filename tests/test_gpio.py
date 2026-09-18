@@ -184,8 +184,116 @@ def test_dead_time_does_not_block_other_switches(data_dir):
         m.stop()
 
 
+@pytest.mark.parametrize("call", ["toggle", "turn_on"])
+def test_dead_time_never_holds_the_lock(data_dir, call):
+    """Waiting out a dead time must not freeze the rest of the manager.
+
+    ``toggle`` and ``turn_on`` used to reach ``_energise`` from inside the lock,
+    so a single interlocked press stalled every release, ``all_off`` and the
+    watchdog for the whole dead time.
+    """
+    import threading
+
+    _, m = make_manager(data_dir, [
+        {"id": "up", "name": "Up", "pin": 17, "mode": "toggle", "interlock_group": "bed"},
+        {"id": "down", "name": "Down", "pin": 27, "mode": "toggle", "interlock_group": "bed"},
+        {"id": "lamp", "name": "Lamp", "pin": 22, "mode": "toggle"},
+    ], interlock_dead_time_ms=800)
+    try:
+        m.turn_on("up")
+        m.turn_on("lamp")
+        waiting = threading.Thread(target=getattr(m, call), args=("down",))
+        waiting.start()
+        time.sleep(0.15)  # "down" is now parked in the dead time
+        t0 = time.monotonic()
+        m.all_off("panic")          # safety paths must never queue behind it
+        m.snapshot()
+        assert time.monotonic() - t0 < 0.3
+        assert not state(m, "lamp")["on"]
+        waiting.join(timeout=5)
+        assert not waiting.is_alive()
+    finally:
+        m.stop()
+
+
+def test_pulse_switch_reached_through_turn_on_still_pulses(data_dir):
+    _, m = make_manager(data_dir, [
+        {"id": "tap", "name": "Tap", "pin": 23, "mode": "pulse", "pulse_ms": 80, "interlock_group": "bed"},
+    ])
+    try:
+        assert m.turn_on("tap")["on"]
+        time.sleep(0.3)
+        assert not state(m, "tap")["on"]
+    finally:
+        m.stop()
+
+
+def test_pin_test_releases_its_pin(data_dir):
+    _, m = make_manager(data_dir, [])
+    try:
+        m.test_pin(23, True, 50)
+        assert not m._test_pins
+    finally:
+        m.stop()
+
+
+def test_pin_test_on_a_configured_interlocked_switch(data_dir):
+    """This path goes through pulse(), which may wait out a dead time."""
+    _, m = make_manager(data_dir, [
+        {"id": "up", "name": "Up", "pin": 17, "mode": "toggle", "interlock_group": "bed"},
+        {"id": "down", "name": "Down", "pin": 27, "mode": "toggle", "interlock_group": "bed"},
+    ])
+    try:
+        m.turn_on("up")
+        assert m.test_pin(27, True, 60) is True
+        assert not state(m, "up")["on"], "the interlock still applies to a pin test"
+        time.sleep(0.3)
+        assert not state(m, "down")["on"]
+        assert not m._test_pins, "a configured pin is pulsed as a switch, not claimed separately"
+    finally:
+        m.stop()
+
+
+def test_watchdog_reclaims_an_abandoned_pin_test(data_dir):
+    """If the request thread dies mid-pulse, the pin must not keep driving a relay."""
+    from gpiozero import OutputDevice
+
+    from jimboled.gpio.manager import _TestPin
+
+    _, m = make_manager(data_dir, [])
+    try:
+        dev = OutputDevice(24, active_high=True, initial_value=False, pin_factory=m._factory)
+        with m._lock:
+            m._test_pins[24] = _TestPin(device=dev, expires_at=time.monotonic() - 1)
+        dev.on()
+        time.sleep(0.3)
+        assert 24 not in m._test_pins and dev.closed
+    finally:
+        m.stop()
+
+
 def test_lenient_booleans():
     assert SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "false"}).active_high is False
     assert SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "1"}).active_high is True
     with pytest.raises(GPIOError):
         SwitchConfig.from_dict({"id": "a", "name": "A", "pin": 17, "active_high": "maybe"})
+
+
+def test_a_hand_edited_config_does_not_stop_the_manager_starting(data_dir):
+    """Failing to start is the one state in which nothing is watching the relays."""
+    store = ConfigStore(data_dir)
+    store.update(lambda c: c["gpio"].update({
+        "backend": "mock", "interlock_dead_time_ms": "two hundred", "hold_timeout_s": None,
+        "switches": [{"id": "lamp", "name": "Lamp", "pin": 22, "mode": "toggle"}],
+    }))
+    m = GPIOManager(store)
+    m.start()
+    try:
+        assert m.snapshot()["hold_timeout_s"] == 1.5
+        assert m.turn_on("lamp")["on"]
+        # A later edit that is just as bad must not take the manager down either.
+        store.update(lambda c: c["gpio"].update({"hold_timeout_s": float("nan"),
+                                                 "interlock_dead_time_ms": -5}))
+        assert m.snapshot()["hold_timeout_s"] == 1.5
+    finally:
+        m.stop()

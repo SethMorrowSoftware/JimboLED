@@ -86,6 +86,10 @@ lives in `gpio/estop.py`.
   blocked: safety only ever runs one way.
 * The watchdog polls hardware inputs first on every 100 ms tick, then drives
   every covered relay off again, so a wedged output cannot outlive a stop.
+* A pin energised by *Test this pin* belongs to no switch, so it is registered
+  in `GPIOManager._test_pins` before it is driven high. A master stop releases
+  it like any relay, and the watchdog reclaims it if the request that asked
+  for it never comes back.
 * **Hardware inputs** are `gpiozero.DigitalInputDevice`s. gpiozero reports
   `value == 1` for "active" – a LOW pin under a pull-up, a HIGH pin under a
   pull-down – so one rule covers both wirings: a closed normally-closed loop
@@ -97,8 +101,10 @@ lives in `gpio/estop.py`.
 * Latch state lives in `estop.json`, not in `config.json`: it must survive a
   crash and a restart, it must not churn the configuration backups, and
   restoring last week's settings must not restore last week's emergency.
-  Writing it never happens while the GPIO lock is held, which keeps the
-  config-store and GPIO locks strictly ordered.
+  `LatchStore` has its own lock and takes no other, so it is a leaf: latches
+  are written with the GPIO lock held and the ordering stays acyclic
+  (config-store → GPIO → latch). The write is durable as well as atomic —
+  see `atomicio.py`: a lock-out a power cut can undo is not a lock-out.
 
 `gpio/common.py` holds the pin tables and error types both `manager.py` and
 `estop.py` need; `manager.py` re-exports every name, so
@@ -114,7 +120,10 @@ lives in `gpio/estop.py`.
   switches always have a cap.
 * `interlock_group` guarantees two switches in the same group (bed UP / bed
   DOWN) are never on together; switching one on first turns the other off
-  and waits a dead time.
+  and waits a dead time. That wait happens **outside** the manager's lock:
+  one caller sleeping while holding it would stall every other switch, the
+  heartbeats, `all_off` and the watchdog. `_GuardedLock` counts nesting depth
+  so `_energise()` can check that rather than trust its callers.
 * All relays are driven off at start-up, on shutdown (SIGTERM/atexit), on
   reconfiguration, when the service crashes and restarts, and by
   `ExecStopPost` afterwards. The lgpio pin factory is wrapped so an
@@ -158,7 +167,18 @@ attaches one global (`UI`, `api`, `GPIO`, `EStop`, `Device`, `Settings`,
 ## Config file
 
 `config.json` is the single source of truth (devices, switches, dashboard
-layout, scenes, appearance, server settings). Writes are atomic (temp file +
-rename + fsync) and a rolling set of 20 backups is kept in `backups/`. Unknown
-keys are preserved and missing keys are filled from defaults, so upgrades
-never need a migration for additive changes.
+layout, scenes, appearance, server settings). Writes go through
+`atomicio.write_json_atomic()`: serialise, temp file, fsync, rename, then
+fsync the *directory* – the rename lives there, so without it a power cut can
+still bring the old file back. The payload is built before anything on disk is
+touched and the new value is adopted in memory only once the write succeeded,
+so a full disk leaves memory and file agreeing rather than drifting apart. A
+rolling set of 20 backups is kept in `backups/`. Unknown keys are preserved and
+missing keys are filled from defaults, so upgrades never need a migration for
+additive changes.
+
+A restore is validated before it is applied (`api/system.py`): switches and the
+whole emergency-stop section are *refused* if they will not validate – silently
+dropping a zone or a physical button would restore a dashboard that promises a
+stop which no longer exists – while tiles and scenes, being cosmetic, are
+dropped individually rather than failing the restore.

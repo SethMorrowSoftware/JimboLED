@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from flask import Blueprint
 
@@ -20,6 +20,8 @@ DENSITIES = ("comfortable", "compact", "roomy")
 RADII = ("sharp", "soft", "round")
 TEXT_SCALE_RANGE = (85, 150)
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# Total time one scene run may spend waiting, across all of its delay actions.
+SCENE_DELAY_BUDGET_S = 30.0
 
 
 # ------------------------------------------------------------ tile helpers
@@ -67,7 +69,7 @@ def sync_tiles(cfg: Dict[str, Any]) -> None:
             ensure_tile(cfg, "scene", s["id"], s.get("name", ""))
 
 
-def _clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
+def clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise APIError("tile must be an object")
     t = str(raw.get("type") or "")
@@ -94,7 +96,7 @@ def _clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
+def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise APIError("scene must be an object")
     name = str(raw.get("name") or "").strip()[:60]
@@ -137,7 +139,6 @@ def _clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
 def get_dashboard():
     ctx = get_ctx()
     cfg = ctx.store.get()
-    sync_needed = False
     dash = cfg["dashboard"]
     before = list(dash.get("tiles", []))
     sync_tiles(cfg)
@@ -190,12 +191,12 @@ def update_dashboard():
         if "tiles" in data:
             if not isinstance(data["tiles"], list):
                 raise APIError("tiles must be a list")
-            dash["tiles"] = [_clean_tile(t) for t in data["tiles"]]
+            dash["tiles"] = [clean_tile(t) for t in data["tiles"]]
             sync_tiles(cfg)
         if "scenes" in data:
             if not isinstance(data["scenes"], list):
                 raise APIError("scenes must be a list")
-            dash["scenes"] = [_clean_scene(s) for s in data["scenes"]]
+            dash["scenes"] = [clean_scene(s) for s in data["scenes"]]
             sync_tiles(cfg)
 
     ctx.store.update(mutate, backup_reason="dashboard")
@@ -206,7 +207,7 @@ def update_dashboard():
 def add_tile():
     ctx = get_ctx()
     data = body()
-    tile = _clean_tile(data)
+    tile = clean_tile(data)
     if tile["type"] in ("device", "switch", "scene"):
         raise APIError("device, switch and scene tiles are created automatically")
 
@@ -227,7 +228,7 @@ def update_tile(tile_id):
         for i, tile in enumerate(cfg["dashboard"].get("tiles", [])):
             if tile.get("id") == tile_id:
                 merged = {**tile, **{k: v for k, v in data.items() if k in ("size", "hidden", "name", "icon", "color", "opts")}}
-                cfg["dashboard"]["tiles"][i] = _clean_tile(merged)
+                cfg["dashboard"]["tiles"][i] = clean_tile(merged)
                 return
         raise APIError("unknown tile", 404)
 
@@ -282,7 +283,7 @@ def list_scenes():
 @bp.post("/scenes")
 def add_scene():
     ctx = get_ctx()
-    scene = _clean_scene(body())
+    scene = clean_scene(body())
 
     def mutate(cfg):
         cfg["dashboard"].setdefault("scenes", []).append(scene)
@@ -301,7 +302,7 @@ def update_scene(scene_id):
         scenes = cfg["dashboard"].setdefault("scenes", [])
         for i, s in enumerate(scenes):
             if s.get("id") == scene_id:
-                scenes[i] = _clean_scene({**s, **data, "id": scene_id})
+                scenes[i] = clean_scene({**s, **data, "id": scene_id})
                 for tile in cfg["dashboard"].get("tiles", []):
                     if tile.get("type") == "scene" and tile.get("ref") == scene_id:
                         tile["title"] = scenes[i]["name"]
@@ -345,6 +346,11 @@ def run_scene_actions(ctx, scene: Dict[str, Any]) -> List[Dict[str, Any]]:
     from ..gpio.manager import GPIOError
     from ..wled.manager import DeviceError
 
+    # A scene runs on the request's own worker thread, and there are only eight
+    # of them.  Each delay is capped at 10 s, but nothing capped how many a
+    # scene could string together; the budget keeps one scene from holding a
+    # worker (and the dashboard's share of them) for minutes.
+    budget = SCENE_DELAY_BUDGET_S
     results = []
     for action in scene.get("actions", []):
         kind = action.get("type")
@@ -368,7 +374,12 @@ def run_scene_actions(ctx, scene: Dict[str, Any]) -> List[Dict[str, Any]]:
                 elif act == "pulse":
                     ctx.gpio.pulse(action["ref"], source="scene")
             elif kind == "delay":
-                _time.sleep(min(10.0, action.get("ms", 0) / 1000.0))
+                wait = max(0.0, min(10.0, action.get("ms", 0) / 1000.0, budget))
+                budget -= wait
+                if wait:
+                    _time.sleep(wait)
+                elif action.get("ms"):
+                    entry["error"] = "skipped: this scene has already waited long enough"
         except (DeviceError, GPIOError) as exc:
             entry["error"] = str(exc)
         results.append(entry)

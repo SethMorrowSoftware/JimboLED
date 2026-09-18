@@ -4,7 +4,6 @@ from __future__ import annotations
 import collections
 import logging
 import threading
-import time
 from typing import Deque, Dict, List
 
 

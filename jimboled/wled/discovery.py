@@ -387,7 +387,6 @@ class DiscoveryService:
 
     def _add(self, entry: Dict[str, Any]) -> None:
         with self._lock:
-            key = entry.get("mac") or entry.get("host")
             for existing in self._status["found"]:
                 if (existing.get("mac") and existing.get("mac") == entry.get("mac")) or existing.get("host") == entry.get("host"):
                     existing.update({k: v for k, v in entry.items() if v})
@@ -487,10 +486,16 @@ class DiscoveryService:
         """Return a device descriptor if ``host`` answers like WLED."""
         try:
             client = WLEDClient(host, timeout=timeout, connect_timeout=min(timeout, 1.0))
-            info = client.get_info()
-            client.close()
         except WLEDError:
             return None
+        try:
+            info = client.get_info()
+        except WLEDError:
+            return None
+        finally:
+            # A /24 sweep probes 254 addresses and nearly all of them fail:
+            # every one used to leave its session behind.
+            client.close()
         if not isinstance(info, dict) or ("ver" not in info and "leds" not in info):
             return None
         leds = info.get("leds") or {}

@@ -8,6 +8,7 @@ from WLED's verbose response so the UI never shows stale values.
 """
 from __future__ import annotations
 
+import atexit
 import logging
 import re
 import threading
@@ -207,6 +208,10 @@ class DeviceManager:
         self._lock = threading.RLock()
         self._devices: Dict[str, DeviceRecord] = {}
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wled-poll")
+        # A separate pool for what a person just asked for.  "All off" must not
+        # queue behind four in-flight polls of controllers that are switched
+        # off, each of which can take the full request timeout.
+        self._cmd_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wled-cmd")
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._on_change = on_change
@@ -221,11 +226,16 @@ class DeviceManager:
         self._stop.clear()
         self._thread = threading.Thread(target=self._poll_loop, name="wled-scheduler", daemon=True)
         self._thread.start()
+        atexit.register(self.stop)
         self.started = True
 
     def stop(self) -> None:
         self._stop.set()
         self._pool.shutdown(wait=False)
+        self._cmd_pool.shutdown(wait=False)
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
         with self._lock:
             for rec in self._devices.values():
                 rec.client.close()
@@ -281,7 +291,11 @@ class DeviceManager:
                 try:
                     self._pool.submit(self._poll_one, rec)
                 except RuntimeError:
-                    return  # pool shut down
+                    # Pool shut down: hand the flags back so a manager that is
+                    # restarted does not find every device stuck "in flight".
+                    for pending in due:
+                        pending.in_flight = False
+                    return
 
     def _poll_one(self, rec: DeviceRecord) -> None:
         try:
@@ -321,6 +335,12 @@ class DeviceManager:
         return rec
 
     def _absorb(self, rec: DeviceRecord, state: Dict[str, Any], info: Optional[Dict[str, Any]]) -> None:
+        # Whatever a controller sends lands in the snapshot that /api/state
+        # serves every two seconds, so it is shaped here rather than trusted.
+        # One device answering with a surprise used to take the whole dashboard
+        # down with it, emergency-stop banner included.
+        state = _as_doc(state)
+        info = _as_doc(info)
         was_online = rec.online
         changed = state != rec.state
         rec.state = state or rec.state
@@ -399,12 +419,12 @@ class DeviceManager:
         return self._summary(rec)
 
     def _summary(self, rec: DeviceRecord) -> Dict[str, Any]:
-        st, info = rec.state or {}, rec.info or {}
-        segs = st.get("seg") or []
+        st, info = _as_doc(rec.state), _as_doc(rec.info)
+        segs = [s for s in (st.get("seg") or []) if isinstance(s, dict)] if isinstance(st.get("seg"), list) else []
         main_idx = st.get("mainseg", 0)
         main = next((s for s in segs if s.get("id") == main_idx), segs[0] if segs else {})
-        leds = info.get("leds") or {}
-        wifi = info.get("wifi") or {}
+        leds = _as_doc(info.get("leds"))
+        wifi = _as_doc(info.get("wifi"))
         return {
             "id": rec.cfg["id"],
             "name": rec.cfg.get("name"),
@@ -517,7 +537,10 @@ class DeviceManager:
             except DeviceError as exc:
                 results[rec.cfg["id"]] = str(exc)
 
-        futures = [self._pool.submit(_one, r) for r in targets]
+        try:
+            futures = [self._cmd_pool.submit(_one, r) for r in targets]
+        except RuntimeError:  # shutting down
+            return results
         for f in futures:
             f.result()
         return results
@@ -573,9 +596,14 @@ class DeviceManager:
         return self._get(device_id).client
 
 
+def _as_doc(value: Any) -> Dict[str, Any]:
+    """A JSON object we can safely ``.get()`` from, whatever the device sent."""
+    return value if isinstance(value, dict) else {}
+
+
 def _presets_key(info: Dict[str, Any]) -> str:
     """``pmt|boot_time`` – changes when presets.json is rewritten or the device reboots."""
-    fs = info.get("fs") or {}
+    fs = _as_doc(info.get("fs"))
     try:
         boot = int(time.time() - float(info.get("uptime") or 0))
     except (TypeError, ValueError):

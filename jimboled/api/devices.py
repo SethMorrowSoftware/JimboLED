@@ -1,10 +1,9 @@
 """WLED device endpoints."""
 from __future__ import annotations
 
-import time
 from typing import Any, Dict
 
-from flask import Blueprint, request
+from flask import Blueprint
 
 from .. import get_ctx
 from ..config import new_id
@@ -36,13 +35,17 @@ def probe_device():
         raise APIError("Enter the controller's IP address or hostname")
     try:
         client = WLEDClient(host, timeout=4.0)
+    except WLEDError as exc:
+        raise APIError(f"'{host}' is not a valid address ({exc})")
+    try:
         info = client.get_info()
-        client.close()
     except WLEDError as exc:
         raise APIError(f"Could not reach a WLED controller at {host} ({exc})", 502)
+    finally:
+        client.close()
     if not isinstance(info, dict) or "ver" not in info:
         raise APIError(f"{host} answered, but it doesn't look like WLED", 502)
-    leds = info.get("leds") or {}
+    leds = info.get("leds") if isinstance(info.get("leds"), dict) else {}
     return ok({"host": client.host, "name": info.get("name"), "ver": info.get("ver"), "mac": info.get("mac"),
                "led_count": leds.get("count"), "arch": info.get("arch")})
 
@@ -55,19 +58,22 @@ def add_device():
     # Confirm it really is WLED before saving (unless explicitly skipped, e.g. device is off right now).
     mac = None
     if not data.get("skip_probe"):
+        client = WLEDClient(new["host"], timeout=4.0)
         try:
-            client = WLEDClient(new["host"], timeout=4.0)
             info = client.get_info()
-            client.close()
-            if not isinstance(info, dict) or "ver" not in info:
-                raise APIError(f"{new['host']} answered, but it doesn't look like a WLED controller", 502)
-            mac = info.get("mac")
-            if not new.get("name") or new["name"] == new["host"]:
-                new["name"] = str(info.get("name") or new["host"])[:60]
         except WLEDError as exc:
             raise APIError(f"Could not reach a WLED controller at {new['host']} ({exc}). "
                            "Check the address, or tick 'add anyway' if it is switched off right now.", 502)
-    new["id"] = f"wled-{mac[-6:].lower()}" if mac else new_id("wled")
+        finally:
+            client.close()
+        if not isinstance(info, dict) or "ver" not in info:
+            raise APIError(f"{new['host']} answered, but it doesn't look like a WLED controller", 502)
+        mac = info.get("mac")
+        if not new.get("name") or new["name"] == new["host"]:
+            new["name"] = str(info.get("name") or new["host"])[:60]
+    # The MAC is whatever the device said it was, so it is coerced, not indexed.
+    mac_suffix = "".join(ch for ch in str(mac or "") if ch.isalnum())[-6:].lower()
+    new["id"] = f"wled-{mac_suffix}" if len(mac_suffix) == 6 else new_id("wled")
 
     def mutate(cfg):
         for d in cfg["devices"]:
@@ -184,7 +190,9 @@ def save_preset(device_id):
     slot = data.get("slot")
     existing = {p["id"] for p in ctx.devices.presets(device_id)}
     if slot in (None, "", 0, "0", "auto"):
-        slot = next(i for i in range(1, 251) if i not in existing)
+        slot = next((i for i in range(1, 251) if i not in existing), None)
+        if slot is None:
+            raise APIError("All 250 preset slots on this controller are in use; delete one first", 409)
     try:
         slot = int(slot)
     except (TypeError, ValueError):

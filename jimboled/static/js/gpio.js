@@ -28,10 +28,14 @@
     async press(e) {
       if (this.token || this.pending) return;
       if (e && e.pointerId != null) { try { this.btn.setPointerCapture(e.pointerId); } catch (_) {} this.pointerId = e.pointerId; }
+      // Clear the "let go before the press landed" flag up front: a press that
+      // failed used to leave it set, so the next hold released itself at once.
+      this.released = false;
       this.pending = true;
+      this.missed = 0;
       this.btn.classList.add('active');
       try {
-        const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'press' });
+        const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'press' }, { timeout: 5000 });
         this.token = r.switch.token; this.startedAt = Date.now();
         if (this.released) { this.released = false; await this.stop('early-release'); return; }
         this.timer = setInterval(() => this.beat(), HEARTBEAT_MS);
@@ -45,14 +49,27 @@
     async beat() {
       if (!this.token) return;
       try {
-        const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'heartbeat', token: this.token });
+        // A heartbeat that has not answered by the next one is already useless.
+        const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'heartbeat', token: this.token }, { timeout: 2000 });
+        this.missed = 0;
         if (!r.switch.held) { this.stopLocal(); this.btn.classList.remove('active'); if (this.opts.onState) this.opts.onState(r.switch); }
         else if (this.opts.onTick) this.opts.onTick(r.switch);
       } catch (err) {
         // A 409 means an emergency stop latched mid-hold – the relay is already
-        // off, so stop beating.  Anything else: keep trying, the server
-        // watchdog releases us if we really are cut off.
-        if (err && err.status === 409) { this.stopLocal(); this.btn.classList.remove('active'); UI.notifyError(err); App.refresh(true); }
+        // off, so stop beating.
+        if (err && err.status === 409) { this.stopLocal(); this.btn.classList.remove('active'); UI.notifyError(err); App.refresh(true); return; }
+        // Otherwise keep trying: the server watchdog releases us if we really
+        // are cut off. But once we have been silent for longer than the server
+        // waits, that release has already happened – so stop showing the
+        // switch as running. A button that says "Running…" while the relay is
+        // off is worse than an error.
+        this.missed = (this.missed || 0) + 1;
+        const holdTimeoutMs = ((App.state.gpio && App.state.gpio.hold_timeout_s) || 1.5) * 1000;
+        if (this.missed * HEARTBEAT_MS >= holdTimeoutMs) {
+          this.stopLocal();
+          this.btn.classList.remove('active');
+          UI.toast('Lost contact with JimboLED – the switch has been released.', 'error');
+        }
       }
     }
     release(reason) {
@@ -66,7 +83,7 @@
       if (this.pointerId != null) { try { this.btn.releasePointerCapture(this.pointerId); } catch (_) {} this.pointerId = null; }
       try {
         // keepalive lets the release survive tab close / page hide.
-        const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'release', token: token || '' }, { keepalive: true });
+        const r = await api.post(`/api/gpio/switches/${this.sw.id}/action`, { action: 'release', token: token || '' }, { keepalive: true, timeout: 10000 });
         if (this.opts.onState) this.opts.onState(r.switch);
       } catch (err) { UI.notifyError(err); }
     }

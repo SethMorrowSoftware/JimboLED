@@ -314,3 +314,104 @@ def test_appearance_settings_round_trip(client):
 
     for bad in ({"theme": "neon"}, {"density": "airy"}, {"radius": "blobby"}, {"text_scale": 400}):
         assert client.put("/api/dashboard", json=bad).status_code == 400
+
+
+def test_restore_refuses_to_quietly_disarm_the_emergency_stop(client):
+    """A bad estop section used to be logged and dropped, leaving a stop that no longer exists."""
+    body = {
+        "devices": [], "dashboard": {},
+        "gpio": {"switches": [{"id": "up", "name": "Up", "pin": 17}],
+                 "estop": {"zones": [{"id": "bed", "name": "Bed", "scope": "group", "refs": []}]}},
+    }
+    r = client.post("/api/restore", data=json.dumps(body), content_type="application/json")
+    assert r.status_code == 400 and "emergency stop" in r.json["error"]
+
+    # A button sharing a relay's pin would silently fight that relay's output.
+    body["gpio"]["estop"] = {"zones": [], "inputs": [{"id": "e1", "name": "Stop", "pin": 17}]}
+    r = client.post("/api/restore", data=json.dumps(body), content_type="application/json")
+    assert r.status_code == 400 and "emergency stop" in r.json["error"]
+
+    body["gpio"]["estop"] = {"zones": [{"id": "bed", "name": "Bed", "scope": "group", "refs": ["bed"]}],
+                             "inputs": [{"id": "e1", "name": "Stop", "pin": 26, "zone": "gone"}]}
+    r = client.post("/api/restore", data=json.dumps(body), content_type="application/json")
+    assert r.status_code == 200
+    estop = client.get("/api/estop").json
+    assert [z["id"] for z in estop["zones"]] == ["all", "bed"]
+    # A button pointing at a zone the backup does not contain falls back to the
+    # master stop rather than stopping nothing at all.
+    assert estop["inputs"][0]["zone"] == "all"
+
+
+def test_restore_drops_unusable_tiles_and_scenes_instead_of_blowing_up_later(client):
+    body = {
+        "devices": [], "gpio": {"switches": []},
+        "dashboard": {
+            "tiles": ["not a tile", {"type": "nonsense"}, {"type": "clock", "size": "m"}],
+            "scenes": [{"name": "", "actions": []}, {"name": "Night", "actions": [{"type": "all", "state": {"on": False}}]}],
+        },
+    }
+    r = client.post("/api/restore", data=json.dumps(body), content_type="application/json")
+    assert r.status_code == 200
+    dash = client.get("/api/dashboard").json["dashboard"]
+    # The clock survives, the two junk tiles are gone, and the scene that
+    # survived gets its own tile back from sync_tiles().
+    assert sorted(t["type"] for t in dash["tiles"]) == ["clock", "scene"]
+    assert [s["name"] for s in dash["scenes"]] == ["Night"]
+    # The surviving scene still runs rather than raising a KeyError mid-action.
+    scene_id = dash["scenes"][0]["id"]
+    assert client.post(f"/api/scenes/{scene_id}/run").status_code == 200
+
+
+def test_login_throttle_does_not_grow_without_bound(client):
+    """The key is an address the caller picks, so the table has to be swept and capped."""
+    from jimboled.api import system as system_api
+
+    assert client.post("/api/settings/password", json={"password": "secret1"}).status_code == 200
+    other = client.application.test_client()
+    other.environ_base["HTTP_X_REQUESTED_WITH"] = "JimboLED"
+
+    with system_api._login_lock:
+        system_api._login_failures.clear()
+    # Merely asking whether an address is blocked must not record it.
+    for i in range(50):
+        assert not system_api._login_blocked(f"10.0.0.{i}")
+    assert not system_api._login_failures
+
+    for i in range(system_api.MAX_TRACKED_ADDRESSES + 50):
+        system_api._login_failed(f"10.1.{i // 256}.{i % 256}")
+    assert len(system_api._login_failures) <= system_api.MAX_TRACKED_ADDRESSES
+
+    # Real failures still lock a real client out.
+    for _ in range(system_api.LOGIN_ATTEMPTS):
+        assert other.post("/api/login", json={"password": "wrong"}).status_code == 401
+    assert other.post("/api/login", json={"password": "secret1"}).status_code == 429
+
+
+def test_auth_status_agrees_with_the_request_guard(client):
+    assert client.post("/api/settings/password", json={"password": "secret1"}).status_code == 200
+    other = client.application.test_client()
+    other.environ_base["HTTP_X_REQUESTED_WITH"] = "JimboLED"
+    assert other.post("/api/login", json={"password": "secret1"}).status_code == 200
+    assert other.get("/api/auth").json["authed"] is True
+
+    # Changing the password bumps session_version; /api/auth must say so too,
+    # otherwise the UI believes it is signed in while every call gets a 401.
+    assert client.post("/api/settings/password", json={"current": "secret1", "password": "secret2"}).status_code == 200
+    assert other.get("/api/state").status_code == 401
+    assert other.get("/api/auth").json["authed"] is False
+
+
+def test_a_scene_cannot_hold_a_worker_thread_for_minutes(client, monkeypatch):
+    from jimboled.api import dashboard as dash_api
+
+    monkeypatch.setattr(dash_api, "SCENE_DELAY_BUDGET_S", 0.3)
+    actions = [{"type": "delay", "ms": 200} for _ in range(10)]
+    actions.append({"type": "all", "state": {"on": False}})
+    sc = client.post("/api/scenes", json={"name": "Slow", "actions": actions}).json["scene"]["id"]
+    t0 = time.monotonic()
+    r = client.post(f"/api/scenes/{sc}/run")
+    elapsed = time.monotonic() - t0
+    assert r.status_code == 200 and elapsed < 3, elapsed
+    # The waits stop, but the actions after them still run.
+    assert any(x["type"] == "all" and not x.get("error") for x in r.json["results"])
+    assert any("waited long enough" in (x.get("error") or "") for x in r.json["results"])
