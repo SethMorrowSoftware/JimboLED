@@ -87,7 +87,8 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 | GET | `/api/schedules` | schedules with `next_run`, `last_run`, `last_ok`, `last_message`, `missed_at`, `problem`; plus `location`, `timezone`, `now`, today's `sun` |
 | POST | `/api/schedules` | create (max 100) |
 | PUT / PATCH / DELETE | `/api/schedules/<id>` | any edit re-arms from now |
-| POST | `/api/schedules/<id>/run` | run it now |
+| POST | `/api/schedules/<id>/run` | run it now (a one-off timer run by hand is used up) |
+| PUT | `/api/schedules/paused` | `{"paused":true}` holds every repeating schedule – guests staying, a holiday; one-off timers still run. Resuming re-arms from now |
 | POST | `/api/timers` | `{"minutes":30,"action":{…},"name":"Sleep timer"}` – a one-off that removes itself (default action: everything off) |
 | GET / PUT | `/api/location` | `{"lat":51.5,"lon":-0.12,"label":"Home","timezone":"Europe/London"}`; `?zones=1` lists timezones. Setting the timezone needs the installed helper |
 

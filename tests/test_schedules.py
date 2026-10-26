@@ -234,3 +234,20 @@ def test_scheduled_scene_action_runs(app, client):
     assert run_scheduled_action(ctx, {"type": "scene", "ref": "gone"})["error"]
     assert run_scheduled_action(ctx, {"type": "switch", "ref": sw, "action": "off"}) == {"message": "done"}
     assert ctx.gpio.snapshot()["switches"][0]["on"] is False
+
+
+def test_pause_all_schedules_keeps_timers(rig):
+    store, sch, calls = rig
+    at = local(MONDAY, 7, 0).timestamp()
+    _set(store, sched(), sched(id="t", when={"type": "once", "at": at}, days=[], delete_after=True))
+    store.update(lambda c: c.__setitem__("schedules_paused", True))
+    assert sch.tick(local(MONDAY, 7, 0, 30)) == ["t"]
+
+
+def test_pause_api_rearms_on_resume(client):
+    sid = client.post("/api/schedules", json={"when": {"type": "time", "time": "07:00"}, "action": {"type": "all_off"}}).json["schedule"]["id"]
+    assert client.put("/api/schedules/paused", json={"paused": True}).json["paused"] is True
+    before = next(s for s in client.get("/api/schedules").json["schedules"] if s["id"] == sid)["updated_at"]
+    time.sleep(0.01)
+    r = client.put("/api/schedules/paused", json={"paused": False}).json
+    assert r["paused"] is False and next(s for s in r["schedules"] if s["id"] == sid)["updated_at"] > before

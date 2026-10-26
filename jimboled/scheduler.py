@@ -266,9 +266,12 @@ class Scheduler:
         now = now or datetime.now().astimezone()
         cfg = self.store.get()
         location = cfg.get("location") if isinstance(cfg.get("location"), dict) else {}
+        paused = bool(cfg.get("schedules_paused"))
         fired = []
         for sched in cfg.get("schedules", []):
             if not isinstance(sched, dict) or not sched.get("enabled", True) or not sched.get("id"):
+                continue
+            if paused and (sched.get("when") or {}).get("type") != "once":
                 continue
             try:
                 due = last_due(sched, now, location)

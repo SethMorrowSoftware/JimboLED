@@ -51,6 +51,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "groups": [],
     # Timed actions, see jimboled/scheduler.py.
     "schedules": [],
+    # Pauses every schedule (guests staying, a holiday) without touching them.
+    # One-off timers still run: somebody set those on purpose just now.
+    "schedules_paused": False,
     # Where the Pi is, for sunrise/sunset schedules.  Decimal degrees.
     "location": {"lat": None, "lon": None, "label": ""},
     "gpio": {

@@ -165,6 +165,7 @@ def _listing() -> Dict[str, Any]:
         "timezone": current_timezone(),
         "sun": _sun_today(loc),
         "running": bool(ctx.scheduler.started),
+        "paused": bool(cfg.get("schedules_paused")),
         "clock_synced": clock_synced(),
     }
 
@@ -228,6 +229,26 @@ def delete_schedule(sched_id):
 
     ctx.store.update(mutate, backup_reason="schedule")
     ctx.scheduler.forget(sched_id)
+    return ok(_listing())
+
+
+@bp.put("/schedules/paused")
+def pause_schedules():
+    """``{"paused": true}`` – hold every repeating schedule (timers still run)."""
+    ctx = get_ctx()
+    paused = bool(body().get("paused"))
+    now = time.time()
+
+    def mutate(cfg):
+        cfg["schedules_paused"] = paused
+        if not paused:
+            # Resuming re-arms everything from now: nothing that fell due while
+            # paused should go off the moment the switch is flipped back.
+            for s in cfg.get("schedules", []):
+                if isinstance(s, dict) and (s.get("when") or {}).get("type") != "once":
+                    s["updated_at"] = now
+
+    ctx.store.update(mutate, backup_reason="pause-schedules")
     return ok(_listing())
 
 

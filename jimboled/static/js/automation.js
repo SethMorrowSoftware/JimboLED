@@ -91,7 +91,9 @@
     const card = h('div', { class: 'card' });
     const list = h('div', { class: 'list' });
     const addBtn = el(`<button class="btn primary">${icon('plus')} New schedule</button>`);
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Schedules & timers' }), addBtn),
+    const pauseToggle = UI.toggle(false, (on) => api.put('/api/schedules/paused', { paused: on }).then(() => { UI.toast(on ? 'Schedules paused – one-off timers still run' : 'Schedules running again', 'success'); draw(); }).catch(UI.notifyError));
+    const pauseNote = el(`<div class="alert warn hidden">${icon('clock')} All repeating schedules are paused. One-off timers still run.</div>`);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Schedules & timers' }), h('div', { class: 'row' }, h('label', { class: 'row small muted', style: { gap: '8px' } }, h('span', { text: 'Pause all' }), pauseToggle), addBtn)), pauseNote,
       el(`<p class="muted small">Run lights, scenes or switches at set times – “porch lights on 10 minutes after sunset”, “wake-up light at 6:45 on weekdays”. They run on the Pi, so nobody needs to have the dashboard open. A schedule that was due while the Pi was off is skipped rather than run late.</p>`), list);
     body.append(locCard, card);
     let ctx = { scenes: [], switches: [], listing: null };
@@ -102,6 +104,8 @@
         ctx = { scenes, switches, listing };
       } catch (e) { return UI.notifyError(e); }
       drawLocation(ctx.listing);
+      pauseToggle.setOn(!!ctx.listing.paused);
+      pauseNote.classList.toggle('hidden', !ctx.listing.paused);
       list.innerHTML = '';
       const items = ctx.listing.schedules;
       if (!items.length) list.append(el(`<div class="empty">${icon('clock')}<h3>No schedules yet</h3><p>Tap <b>New schedule</b>. One-off “switch off in an hour” timers can also be set from the Lights panel.</p></div>`));

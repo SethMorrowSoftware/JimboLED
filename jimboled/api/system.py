@@ -371,6 +371,7 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     data["groups"] = groups
     data["location"] = _validated_location(data.get("location"))
     data["schedules"] = valid_schedules(data.get("schedules"), data)
+    data["schedules_paused"] = bool(data.get("schedules_paused", False))
     return data
 
 
