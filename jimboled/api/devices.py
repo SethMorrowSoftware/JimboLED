@@ -127,6 +127,9 @@ def delete_device(device_id):
         _device_cfg(cfg, device_id)
         cfg["devices"] = [d for d in cfg["devices"] if d.get("id") != device_id]
         remove_tile(cfg, "device", device_id)
+        for group in cfg.get("groups", []):
+            if isinstance(group, dict) and isinstance(group.get("devices"), list):
+                group["devices"] = [d for d in group["devices"] if d != device_id]
 
     ctx.store.update(mutate, backup_reason="remove-device")
     return ok()

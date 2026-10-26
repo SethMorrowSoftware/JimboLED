@@ -40,8 +40,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # Extra host names the dashboard may be opened with (e.g. "jimboled.lan").
         # IP addresses, bare names and *.local/.lan/.home... always work.
         "allowed_hosts": [],
+        # Bearer tokens for scripts, iOS Shortcuts and Home Assistant:
+        # [{"id", "name", "hash" (sha256), "prefix", "created"}].  The token
+        # itself is shown once, when it is created, and never stored.
+        "api_tokens": [],
     },
     "devices": [],
+    # Rooms / zones of WLED controllers that are controlled together:
+    # [{"id", "name", "icon", "color", "devices": [device ids]}].
+    "groups": [],
+    # Timed actions, see jimboled/scheduler.py.
+    "schedules": [],
+    # Where the Pi is, for sunrise/sunset schedules.  Decimal degrees.
+    "location": {"lat": None, "lon": None, "label": ""},
     "gpio": {
         # "auto" picks the best available gpiozero pin factory, "mock" forces
         # simulation (useful on a laptop), anything else is passed straight to
@@ -79,8 +90,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "show_offline": True,
         "show_clock": True,
         "show_estop": True,        # the red emergency-stop button in the header
+        "show_lights_button": True,  # the "Lights" (all controllers at once) button in the header
         "tiles": [],              # ordered list of tile descriptors, see dashboard.py
         "scenes": [],             # [{"id":..., "name":..., "actions":[...]}], see dashboard.py
+        "favorite_colors": [],    # ["#ff8800", ...] shown first in every colour picker
     },
     "setup_complete": False,
 }

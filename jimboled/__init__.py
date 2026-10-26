@@ -58,6 +58,10 @@ class AppContext:
         self.devices = None
         self.gpio = None
         self.discovery = None
+        self.scheduler = None
+        # API token id -> last time it was used (memory only: writing the
+        # config on every scripted request would wear the SD card).
+        self.token_last_used: Dict[str, float] = {}
         self.started_at = time.time()
         self._rev = 0
         self._cfg_rev = 0
@@ -121,6 +125,10 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
     ctx.discovery = DiscoveryService(store, ctx.devices)
     store.on_change(ctx.bump_config)
 
+    from .scheduler import Scheduler
+
+    ctx.scheduler = Scheduler(store, lambda action: run_scheduled_action(ctx, action))
+
     from .api import register_blueprints
 
     register_blueprints(app)
@@ -129,12 +137,43 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
     if start_services:
         ctx.devices.start()
         ctx.gpio.start()
+        ctx.scheduler.start()
 
     @app.teardown_appcontext
     def _noop(_exc):  # pragma: no cover
         pass
 
     return app
+
+
+def run_scheduled_action(ctx: AppContext, action: Dict[str, Any]) -> Dict[str, Any]:
+    """Carry out one schedule's action and sum it up as ``{"message"|"error"}``."""
+    from .api.dashboard import run_action, run_scene_actions
+
+    if action.get("type") == "scene":
+        scenes = (ctx.store.section("dashboard") or {}).get("scenes", [])
+        scene = next((s for s in scenes if s.get("id") == action.get("ref")), None)
+        if scene is None:
+            return {"error": "its scene has been deleted"}
+        results = run_scene_actions(ctx, scene, source="schedule")
+        failed = [r for r in results if r.get("error")]
+        if failed:
+            return {"error": f"scene '{scene.get('name')}': " + "; ".join(str(r['error']) for r in failed)[:280]}
+        return {"message": f"ran scene '{scene.get('name')}'"}
+    if action.get("type") == "switch":
+        switches = ((ctx.store.section("gpio") or {}).get("switches") or [])
+        sw = next((s for s in switches if s.get("id") == action.get("ref")), None)
+        if sw is None:
+            return {"error": "its switch has been deleted"}
+        if sw.get("mode") == "momentary" and action.get("action") != "off":
+            # The switch may have become hold-to-run after the schedule was made.
+            return {"error": f"'{sw.get('name')}' is hold-to-run, so a schedule can only turn it off"}
+    entry = run_action(ctx, action, source="schedule")
+    if entry.get("error"):
+        return {"error": str(entry["error"])}
+    if entry.get("message"):
+        return {"message": entry["message"]}
+    return {"message": "done"}
 
 
 def get_ctx() -> AppContext:
@@ -144,6 +183,34 @@ def get_ctx() -> AppContext:
 
 
 # ---------------------------------------------------------------- security
+# What an API token may NOT do: it is meant for automations, so it cannot
+# mint more tokens, change the password or security settings, or swap the
+# whole configuration out from under the owner.
+TOKEN_DENIED = ("/api/tokens", "/api/settings", "/api/backup", "/api/backups", "/api/restore",
+                "/api/login", "/api/logout", "/api/system/update", "/api/system/reboot",
+                "/api/system/restart")
+
+
+def _token_denied(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in TOKEN_DENIED)
+
+
+def match_token(server_cfg: Dict[str, Any], token: str) -> Optional[Dict[str, Any]]:
+    """The stored token record ``token`` belongs to, if any (constant-time compare)."""
+    import hashlib
+    import hmac
+
+    if not token or len(token) > 200:
+        return None
+    digest = hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
+    found = None
+    for rec in server_cfg.get("api_tokens") or []:
+        if isinstance(rec, dict) and isinstance(rec.get("hash"), str):
+            if hmac.compare_digest(rec["hash"], digest):
+                found = rec
+    return found
+
+
 def _install_security(app: Flask, ctx: AppContext) -> None:
     """Optional password + CSRF hardening.
 
@@ -165,6 +232,20 @@ def _install_security(app: Flask, ctx: AppContext) -> None:
                     return jsonify({"error": msg}), 421
                 return msg, 421, {"Content-Type": "text/plain; charset=utf-8"}
         if path.startswith("/static/") or path in ("/healthz", "/favicon.ico", "/manifest.webmanifest"):
+            return None
+        auth_header = request.headers.get("Authorization", "")
+        if path.startswith("/api/") and auth_header[:7].lower() == "bearer ":
+            # Scripts, iOS Shortcuts, Home Assistant.  A browser never attaches
+            # this header to a cross-site request by itself, so a valid token
+            # stands in for both the login and the CSRF header.
+            rec = match_token(server_cfg, auth_header[7:].strip())
+            if rec is None:
+                return jsonify({"error": "invalid API token"}), 401
+            if _token_denied(path):
+                return jsonify({"error": "API tokens cannot do this; use the dashboard"}), 403
+            ctx.token_last_used[rec["id"]] = time.time()
+            g.authed = True
+            g.token = rec["id"]
             return None
         needs_login = bool(server_cfg.get("password_hash"))
         session_ok = session.get("auth") == "ok" and int(session.get("sv") or 0) == int(server_cfg.get("session_version") or 0)

@@ -39,10 +39,12 @@ def ok(payload: Optional[Any] = None, status: int = 200, **kwargs):
 
 
 def register_blueprints(app: Flask) -> None:
-    from . import dashboard, devices, estop, gpio, system, ui
+    from . import dashboard, devices, estop, gpio, lights, schedules, system, ui
 
     app.register_blueprint(ui.bp)
     app.register_blueprint(devices.bp, url_prefix="/api")
+    app.register_blueprint(lights.bp, url_prefix="/api")
+    app.register_blueprint(schedules.bp, url_prefix="/api")
     app.register_blueprint(gpio.bp, url_prefix="/api")
     app.register_blueprint(estop.bp, url_prefix="/api")
     app.register_blueprint(dashboard.bp, url_prefix="/api")

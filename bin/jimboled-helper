@@ -161,8 +161,29 @@ case "$cmd" in
       echo "{\"running\":false,\"result\":\"${rc:-unknown}\"}"
     fi
     ;;
+  timezone)
+    # Usage: timezone Europe/London.  Only names that exist in the system's
+    # zoneinfo database are accepted, so nothing else reaches timedatectl.
+    tz="${2:-}"
+    case "$tz" in
+      ''|*..*|/*|*/) echo "not a timezone name" >&2; exit 2 ;;
+    esac
+    if ! printf '%s' "$tz" | grep -Eq '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}$'; then
+      echo "not a timezone name" >&2; exit 2
+    fi
+    if [ ! -f "/usr/share/zoneinfo/$tz" ]; then
+      echo "unknown timezone '$tz'" >&2; exit 2
+    fi
+    if command -v timedatectl >/dev/null 2>&1 && timedatectl set-timezone "$tz" 2>/dev/null; then
+      :
+    else
+      ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+      printf '%s\n' "$tz" > /etc/timezone
+    fi
+    echo "timezone set to $tz"
+    ;;
   *)
-    echo "usage: jimboled-helper {restart|reboot|pins-safe|bootpins <spec>|check-update|update|update-status}" >&2
+    echo "usage: jimboled-helper {restart|reboot|pins-safe|bootpins <spec>|check-update|update|update-status|timezone <zone>}" >&2
     exit 2
     ;;
 esac

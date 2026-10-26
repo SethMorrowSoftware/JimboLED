@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .client import WLEDClient, WLEDError, WLEDUnreachable, normalise_host
 from .fxdata import build_effect_catalog, palette_catalog
+from . import intents as _intents
 
 log = logging.getLogger(__name__)
 
@@ -544,6 +545,165 @@ class DeviceManager:
         for f in futures:
             f.result()
         return results
+
+    # ----------------------------------------------------- many controllers
+    def view(self, device_id: str) -> "_intents.DeviceView":
+        """A read-only picture of one controller for the intent planner."""
+        rec = self._get(device_id)
+        return self._view(rec)
+
+    def _view(self, rec: DeviceRecord) -> "_intents.DeviceView":
+        return _intents.DeviceView(
+            name=str(rec.cfg.get("name") or rec.cfg.get("host")),
+            online=rec.online,
+            state=_as_doc(rec.state),
+            info=_as_doc(rec.info),
+            effects=rec.catalog,
+            palettes=palette_catalog(rec.palettes, _as_doc(rec.info)),
+            presets=rec.presets if isinstance(rec.presets, dict) else {},
+        )
+
+    def views(self, device_ids: List[str]) -> List["_intents.DeviceView"]:
+        out = []
+        for did in device_ids:
+            try:
+                out.append(self.view(did))
+            except DeviceError:
+                continue
+        return out
+
+    def apply_plans(self, plans: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """Send a different payload to each controller, all at once.
+
+        ``plans`` maps device id to a WLED state payload.  Returns device id to
+        ``"ok"`` or an error message.  Uses the command pool, never the poller's,
+        so "everything red" never waits behind a poll of a switched-off strip.
+        """
+        results: Dict[str, str] = {}
+
+        def _one(did: str, payload: Dict[str, Any]):
+            try:
+                self.set_state(did, payload)
+                results[did] = "ok"
+            except DeviceError as exc:
+                results[did] = str(exc)
+            except Exception as exc:  # pragma: no cover - defensive: never lose the others
+                log.exception("applying to %s failed", did)
+                results[did] = f"{type(exc).__name__}: {exc}"
+
+        try:
+            futures = [self._cmd_pool.submit(_one, did, payload) for did, payload in plans.items()]
+        except RuntimeError:  # shutting down
+            return {did: "JimboLED is shutting down" for did in plans}
+        for f in futures:
+            f.result()
+        return results
+
+    def apply_intent(self, device_ids: List[str], intent: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Apply one device-agnostic intent to several controllers.
+
+        Every controller gets the payload that means the same thing for *it*
+        (its own effect, palette and preset numbers, every segment, white and
+        CCT only where it has them).  The result lists, per controller,
+        ``status`` (``ok``, ``partial``, ``skipped``, ``offline`` or ``error``)
+        and a plain message.
+        """
+        plans: Dict[str, Dict[str, Any]] = {}
+        rows: Dict[str, Dict[str, Any]] = {}
+        for did in device_ids:
+            try:
+                rec = self._get(did)
+            except DeviceError:
+                continue
+            view = self._view(rec)
+            row = {"id": did, "name": view.name, "status": "ok", "notes": []}
+            rows[did] = row
+            if not rec.cfg.get("enabled", True):
+                row.update(status="skipped", message="disabled")
+                continue
+            if not rec.online:
+                row.update(status="offline", message=rec.last_error or "offline")
+                continue
+            payload, notes = _intents.plan(view, intent)
+            row["notes"] = notes
+            if payload is None:
+                row.update(status="skipped", message="; ".join(notes))
+                continue
+            plans[did] = payload
+        for did, outcome in self.apply_plans(plans).items():
+            row = rows[did]
+            if outcome != "ok":
+                row.update(status="error", message=outcome)
+            elif row["notes"]:
+                row.update(status="partial", message="; ".join(row["notes"]))
+        return [rows[did] for did in device_ids if did in rows]
+
+    def capture(self, device_ids: List[str]) -> List[Dict[str, Any]]:
+        """Snapshot what each online controller is showing right now."""
+        out = []
+        for did in device_ids:
+            try:
+                rec = self._get(did)
+            except DeviceError:
+                continue
+            if not rec.online:
+                continue
+            snap = _intents.snapshot(self._view(rec))
+            if snap:
+                out.append({"id": did, "name": rec.cfg.get("name"), "state": snap})
+        return out
+
+    def copy_preset(self, source_id: str, slot: int, target_ids: List[str], *, overwrite: bool = True) -> List[Dict[str, Any]]:
+        """Store one controller's preset on others, under the same name.
+
+        Lands in the slot that already holds a preset of that name, else the
+        same slot number if it is free, else the first free slot.
+        """
+        portable = _intents.portable_preset(self.view(source_id), int(slot))
+        rows: List[Dict[str, Any]] = []
+        for did in target_ids:
+            if did == source_id:
+                continue
+            try:
+                rec = self._get(did)
+            except DeviceError:
+                continue
+            row: Dict[str, Any] = {"id": did, "name": rec.cfg.get("name"), "status": "ok"}
+            rows.append(row)
+            if not rec.online:
+                row.update(status="offline", message=rec.last_error or "offline")
+                continue
+            view = self._view(rec)
+            try:
+                state, notes = _intents.preset_state_for(view, portable)
+                state = sanitise_state(state)
+            except (_intents.IntentError, DeviceError) as exc:
+                row.update(status="error", message=str(exc))
+                continue
+            used = {int(k) for k, v in view.presets.items() if isinstance(v, dict) and v and str(k).isdigit()}
+            existing = view.preset_slot(portable["name"])
+            if existing is not None:
+                if not overwrite:
+                    row.update(status="skipped", message=f"already has “{portable['name']}”")
+                    continue
+                target_slot = existing
+            elif int(slot) not in used:
+                target_slot = int(slot)
+            else:
+                target_slot = next((i for i in range(1, 251) if i not in used), None)
+                if target_slot is None:
+                    row.update(status="error", message="its 250 preset slots are all in use")
+                    continue
+            try:
+                self.save_preset(did, target_slot, portable["name"], quick_label=portable.get("quick_label", ""),
+                                 state=state)
+            except DeviceError as exc:
+                row.update(status="error", message=str(exc))
+                continue
+            row["slot"] = target_slot
+            if notes:
+                row.update(status="partial", message="; ".join(notes))
+        return rows
 
     def save_preset(self, device_id: str, slot: int, name: str, **kwargs) -> Dict[str, Any]:
         rec = self._get(device_id)

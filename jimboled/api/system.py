@@ -23,7 +23,9 @@ from ..gpio.manager import validate_switches
 from ..wled.discovery import local_ipv4_addresses
 from ..wled.manager import normalise_device
 from . import APIError, body, ok
-from .dashboard import clean_scene, clean_tile
+from .dashboard import HEX_RE, MAX_FAVORITE_COLORS, clean_scene, clean_tile
+from .lights import MAX_GROUPS, clean_group
+from .schedules import valid_schedules
 
 import collections
 import threading
@@ -104,6 +106,7 @@ def _public_settings(cfg: Dict[str, Any]) -> Dict[str, Any]:
     server = dict(cfg.get("server", {}))
     server.pop("secret_key", None)
     server["password_set"] = bool(server.pop("password_hash", None))
+    server["api_tokens"] = public_tokens(server.get("api_tokens"))
     gpio = dict(cfg.get("gpio", {}))
     gpio.pop("switches", None)
     return {
@@ -226,12 +229,81 @@ def api_logout():
     return ok()
 
 
+# ------------------------------------------------------------ API tokens
+MAX_TOKENS = 20
+
+
+def public_tokens(tokens: Any) -> List[Dict[str, Any]]:
+    """Token records without their hashes, plus when each was last used."""
+    used = getattr(get_ctx(), "token_last_used", {}) or {}
+    out = []
+    for t in tokens if isinstance(tokens, list) else []:
+        if isinstance(t, dict) and t.get("id"):
+            out.append({"id": t["id"], "name": t.get("name", ""), "prefix": t.get("prefix", ""),
+                        "created": t.get("created"), "last_used": used.get(t["id"])})
+    return out
+
+
+@bp.get("/tokens")
+def list_tokens():
+    return ok({"tokens": public_tokens((get_ctx().store.section("server") or {}).get("api_tokens"))})
+
+
+@bp.post("/tokens")
+def create_token():
+    """Create a bearer token for scripts and home-automation systems.
+
+    The token is returned once, here, and only its SHA-256 is stored: it is a
+    long random string, so a slow password hash would buy nothing and cost a
+    Pi Zero real time on every request.
+    """
+    import hashlib
+    import secrets as _secrets
+
+    from ..config import new_id
+
+    ctx = get_ctx()
+    name = str(body().get("name") or "").strip()[:40]
+    if not name:
+        raise APIError("Give the token a name, e.g. Home Assistant")
+    token = "jl_" + _secrets.token_urlsafe(30)
+    record = {"id": new_id("tok"), "name": name, "hash": hashlib.sha256(token.encode()).hexdigest(),
+              "prefix": token[:7], "created": time.time()}
+
+    def mutate(cfg):
+        tokens = cfg["server"].setdefault("api_tokens", [])
+        if len(tokens) >= MAX_TOKENS:
+            raise APIError(f"You can have at most {MAX_TOKENS} tokens; delete one you no longer use")
+        tokens.append(record)
+
+    ctx.store.update(mutate, backup_reason="token")
+    return ok({"token": token, "tokens": public_tokens((ctx.store.section("server") or {}).get("api_tokens"))}, 201)
+
+
+@bp.delete("/tokens/<token_id>")
+def delete_token(token_id):
+    ctx = get_ctx()
+
+    def mutate(cfg):
+        tokens = cfg["server"].get("api_tokens") or []
+        if not any(t.get("id") == token_id for t in tokens):
+            raise APIError("unknown token", 404)
+        cfg["server"]["api_tokens"] = [t for t in tokens if t.get("id") != token_id]
+
+    ctx.store.update(mutate, backup_reason="token")
+    getattr(ctx, "token_last_used", {}).pop(token_id, None)
+    return ok({"tokens": public_tokens((ctx.store.section("server") or {}).get("api_tokens"))})
+
+
 # ---------------------------------------------------------------- backup
 @bp.get("/backup")
 def download_backup():
     ctx = get_ctx()
     cfg = ctx.store.get()
     cfg["server"].pop("secret_key", None)
+    # A backup is a file people email themselves; it should not carry working
+    # keys to this Pi.  Restoring keeps whatever tokens exist at the time.
+    cfg["server"].pop("api_tokens", None)
     payload = json.dumps(cfg, indent=2).encode("utf-8")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return send_file(io.BytesIO(payload), mimetype="application/json", as_attachment=True,
@@ -275,6 +347,7 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     server["session_version"] = int(current_server.get("session_version") or 0)
     hosts = server.get("allowed_hosts")
     server["allowed_hosts"] = [str(h).lower()[:253] for h in hosts if isinstance(h, str)][:50] if isinstance(hosts, list) else []
+    server["api_tokens"] = list(current_server.get("api_tokens") or [])
     data["server"] = server
     dash = data["dashboard"]
     # Tiles and scenes are cosmetic, so a bad one is dropped rather than
@@ -282,7 +355,31 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     # later when somebody taps it.
     dash["tiles"] = _keep_valid(dash.get("tiles"), clean_tile)
     dash["scenes"] = _keep_valid(dash.get("scenes"), clean_scene)
+    favs = dash.get("favorite_colors")
+    dash["favorite_colors"] = list(dict.fromkeys(
+        str(c).lower() for c in (favs if isinstance(favs, list) else []) if HEX_RE.match(str(c))))[:MAX_FAVORITE_COLORS]
+    device_ids = [d["id"] for d in devices]
+    groups: List[Dict[str, Any]] = []
+    for g in _keep_valid(data.get("groups"), lambda raw: clean_group(raw, device_ids)):
+        if g["id"] not in {x["id"] for x in groups} and len(groups) < MAX_GROUPS:
+            groups.append(g)
+    data["groups"] = groups
+    data["location"] = _validated_location(data.get("location"))
+    data["schedules"] = valid_schedules(data.get("schedules"), data)
     return data
+
+
+def _validated_location(raw: Any) -> Dict[str, Any]:
+    empty = {"lat": None, "lon": None, "label": ""}
+    if not isinstance(raw, dict):
+        return empty
+    try:
+        lat, lon = float(raw.get("lat")), float(raw.get("lon"))
+    except (TypeError, ValueError):
+        return empty
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return empty
+    return {"lat": round(lat, 4), "lon": round(lon, 4), "label": str(raw.get("label") or "")[:60]}
 
 
 def _keep_valid(items: Any, clean) -> List[Dict[str, Any]]:

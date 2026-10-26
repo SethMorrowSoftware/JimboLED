@@ -40,6 +40,10 @@ def main(argv=None) -> int:
             ctx.gpio.stop()
         finally:
             try:
+                ctx.scheduler.stop()
+            except Exception:
+                logging.getLogger("jimboled").exception("error stopping the scheduler")
+            try:
                 ctx.devices.stop()
             except Exception:
                 logging.getLogger("jimboled").exception("error stopping the device poller")

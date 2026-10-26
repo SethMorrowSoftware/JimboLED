@@ -42,30 +42,51 @@ def make_state(leds: int = 60) -> Dict[str, Any]:
             "lor": 0, "mainseg": 0, "seg": [_seg(0, 0, leds)]}
 
 
-def make_info(name: str, leds: int = 60, mac: str = "aabbccddeeff", ip: str = "127.0.0.1") -> Dict[str, Any]:
+def make_info(name: str, leds: int = 60, mac: str = "aabbccddeeff", ip: str = "127.0.0.1", lc: int = 1,
+              effects: List[str] = EFFECTS, palettes: List[str] = PALETTES) -> Dict[str, Any]:
     return {"ver": "0.15.0", "vid": 2412100, "cn": "Kōsen", "release": "ESP32",
-            "leds": {"count": leds, "pwr": 420, "fps": 42, "maxpwr": 850, "maxseg": 32, "cct": 0,
-                     "lc": 1, "seglc": [1], "bootps": 0},
+            "leds": {"count": leds, "pwr": 420, "fps": 42, "maxpwr": 850, "maxseg": 32, "cct": 1 if lc & 4 else 0,
+                     "lc": lc, "seglc": [lc], "bootps": 0},
             "str": False, "name": name, "udpport": 21324, "live": False, "liveseg": -1, "lm": "", "lip": "",
-            "ws": 0, "fxcount": len(EFFECTS), "palcount": len(PALETTES), "cpalcount": 0, "maps": [{"id": 0}],
+            "ws": 0, "fxcount": len(effects), "palcount": len(palettes), "cpalcount": 0, "maps": [{"id": 0}],
             "wifi": {"bssid": "00:11:22:33:44:55", "rssi": -58, "signal": 84, "channel": 6, "ap": False},
             "fs": {"u": 12, "t": 983, "pmt": 0}, "ndc": 1, "arch": "esp32", "core": "v3.3.6",
             "clock": 240, "flash": 4, "lwip": 0, "freeheap": 190000, "uptime": 4321, "time": "2026-1-1, 00:00:00",
             "opt": 79, "brand": "WLED", "product": "FOSS", "mac": mac, "ip": ip}
 
 
-def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbccddeeff") -> Flask:
-    app = Flask(f"fake-wled-{mac}")
-    lock = threading.Lock()
-    state = make_state(leds)
-    info = make_info(name, leds, mac)
-    presets: Dict[str, Dict[str, Any]] = {
+def default_presets() -> Dict[str, Dict[str, Any]]:
+    return {
         "0": {},
         "1": {"n": "Warm White", "on": True, "bri": 200, "mainseg": 0, "seg": [{"id": 0, "col": [[255, 180, 100]], "fx": 0}]},
         "2": {"n": "Rainbow", "on": True, "bri": 255, "seg": [{"id": 0, "fx": 9, "pal": 11}]},
         "3": {"n": "Party mode", "playlist": {"ps": [1, 2], "dur": [30, 30], "transition": [7, 7], "repeat": 0, "end": 0}},
     }
-    app.config["FAKE"] = {"state": state, "info": info, "presets": presets, "log": [], "fail": False}
+
+
+def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbccddeeff", *,
+                     effects: List[str] = None, fxdata: List[str] = None, palettes: List[str] = None,
+                     segments: int = 1, lc: int = 1, presets: Dict[str, Dict[str, Any]] = None) -> Flask:
+    """``effects``/``fxdata``/``palettes`` let a test build a controller whose
+    numbering differs from the default one (as different WLED builds do);
+    ``segments`` splits the strip evenly; ``lc`` is WLED's light-capability
+    bitmask (1 RGB, 2 white channel, 4 CCT)."""
+    app = Flask(f"fake-wled-{mac}")
+    lock = threading.Lock()
+    effects = list(effects or EFFECTS)
+    fxdata = list(fxdata or (FXDATA if effects == EFFECTS else [""] * len(effects)))
+    palettes = list(palettes or PALETTES)
+    state = make_state(leds)
+    if segments > 1:
+        step = leds // segments
+        state["seg"] = [_seg(i, i * step, leds if i == segments - 1 else (i + 1) * step) for i in range(segments)]
+    if lc & 2:
+        for seg in state["seg"]:
+            seg["col"] = [c + [0] for c in seg["col"]]
+    info = make_info(name, leds, mac, lc=lc, effects=effects, palettes=palettes)
+    presets = copy.deepcopy(presets) if presets is not None else default_presets()
+    app.config["FAKE"] = {"state": state, "info": info, "presets": presets, "log": [], "fail": False,
+                          "effects": effects, "palettes": palettes}
     app.config["fake_nodes"]: List[Dict[str, Any]] = []
 
     def apply(payload: Dict[str, Any]) -> None:
@@ -80,7 +101,7 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
             if payload.get("ql"):
                 saved["ql"] = payload["ql"]
             if payload.get("o"):
-                saved.update({k: v for k, v in payload.items() if k in ("on", "bri", "seg", "playlist", "mainseg")})
+                saved.update({k: v for k, v in payload.items() if k in ("on", "bri", "seg", "playlist", "mainseg", "transition")})
             else:
                 saved.update({"on": st["on"], "bri": st["bri"], "mainseg": st["mainseg"], "seg": copy.deepcopy(st["seg"])})
             f["presets"][slot] = saved
@@ -109,8 +130,8 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
                 if key == "on" and val == "t":
                     val = not st["on"]
                 st[key] = val
-        if "tt" in payload:
-            pass
+        if "tb" in payload:
+            st["_tb"] = payload["tb"]  # not part of real state; lets tests see it arrived
         for key in ("nl", "udpn"):
             if isinstance(payload.get(key), dict):
                 st[key].update(payload[key])
@@ -134,7 +155,11 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
                         continue
                     if k == "col":
                         for ci, c in enumerate(v[:3]):
-                            existing["col"][ci] = list(c) + [0] * (3 - len(c)) if len(c) < 3 else list(c)
+                            if isinstance(c, list) and not c:
+                                continue  # [] means "leave this slot alone", as on real WLED
+                            c = list(c)
+                            width = len(existing["col"][ci])
+                            existing["col"][ci] = (c + [0] * width)[:width] if len(c) < width else c[:width]
                     elif k in existing or k in ("startY", "stopY", "i"):
                         existing[k] = v
                 existing["len"] = existing["stop"] - existing["start"]
@@ -152,7 +177,7 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
     def json_all():
         maybe_fail()
         f = app.config["FAKE"]
-        return jsonify({"state": f["state"], "info": f["info"], "effects": EFFECTS, "palettes": PALETTES})
+        return jsonify({"state": f["state"], "info": f["info"], "effects": effects, "palettes": palettes})
 
     @app.post("/json")
     def json_post():
@@ -192,24 +217,24 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
     @app.get("/json/eff")
     def json_eff():
         maybe_fail()
-        return jsonify(EFFECTS)
+        return jsonify(effects)
 
     @app.get("/json/pal")
     def json_pal():
         maybe_fail()
-        return jsonify(PALETTES)
+        return jsonify(palettes)
 
     @app.get("/json/fxdata")
     def json_fxdata():
         maybe_fail()
-        return jsonify(FXDATA)
+        return jsonify(fxdata)
 
     @app.get("/json/palx")
     def json_palx():
         maybe_fail()
         page = int(request.args.get("page", 0))
         per = 8
-        ids = list(range(len(PALETTES)))
+        ids = list(range(len(palettes)))
         chunk = ids[page * per:(page + 1) * per]
         p: Dict[str, Any] = {}
         for i in chunk:
@@ -243,11 +268,11 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
 class FakeWLEDServer:
     """Run a fake controller on a background thread (for tests)."""
 
-    def __init__(self, name: str = "Fake WLED", leds: int = 60, mac: str = "aabbccddeeff", port: int = 0):
+    def __init__(self, name: str = "Fake WLED", leds: int = 60, mac: str = "aabbccddeeff", port: int = 0, **kwargs):
         import socket
         from werkzeug.serving import make_server
 
-        self.app = create_fake_wled(name, leds, mac)
+        self.app = create_fake_wled(name, leds, mac, **kwargs)
         if port == 0:
             s = socket.socket()
             s.bind(("127.0.0.1", 0))

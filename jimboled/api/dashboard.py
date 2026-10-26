@@ -12,7 +12,10 @@ from . import APIError, body, ok
 
 bp = Blueprint("dashboard", __name__)
 
-TILE_TYPES = ("device", "switch", "scene", "all", "clock", "heading", "note")
+TILE_TYPES = ("device", "switch", "scene", "group", "all", "clock", "heading", "note")
+# Tiles that exist because something else does; they can be hidden, not removed.
+BOUND_TILE_TYPES = ("device", "switch", "scene", "group")
+MAX_FAVORITE_COLORS = 24
 TILE_SIZES = ("s", "m", "l", "xl")
 # "auto" follows the device's light/dark setting; the rest are explicit.
 THEMES = ("auto", "midnight", "graphite", "oled", "ocean", "daylight", "paper")
@@ -46,6 +49,7 @@ def sync_tiles(cfg: Dict[str, Any]) -> None:
     device_ids = {d["id"] for d in cfg.get("devices", []) if d.get("id")}
     switch_ids = {s["id"] for s in cfg.get("gpio", {}).get("switches", []) if s.get("id")}
     scene_ids = {s["id"] for s in cfg["dashboard"].get("scenes", []) if s.get("id")}
+    group_ids = {g["id"] for g in cfg.get("groups", []) if isinstance(g, dict) and g.get("id")}
     tiles = cfg["dashboard"].setdefault("tiles", [])
     kept = []
     for tile in tiles:
@@ -55,6 +59,8 @@ def sync_tiles(cfg: Dict[str, Any]) -> None:
         if t == "switch" and ref not in switch_ids:
             continue
         if t == "scene" and ref not in scene_ids:
+            continue
+        if t == "group" and ref not in group_ids:
             continue
         kept.append(tile)
     cfg["dashboard"]["tiles"] = kept
@@ -67,6 +73,9 @@ def sync_tiles(cfg: Dict[str, Any]) -> None:
     for s in cfg["dashboard"].get("scenes", []):
         if s.get("id"):
             ensure_tile(cfg, "scene", s["id"], s.get("name", ""))
+    for g in cfg.get("groups", []):
+        if isinstance(g, dict) and g.get("id"):
+            ensure_tile(cfg, "group", g["id"], g.get("name", ""))
 
 
 def clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,6 +105,22 @@ def clean_tile(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def clean_lights_action(a: Dict[str, Any]) -> Dict[str, Any]:
+    """A device-agnostic lights action: ``{"type":"lights","target":...,"intent":{...}}``."""
+    from ..wled.intents import IntentError, normalise_intent
+    from .lights import normalise_target
+
+    try:
+        intent = normalise_intent(a.get("intent"))
+    except IntentError as exc:
+        raise APIError(str(exc))
+    target = normalise_target(a.get("target"))
+    out = {"type": "lights", "target": target, "intent": intent}
+    if a.get("label"):
+        out["label"] = str(a["label"])[:60]
+    return out
+
+
 def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise APIError("scene must be an object")
@@ -105,6 +130,8 @@ def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
     actions = raw.get("actions")
     if not isinstance(actions, list) or not actions:
         raise APIError("A scene needs at least one action")
+    if len(actions) > 100:
+        raise APIError("A scene can have at most 100 actions")
     clean_actions = []
     for a in actions:
         if not isinstance(a, dict):
@@ -114,7 +141,10 @@ def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
             state = a.get("state")
             if not isinstance(state, dict) or not state:
                 raise APIError("device action needs a state object")
-            clean_actions.append({"type": kind, "ref": str(a.get("ref") or ""), "state": state})
+            entry = {"type": kind, "ref": str(a.get("ref") or ""), "state": state}
+            if a.get("label"):
+                entry["label"] = str(a["label"])[:60]
+            clean_actions.append(entry)
         elif kind == "switch":
             action = str(a.get("action") or "")
             if action not in ("on", "off", "toggle", "pulse"):
@@ -122,6 +152,10 @@ def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
             clean_actions.append({"type": "switch", "ref": str(a.get("ref") or ""), "action": action})
         elif kind == "delay":
             clean_actions.append({"type": "delay", "ms": int(max(0, min(10000, int(a.get("ms") or 0))))})
+        elif kind == "lights":
+            clean_actions.append(clean_lights_action(a))
+        elif kind == "all_off":
+            clean_actions.append({"type": "all_off"})
         else:
             raise APIError(f"unknown action type '{kind}'")
     color = str(raw.get("color") or "")
@@ -185,7 +219,17 @@ def update_dashboard():
             if not lo <= scale <= hi:
                 raise APIError(f"text_scale must be between {lo} and {hi}")
             dash["text_scale"] = scale
-        for flag in ("show_offline", "show_clock", "show_estop"):
+        if "favorite_colors" in data:
+            favs = data["favorite_colors"]
+            if not isinstance(favs, list):
+                raise APIError("favorite_colors must be a list of hex colours")
+            clean = []
+            for c in favs:
+                c = str(c).lower()
+                if HEX_RE.match(c) and c not in clean:
+                    clean.append(c)
+            dash["favorite_colors"] = clean[:MAX_FAVORITE_COLORS]
+        for flag in ("show_offline", "show_clock", "show_estop", "show_lights_button"):
             if flag in data:
                 dash[flag] = bool(data[flag])
         if "tiles" in data:
@@ -208,8 +252,8 @@ def add_tile():
     ctx = get_ctx()
     data = body()
     tile = clean_tile(data)
-    if tile["type"] in ("device", "switch", "scene"):
-        raise APIError("device, switch and scene tiles are created automatically")
+    if tile["type"] in BOUND_TILE_TYPES:
+        raise APIError("controller, switch, scene and group tiles are created automatically")
 
     def mutate(cfg):
         cfg["dashboard"].setdefault("tiles", []).append(tile)
@@ -245,7 +289,7 @@ def delete_tile(tile_id):
         target = next((t for t in tiles if t.get("id") == tile_id), None)
         if target is None:
             raise APIError("unknown tile", 404)
-        if target.get("type") in ("device", "switch", "scene"):
+        if target.get("type") in BOUND_TILE_TYPES:
             target["hidden"] = True  # bound tiles can only be hidden, not removed
         else:
             cfg["dashboard"]["tiles"] = [t for t in tiles if t.get("id") != tile_id]
@@ -340,11 +384,8 @@ def run_scene(scene_id):
     return ok({"results": results, "failed": failed})
 
 
-def run_scene_actions(ctx, scene: Dict[str, Any]) -> List[Dict[str, Any]]:
+def run_scene_actions(ctx, scene: Dict[str, Any], *, source: str = "scene") -> List[Dict[str, Any]]:
     import time as _time
-
-    from ..gpio.manager import GPIOError
-    from ..wled.manager import DeviceError
 
     # A scene runs on the request's own worker thread, and there are only eight
     # of them.  Each delay is capped at 10 s, but nothing capped how many a
@@ -354,33 +395,64 @@ def run_scene_actions(ctx, scene: Dict[str, Any]) -> List[Dict[str, Any]]:
     results = []
     for action in scene.get("actions", []):
         kind = action.get("type")
-        entry: Dict[str, Any] = {"type": kind, "ref": action.get("ref")}
-        try:
-            if kind == "device":
-                ctx.devices.set_state(action["ref"], action["state"])
-            elif kind == "all":
-                res = ctx.devices.set_state_all(action["state"])
-                bad = {k: v for k, v in res.items() if v != "ok"}
-                if bad:
-                    entry["error"] = "; ".join(f"{k}: {v}" for k, v in bad.items())
-            elif kind == "switch":
-                act = action["action"]
-                if act == "on":
-                    ctx.gpio.turn_on(action["ref"], source="scene")
-                elif act == "off":
-                    ctx.gpio.turn_off(action["ref"], source="scene")
-                elif act == "toggle":
-                    ctx.gpio.toggle(action["ref"], source="scene")
-                elif act == "pulse":
-                    ctx.gpio.pulse(action["ref"], source="scene")
-            elif kind == "delay":
-                wait = max(0.0, min(10.0, action.get("ms", 0) / 1000.0, budget))
-                budget -= wait
-                if wait:
-                    _time.sleep(wait)
-                elif action.get("ms"):
-                    entry["error"] = "skipped: this scene has already waited long enough"
-        except (DeviceError, GPIOError) as exc:
-            entry["error"] = str(exc)
-        results.append(entry)
+        if kind == "delay":
+            entry: Dict[str, Any] = {"type": kind}
+            wait = max(0.0, min(10.0, action.get("ms", 0) / 1000.0, budget))
+            budget -= wait
+            if wait:
+                _time.sleep(wait)
+            elif action.get("ms"):
+                entry["error"] = "skipped: this scene has already waited long enough"
+            results.append(entry)
+            continue
+        results.append(run_action(ctx, action, source=source))
     return results
+
+
+def run_action(ctx, action: Dict[str, Any], *, source: str = "scene") -> Dict[str, Any]:
+    """Run one scene/schedule action; never raises for device or relay problems."""
+    from ..gpio.manager import GPIOError
+    from ..wled.manager import DeviceError
+
+    kind = action.get("type")
+    entry: Dict[str, Any] = {"type": kind, "ref": action.get("ref")}
+    try:
+        if kind == "device":
+            ctx.devices.set_state(action["ref"], action["state"])
+        elif kind == "all":
+            res = ctx.devices.set_state_all(action["state"])
+            bad = {k: v for k, v in res.items() if v != "ok"}
+            if bad:
+                entry["error"] = "; ".join(f"{k}: {v}" for k, v in bad.items())
+        elif kind == "lights":
+            from .lights import resolve_target, summarise
+
+            label, ids = resolve_target(ctx.store.get(), action.get("target"))
+            out = summarise(ctx.devices.apply_intent(ids, action["intent"]))
+            entry["label"] = label
+            entry["message"] = out["message"]
+            if not out["ok"]:
+                entry["error"] = out["message"]
+        elif kind == "all_off":
+            ctx.gpio.all_off(source=source)
+            res = ctx.devices.set_state_all({"on": False})
+            bad = {k: v for k, v in res.items() if v != "ok"}
+            if bad:
+                entry["error"] = "; ".join(f"{k}: {v}" for k, v in bad.items())
+        elif kind == "switch":
+            act = action["action"]
+            if act == "on":
+                ctx.gpio.turn_on(action["ref"], source=source)
+            elif act == "off":
+                ctx.gpio.turn_off(action["ref"], source=source)
+            elif act == "toggle":
+                ctx.gpio.toggle(action["ref"], source=source)
+            elif act == "pulse":
+                ctx.gpio.pulse(action["ref"], source=source)
+        else:
+            entry["error"] = f"unknown action '{kind}'"
+    except (DeviceError, GPIOError) as exc:
+        entry["error"] = str(exc)
+    except APIError as exc:
+        entry["error"] = exc.message
+    return entry

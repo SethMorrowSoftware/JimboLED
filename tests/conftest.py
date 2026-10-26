@@ -17,8 +17,8 @@ from tests.fake_wled import FakeWLEDServer  # noqa: E402
 def fake_wled():
     servers = []
 
-    def _make(name="Fake WLED", leds=60, mac="aabbccddeeff"):
-        s = FakeWLEDServer(name, leds, mac).start()
+    def _make(name="Fake WLED", leds=60, mac="aabbccddeeff", **kwargs):
+        s = FakeWLEDServer(name, leds, mac, **kwargs).start()
         servers.append(s)
         return s
 
@@ -45,6 +45,7 @@ def app(data_dir):
     ctx = application.extensions["jimboled"]
     ctx.store.update(lambda c: c["wled"].update({"poll_interval_s": 1, "offline_poll_interval_s": 3, "request_timeout_s": 2}))
     yield application
+    ctx.scheduler.stop()
     ctx.gpio.stop()
     ctx.devices.stop()
     ctx.discovery.listener.stop()
