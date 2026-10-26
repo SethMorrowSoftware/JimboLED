@@ -79,8 +79,13 @@ def test_editing_the_address_forgets_the_mac(client, fake_wled):
     did = client.post("/api/devices", json={"host": one.host}).json["device"]["id"]
     client.put(f"/api/devices/{did}", json={"name": "Renamed"})
     assert client.application.extensions["jimboled"].store.get()["devices"][0]["mac"] == "aabbccdd0f04"
-    client.put(f"/api/devices/{did}", json={"host": other.host})
-    # Learned afresh from the controller at the new address.
+    # Another controller at the new address: only when confirmed …
+    r = client.put(f"/api/devices/{did}", json={"host": other.host})
+    assert r.status_code == 409 and r.json["code"] == "different_controller"
+    assert client.application.extensions["jimboled"].store.get()["devices"][0]["host"] == one.host
+    # … and then it is this light's controller.
+    r = client.put(f"/api/devices/{did}", json={"host": other.host, "new_controller": True})
+    assert r.status_code == 200 and r.json["device"]["online"]
     assert client.application.extensions["jimboled"].store.get()["devices"][0]["mac"] == "aabbccdd0f05"
 
 
@@ -389,3 +394,68 @@ def test_adding_a_disabled_lights_controller_enables_that_light(app, client, fak
     r = client.post("/api/devices", json={"host": back.host})
     assert r.status_code == 200 and "enabled again" in r.json["message"]
     assert ctx.store.get()["devices"][0]["enabled"] is True and len(ctx.store.get()["devices"]) == 1
+
+
+
+def test_an_old_light_never_adopts_a_stranger_at_its_address(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    stranger = fake_wled("New strip", 30, "112233a1b2c3")
+    _legacy(ctx, ("wled-dd0f40", "Christmas", stranger.host))
+    ctx.devices.refresh("wled-dd0f40")
+    assert ctx.devices.wrong_device("wled-dd0f40")
+    assert ctx.store.get()["devices"][0].get("mac", "") == ""
+    # Adding the stranger asks whether it replaces Christmas's controller …
+    r = client.post("/api/devices", json={"host": stranger.host})
+    assert r.status_code == 409 and r.json["code"] == "replacement" and r.json["device_id"] == "wled-dd0f40"
+    # … or is a separate light, which it then is.
+    assert client.post("/api/devices", json={"host": stranger.host, "separate": True}).status_code == 201
+    # Its own controller is recognised and learned.
+    own = fake_wled("Christmas", 30, "aabbccdd0f40")
+    ctx.store.update(lambda c: [d.update({"host": own.host}) for d in c["devices"] if d["id"] == "wled-dd0f40"])
+    ctx.devices.refresh("wled-dd0f40")
+    assert ctx.devices.summary("wled-dd0f40")["online"]
+    assert next(d for d in ctx.store.get()["devices"] if d["id"] == "wled-dd0f40")["mac"] == "aabbccdd0f40"
+
+
+def test_moves_within_a_wider_home_network_are_followed():
+    from jimboled.wled.discovery import _same_subnet
+
+    assert not _same_subnet("192.168.69.12", ["192.168.68.50"], local=[])
+    assert _same_subnet("192.168.69.12", ["192.168.68.50"], local=["192.168.68.0/22"])
+    assert not _same_subnet("10.9.9.9", ["192.168.68.50"], local=["192.168.68.0/22"])
+
+
+def test_following_probes_every_candidate_in_turn(app):
+    ctx = app.extensions["jimboled"]
+    disc = ctx.discovery
+    hosts = [f"10.0.0.{i}" for i in range(1, 13)]
+    disc.listener.snapshot = lambda max_age_s=300: [{"host": h} for h in hosts]
+    disc._lost_controllers = lambda: {"aabbccdd0f60": ("x", "10.0.0.50")}
+    probed = []
+    disc.probe = lambda host: probed.append(host)
+    disc.follow_moved()
+    disc.follow_moved()
+    assert sorted(probed[8:12]) == sorted(set(hosts) - set(probed[:8]))
+
+
+def test_adding_the_replacement_board_points_to_the_light(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Porch", 30, "aabbccdd0f50")
+    did = client.post("/api/devices", json={"host": board.host}).json["device"]["id"]
+    board.fake["info"]["mac"] = "aabbccdd5577"  # the new board took its address
+    ctx.devices.refresh(did)
+    r = client.post("/api/devices", json={"host": board.host})
+    assert r.status_code == 409 and r.json["code"] == "replacement" and r.json["device_id"] == did
+    assert len(ctx.store.get()["devices"]) == 1
+    # "It replaces Porch's": the light takes it on.
+    r = client.put(f"/api/devices/{did}", json={"replace": True})
+    assert r.json["device"]["online"] and ctx.store.get()["devices"][0]["mac"] == "aabbccdd5577"
+
+
+def test_nothing_answering_only_promises_what_following_can_do(app, client, fake_wled):
+    board = fake_wled("Porch", 30, "aabbccdd0f51")
+    did = client.post("/api/devices", json={"host": board.host}).json["device"]["id"]
+    r = client.put(f"/api/devices/{did}", json={"host": "127.0.0.1:9"})
+    assert "still finds the light" in r.json["warning"]
+    r = client.put(f"/api/devices/{did}", json={"host": "wled-proch.invalid"})
+    assert "Check the address" in r.json["warning"]

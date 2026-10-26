@@ -41,7 +41,7 @@
             const item = h('div', { class: 'list-item' });
             item.append(el(`<span class="tile-icon">${icon('bulb')}</span>`), h('div', { class: 'grow' }, h('span', { class: 'title', text: f.name || f.host }), h('span', { class: 'sub', text: `${f.host}${f.ver ? ' · WLED ' + f.ver : ''}${f.led_count ? ' · ' + f.led_count + ' LEDs' : ''}` })));
             if (f.known) item.append(el(`<span class="badge ok">added</span>`));
-            else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, api.post('/api/devices', { host: f.host, name: f.name }).then(() => { f.known = true; poll(); }).catch(UI.notifyError)); item.append(b); }
+            else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, Device.addController({ host: f.host, name: f.name }).then((r) => { if (r) { f.known = true; poll(); } }).catch(UI.notifyError)); item.append(b); }
             list.append(item);
           }
           if (s.running) timer = setTimeout(poll, 1200);

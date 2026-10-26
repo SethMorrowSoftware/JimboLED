@@ -8,7 +8,8 @@ from flask import Blueprint
 from .. import get_ctx
 from ..config import new_id
 from ..wled.client import WLEDClient, WLEDError
-from ..wled.manager import DeviceError, PutBackError, is_controller, normalise_device, normalise_mac, sanitise_state
+from ..wled.discovery import _ipv4_part, _same_subnet
+from ..wled.manager import _LEGACY_ID, DeviceError, PutBackError, is_controller, normalise_device, normalise_mac, sanitise_state
 from . import APIError, body, ok
 from .dashboard import ensure_tile, remove_tile
 
@@ -99,6 +100,15 @@ def add_device():
         for d in devices:
             if d.get("host") == new["host"] and _holds_address(ctx, d):
                 raise APIError(f"{new['host']} is already added as '{d.get('name')}'", 409)
+            if (d.get("host") == new["host"] and d.get("enabled", True) and new["mac"] and not data.get("separate")
+                    and _wrong_mac(ctx, d) == new["mac"]):
+                # Exactly the controller that light sees instead of its own:
+                # its replacement (taken on by that light), or a separate new
+                # light (added with "separate": true)?  The person says which.
+                raise APIError(f"{new['host']} is where your light '{d.get('name')}' was. If this controller replaced "
+                               f"its old one, '{d.get('name')}' can use it, keeping its scenes, groups and schedules. "
+                               "Or add it as a separate new light.", 409,
+                               code="replacement", device_id=d.get("id"), light_name=d.get("name"))
         for d in devices:
             if d.get("id") == new["id"]:
                 new["id"] = new_id("wled")
@@ -155,6 +165,7 @@ def update_device(device_id):
         devices = [d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id]
         moved = cleaned["host"] != current.get("host")
         mine = normalise_mac(current.get("mac"))
+        known = bool(mine) or bool(_LEGACY_ID.match(str(device_id)))  # can be recognised by its MAC
         if moved:
             other = next((d for d in devices if d.get("host") == cleaned["host"] and _holds_address(ctx, d)), None)
             if other:
@@ -165,19 +176,28 @@ def update_device(device_id):
             if probed is None:
                 # Nothing answers there (yet): keep the MAC, so the light is
                 # still recognised – and followed – wherever it turns up.
-                outcome["warning"] = (f"Saved, but nothing answers at {cleaned['host']} right now. "
-                                      "If that address is wrong, JimboLED still finds the light once it is back on the network.")
+                findable = known and _ipv4_part(cleaned["host"]) and _same_subnet(cleaned["host"], [current.get("host") or ""])
+                outcome["warning"] = f"Saved, but nothing answers at {cleaned['host']} right now. " + (
+                    "If that address is wrong, JimboLED still finds the light once it is back on the network." if findable else
+                    "Check the address: if it is wrong, JimboLED can't find this light by itself (Settings → Find controllers "
+                    "lists every controller's address).")
+            elif probed and known and not is_controller(current, probed) and not data.get("new_controller"):
+                # Another controller than this light's own: ask first (a
+                # neighbouring address picked from the router's list, say).
+                raise APIError(f"The WLED at {cleaned['host']} is not this light's own controller. If you replaced it, "
+                               "use that one; if the light only moved, enter its own address instead.", 409,
+                               code="different_controller")
             elif probed != mine:
-                cleaned["mac"] = ""  # another (or a new) controller: learn its MAC afresh
+                cleaned["mac"] = probed  # this controller is the light now
         takeover = replace and not moved
         owner = next((d for d in devices if theirs and is_controller(d, theirs)), None)
         if takeover and owner:
             takeover = False
-            tail = ("Both lights are found again once they answer at their new addresses." if mine else
+            tail = ("Both lights are found again once they answer at their new addresses." if known else
                     "This light has never answered, so it can't be recognised elsewhere: enter its controller's address.")
             outcome["warning"] = f"The controller at this address is “{owner.get('name')}”, so this light was not switched to it. {tail}"
         if takeover:
-            cleaned["mac"] = ""
+            cleaned["mac"] = theirs  # set now: a light with an old-style id would refuse it otherwise
         outcome["replaced"], outcome["moved"] = takeover, moved
         current.update(cleaned)
         for tile in cfg["dashboard"].get("tiles", []):
@@ -229,6 +249,14 @@ def _holds_address(ctx, d: Dict[str, Any]) -> bool:
         return not ctx.devices.wrong_device(d.get("id"))
     except DeviceError:
         return True
+
+
+def _wrong_mac(ctx, d: Dict[str, Any]) -> str:
+    """The MAC of the controller answering at light ``d``'s address instead of its own."""
+    try:
+        return ctx.devices.wrong_mac(d.get("id"))
+    except DeviceError:
+        return ""
 
 
 def _probe_mac(host: str) -> Optional[str]:

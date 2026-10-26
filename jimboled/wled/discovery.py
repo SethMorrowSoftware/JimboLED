@@ -359,12 +359,23 @@ def _ipv4_part(host: str) -> str:
         return ""
 
 
-def _same_subnet(host: str, others: List[str], prefix: int = 24) -> bool:
+def _same_subnet(host: str, others: List[str], prefix: int = 24, local: Optional[List[str]] = None) -> bool:
+    """Whether ``host`` is on the same network as one of ``others``: the same
+    /24, or the same local network the Pi is on (mesh routers often use a
+    /22, and a controller can land in another /24 of it after a power cut)."""
     ip = _ipv4_part(host)
     if not ip:
         return False
-    net = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
-    return any(_ipv4_part(o) and ipaddress.ip_address(_ipv4_part(o)) in net for o in others)
+    addr = ipaddress.ip_address(ip)
+    nets = [ipaddress.ip_network(f"{ip}/{prefix}", strict=False)]
+    for cidr in local_subnets() if local is None else local:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            continue
+        if addr in net:
+            nets.append(net)
+    return any(_ipv4_part(o) and any(ipaddress.ip_address(_ipv4_part(o)) in n for n in nets) for o in others)
 
 
 # ------------------------------------------------------------------ service
@@ -373,6 +384,7 @@ class DiscoveryService:
         self.store = store
         self.devices = devices
         self._lock = threading.Lock()
+        self._follow_probed: Dict[str, float] = {}  # host → when follow_moved last probed it
         self._thread: Optional[threading.Thread] = None
         self._status: Dict[str, Any] = {"running": False, "started_at": None, "finished_at": None,
                                         "found": [], "errors": [], "progress": "", "methods": []}
@@ -458,10 +470,16 @@ class DiscoveryService:
                        if isinstance(d, dict) and d.get("enabled", True) and d.get("id") not in lost_ids
                        and not self._answered_by_another(d.get("id"))}
         entries = list(found or [])
+        local = local_subnets()
         if found is None:
             candidates = [n["host"] for n in self.listener.snapshot(max_age_s=300)
-                          if n["host"] not in known_hosts and _same_subnet(n["host"], [old for _, old in lost.values()])]
+                          if n["host"] not in known_hosts and _same_subnet(n["host"], [old for _, old in lost.values()], local=local)]
+            # Least recently probed first (never-probed, i.e. new, addresses
+            # before all others), so every candidate gets its turn.
+            candidates.sort(key=lambda h: self._follow_probed.get(h, 0.0))
+            self._follow_probed = {h: t for h, t in self._follow_probed.items() if h in candidates}
             for host in candidates[:MAX_FOLLOW_PROBES]:
+                self._follow_probed[host] = time.time()
                 entry = self.probe(host)
                 if entry:
                     entries.append(entry)
@@ -475,8 +493,8 @@ class DiscoveryService:
                 continue
             did, old_host = lost[mac]
             # A WLED reports its own MAC, so this is a hint, not proof: only
-            # follow it within the same /24 the controller lived in.
-            if not _same_subnet(host, [old_host]):
+            # follow it within the network the controller lived in.
+            if not _same_subnet(host, [old_host], local=local):
                 log.warning("not following %s to %s: a different network", did, host)
                 continue
             lost.pop(mac)
@@ -656,7 +674,7 @@ class DiscoveryService:
         }
 
     def _annotate(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        from .manager import is_controller, normalise_mac
+        from .manager import _LEGACY_ID, is_controller, normalise_mac
 
         devices = [d for d in (self.store.section("devices") or []) if isinstance(d, dict)]
         by_host = {d.get("host"): d for d in devices}
@@ -681,7 +699,8 @@ class DiscoveryService:
             # apart: an unrelated WLED that took a light's old address is not
             # "added" (it may be a light that moved, or a new one).
             holder = by_host.get(entry.get("host"))
-            held = holder is not None and (not emac or not normalise_mac(holder.get("mac")) or is_controller(holder, emac))
+            unknown = holder is not None and not normalise_mac(holder.get("mac")) and not _LEGACY_ID.match(str(holder.get("id") or ""))
+            held = holder is not None and (not emac or unknown or is_controller(holder, emac))
             entry["known"] = bool(did) or held
             entry["device_id"] = did or (holder.get("id") if held else None)
         snap["found"].sort(key=lambda e: (e.get("known", False), str(e.get("name", ""))))

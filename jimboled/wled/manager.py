@@ -393,8 +393,11 @@ class DeviceManager:
                 rec.latency_ms = round((time.monotonic() - t0) * 1000, 1)
                 mine, theirs = normalise_mac(rec.cfg.get("mac")), normalise_mac(_as_doc(doc["info"]).get("mac"))
                 owner = next((str(o.get("name") or o.get("host")) for o in others if is_controller(o, theirs)), "")
+                # A light from before MACs were remembered is checked against
+                # the MAC its id was made from.
+                legacy = not mine and bool(_LEGACY_ID.match(str(rec.cfg.get("id") or "")))
                 problem = ""
-                if mine and theirs and mine != theirs:
+                if theirs and (mine or legacy) and not is_controller(rec.cfg, theirs):
                     # Another controller got this one's old address.  Its
                     # state is not this light's, and commands must not reach it.
                     problem = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "

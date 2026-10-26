@@ -530,7 +530,13 @@
       const payload = { name: name.value.trim(), icon: iconName, color };
       if (host.value.trim() !== d.host) payload.host = host.value.trim();
       else if (d.wrong_device && !d.wrong_owner) payload.replace = true;
-      const r = await api.put(`/api/devices/${d.id}`, payload);
+      let r;
+      try { r = await api.put(`/api/devices/${d.id}`, payload); } catch (e) {
+        // A different controller answers at the new address: only on purpose.
+        if (!(e.data && e.data.code === 'different_controller')) throw e;
+        if (!(await UI.confirm({ title: 'A different controller', message: e.message, okText: 'Use that controller' }))) return;
+        r = await api.put(`/api/devices/${d.id}`, { ...payload, new_controller: true });
+      }
       if (r && r.warning) UI.toast(r.warning, 'warning', 9000); else UI.toast('Saved', 'success');
       m.close(); onSaved && onSaved(); if (window.App) App.refresh();
     })().catch(UI.notifyError));
@@ -551,7 +557,7 @@
     const body = h('div', { class: 'stack' }, UI.field('Controller address', host, 'Find it in your router\'s device list or in the WLED app. Or use "Find controllers" to search automatically.'), probe, UI.field('Name', name), h('label', { class: 'check' }, anyway, h('span', { text: 'Add even if it cannot be reached right now' })));
     const save = el(`<button class="btn primary" data-busy="Adding…">Add controller</button>`);
     const m = UI.modal({ title: 'Add a WLED controller', icon: 'plus', body, footer: [save] });
-    save.onclick = () => UI.busy(save, (async () => { const r = await api.post('/api/devices', { host: host.value.trim(), name: name.value.trim(), skip_probe: anyway.checked }); UI.toast(r.followed ? r.message : `Added ${r.device.name}`, 'success'); m.close(); onAdded && onAdded(r.device); if (window.App) App.refresh(); })().catch(UI.notifyError));
+    save.onclick = () => UI.busy(save, (async () => { const r = await addController({ host: host.value.trim(), name: name.value.trim(), skip_probe: anyway.checked }); if (!r) return; UI.toast(r.followed ? r.message : `Added ${r.device.name}`, 'success'); m.close(); onAdded && onAdded(r.device); if (window.App) App.refresh(); })().catch(UI.notifyError));
     host.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
   }
 
@@ -559,5 +565,30 @@
     try { const r = await api.post(`/api/devices/${d.id}/identify`); UI.toast(`${d.name}: ${r.message}`, 'info'); } catch (e) { UI.notifyError(e); }
   }
 
-  window.Device = { identify, tileBody, openPanel, send, editDevice, removeDevice, addDeviceDialog, isOn, mainColors, signalIcon, paletteGradient };
+  /** Add a controller.  Where it answers at the address of a light that sees
+   *  it instead of its own, ask whether it replaces that light's controller or
+   *  is a separate new light.  Resolves to the reply, or null if cancelled. */
+  async function addController(payload) {
+    try { return await api.post('/api/devices', payload); } catch (e) {
+      if (!(e.data && e.data.code === 'replacement')) throw e;
+      const who = e.data.light_name || 'that light';
+      const choice = await new Promise((resolve) => {
+        let done = false;
+        const pick = (v) => () => { done = true; resolve(v); m.close(); };
+        const replace = h('button', { class: 'btn primary', text: `It replaces ${who}'s` });
+        const separate = h('button', { class: 'btn', text: 'Add as a new light' });
+        const m = UI.modal({ title: 'Replacement or a new light?', icon: 'bulb', body: h('p', { text: e.message }), footer: [separate, replace], onClose: () => { if (!done) resolve(null); } });
+        replace.onclick = pick('replace');
+        separate.onclick = pick('separate');
+      });
+      if (choice === 'replace') {
+        const r = await api.put(`/api/devices/${e.data.device_id}`, { replace: true });
+        return { ...r, followed: true, message: r.warning || `${who} now uses this controller` };
+      }
+      if (choice === 'separate') return api.post('/api/devices', { ...payload, separate: true });
+      return null;
+    }
+  }
+
+  window.Device = { identify, tileBody, openPanel, send, editDevice, removeDevice, addDeviceDialog, addController, isOn, mainColors, signalIcon, paletteGradient };
 })();

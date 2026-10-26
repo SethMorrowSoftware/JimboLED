@@ -106,7 +106,7 @@
         flash.onclick = () => api.post('/api/discover/identify', { host: f.host }).then((r) => UI.toast(`${f.name || f.host}: ${r.message}`, 'info')).catch(UI.notifyError);
         item.append(flash);
         if (f.known) item.append(el(`<span class="badge ok">added</span>`));
-        else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, api.post('/api/devices', { host: f.host, name: f.name }).then((r) => { UI.toast(r && r.followed ? r.message : `Added ${f.name || f.host}`, 'success'); f.known = true; draw(s); onDone && onDone(); if (window.App) App.refresh(); }).catch(UI.notifyError)); item.append(b); }
+        else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, Device.addController({ host: f.host, name: f.name }).then((r) => { if (!r) return; UI.toast(r.followed ? r.message : `Added ${f.name || f.host}`, 'success'); f.known = true; draw(s); onDone && onDone(); if (window.App) App.refresh(); }).catch(UI.notifyError)); item.append(b); }
         list.append(item);
       }
       const fresh = all.filter((f) => !f.known && f.name);
@@ -114,7 +114,7 @@
         const addAll = el(`<button class="btn primary" data-busy="Adding…">${icon('plus')} Add all ${fresh.length}</button>`);
         addAll.onclick = () => UI.busy(addAll, (async () => {
           let added = 0;
-          for (const f of fresh) { try { await api.post('/api/devices', { host: f.host, name: f.name }); f.known = true; added++; } catch (e) { UI.notifyError(e); } }
+          for (const f of fresh) { try { if (await Device.addController({ host: f.host, name: f.name })) { f.known = true; added++; } } catch (e) { UI.notifyError(e); } }
           UI.toast(`Added ${added} controller${added === 1 ? '' : 's'}`, 'success'); draw(s); onDone && onDone(); if (window.App) App.refresh(true);
         })());
         list.prepend(h('div', { class: 'row end' }, addAll));
