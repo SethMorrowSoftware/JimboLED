@@ -372,7 +372,8 @@ class DeviceManager:
                     # Another controller got this one's old address.  Its
                     # state is not this light's, and commands must not reach it.
                     rec.wrong_device = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
-                                        f"answers at {rec.cfg.get('host')}; this light has probably moved")
+                                        f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
+                                        "again; if you replaced its controller, edit the light and save to use the new one")
                     rec.failures = max(rec.failures, 1)
                     self._mark_offline(rec, rec.wrong_device)
                 else:
@@ -516,6 +517,10 @@ class DeviceManager:
                 log.exception("device change callback failed")
 
     # --------------------------------------------------------------- access
+    def wrong_device(self, device_id: str) -> bool:
+        """Whether another controller (another MAC) answers at this light's address."""
+        return bool(self._get(device_id).wrong_device)
+
     @staticmethod
     def _check_identity(rec: DeviceRecord) -> None:
         if rec.wrong_device:
@@ -558,6 +563,7 @@ class DeviceManager:
             # stale; it must not count as "on" in the All lights tile.
             "online": rec.online and rec.cfg.get("enabled", True),
             "last_error": rec.last_error if rec.cfg.get("enabled", True) else "disabled",
+            "wrong_device": bool(rec.wrong_device),
             "last_seen": rec.last_seen,
             "latency_ms": rec.latency_ms,
             "changed_at": rec.changed_at,
@@ -972,12 +978,13 @@ class DeviceManager:
         content = kwargs.get("state")
         self._check_identity(rec)
         with rec.lock:
+            prior = (rec.presets or {}).get(str(int(slot))) if isinstance(rec.presets, dict) else None
             if not content:
                 try:
                     rec.client.save_preset(slot, name, **kwargs)
                 except WLEDError as exc:
                     raise DeviceError(str(exc))
-                self._wait_for_preset(rec, slot, name)
+                self._wait_for_preset(rec, slot, name, prior=prior)
                 return _presets_list(rec.presets)
             playlist = "playlist" in content
             if playlist and _as_doc(rec.info).get("live") and not _as_doc(rec.state).get("lor"):
@@ -996,7 +1003,7 @@ class DeviceManager:
                 # A timeout or a lost reply can come *after* WLED applied the
                 # look (and even stored it), so the lights are put back anyway.
                 failure = exc
-            stored = self._wait_for_preset(rec, slot, name, playlist=playlist)
+            stored = self._wait_for_preset(rec, slot, name, playlist=playlist, prior=prior)
             if playlist and not stored:
                 # Putting the lights back now would make WLED store an empty
                 # playlist; leave it playing rather than lose it.
@@ -1012,17 +1019,24 @@ class DeviceManager:
         return _presets_list(rec.presets)
 
     def _wait_for_preset(self, rec: DeviceRecord, slot: int, name: str, *, playlist: bool = False,
-                         timeout: float = 4.0) -> bool:
-        """Poll presets.json until ``slot`` holds ``name``.  Caller holds the lock."""
+                         prior: Any = None, timeout: float = 4.0) -> bool:
+        """Poll presets.json until ``slot`` holds ``name``.  Caller holds the lock.
+
+        ``prior`` is what the slot held before: overwriting a preset under its
+        own name only counts once the entry changed (or after the second
+        WLED usually needs to write it, if the new one happens to be identical).
+        """
         want = fit_name(name)
-        deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        deadline = start + timeout
         time.sleep(0.25)
         while True:
             try:
                 presets = rec.client.get_presets()
                 rec.presets, rec.presets_loaded_at = presets, time.monotonic()
                 entry = presets.get(str(int(slot))) or {}
-                if entry.get("n") == want and (not playlist or entry.get("playlist")):
+                fresh = entry != prior or time.monotonic() - start >= 1.0
+                if entry.get("n") == want and (not playlist or entry.get("playlist")) and fresh:
                     return True
             except WLEDError:
                 pass

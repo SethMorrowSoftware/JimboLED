@@ -112,7 +112,13 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
                     st["pl"] = int(slot)
             else:
                 saved.update({"on": st["on"], "bri": st["bri"], "mainseg": st["mainseg"], "seg": copy.deepcopy(st["seg"])})
-            f["presets"][slot] = saved
+            if f.get("save_delay"):
+                # Like a busy ESP: presets.json is written a little later.
+                timer = threading.Timer(f["save_delay"], f["presets"].__setitem__, (slot, saved))
+                timer.daemon = True
+                timer.start()
+            else:
+                f["presets"][slot] = saved
             return
         if isinstance(payload.get("playlist"), dict):
             # {"playlist": {}} stops whatever playlist is running.

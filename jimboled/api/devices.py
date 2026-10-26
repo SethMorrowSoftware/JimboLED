@@ -106,12 +106,15 @@ def get_device(device_id):
 def update_device(device_id):
     ctx = get_ctx()
     data = body()
+    # Saving the address while another controller answers there means "that
+    # one is this light now" (its controller was replaced): learn the new MAC.
+    replaced = "host" in data and ctx.devices.has(device_id) and ctx.devices.wrong_device(device_id)
 
     def mutate(cfg):
         current = _device_cfg(cfg, device_id)
         merged = {**current, **{k: v for k, v in data.items() if k in ("name", "host", "enabled", "icon", "color", "notes", "poll_interval_s")}}
         cleaned = normalise_device(merged, existing_id=device_id)
-        if cleaned["host"] != current.get("host"):
+        if cleaned["host"] != current.get("host") or replaced:
             # A new address may be a different controller: learn its MAC afresh.
             cleaned["mac"] = ""
         current.update(cleaned)
@@ -120,6 +123,8 @@ def update_device(device_id):
                 tile["title"] = cleaned["name"]
 
     ctx.store.update(mutate, backup_reason="edit-device")
+    if replaced:
+        ctx.devices.refresh(device_id)  # usable straight away, not after the next poll
     return ok({"device": ctx.devices.summary(device_id)})
 
 

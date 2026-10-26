@@ -165,3 +165,34 @@ def test_tokens_cannot_copy_presets_onto_controllers(app, client, fake_wled):
     bare = app.test_client()
     r = bare.post(f"/api/devices/{did}/presets/1/copy", json={"target": "all"}, headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 403
+
+
+def test_a_replaced_controller_is_taken_on_by_saving_the_light(app, client, fake_wled):
+    srv = fake_wled("Porch", 30, "aabbccdd0f10")
+    did = client.post("/api/devices", json={"host": srv.host}).json["device"]["id"]
+    ctx = app.extensions["jimboled"]
+    srv.fake["info"]["mac"] = "aabbccdd0f99"  # a new board at the same address
+    ctx.devices.refresh(did)
+    summary = client.get("/api/devices").json["devices"][0]
+    assert summary["wrong_device"] and "save" in summary["last_error"]
+    # Changing only the name keeps refusing it (no address sent) …
+    client.put(f"/api/devices/{did}", json={"name": "Porch light"})
+    assert ctx.devices.wrong_device(did)
+    # … saving the light (the edit dialog always sends the address) takes it on.
+    r = client.put(f"/api/devices/{did}", json={"name": "Porch light", "host": srv.host})
+    assert r.status_code == 200 and r.json["device"]["online"] and not r.json["device"]["wrong_device"]
+    assert ctx.store.get()["devices"][0]["mac"] == "aabbccdd0f99"
+    assert client.post(f"/api/devices/{did}/state", json={"bri": 12}).status_code == 200
+    assert srv.fake["state"]["bri"] == 12
+
+
+def test_overwriting_a_preset_under_its_own_name_waits_for_the_new_content(two):
+    m, a, _, _ = two
+    m.set_state("a", {"on": True, "bri": 50})
+    m.save_preset("a", 6, "Movie")
+    assert a.fake["presets"]["6"]["bri"] == 50
+    a.fake["save_delay"] = 0.6  # the controller writes presets.json a little later
+    m.set_state("a", {"bri": 222})
+    presets = m.save_preset("a", 6, "Movie")
+    assert m._get("a").presets["6"]["bri"] == 222
+    assert any(p["id"] == 6 for p in presets)

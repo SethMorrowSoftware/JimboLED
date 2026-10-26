@@ -146,14 +146,19 @@
     const offBtn = el(`<button class="btn">${icon('moon')}<span>Off</span></button>`);
     onBtn.onclick = () => send({ on: true });
     offBtn.onclick = () => send({ on: false });
-    // One drag of the slider is one undo step: it starts with the first
-    // move and ends when the slider is let go.
-    let briGesture = null;
+    // One drag of the slider is one undo step, and so is a burst of arrow-key
+    // presses: the step ends a moment after the last change, when the next
+    // drag starts, or when anything else is changed.  (A drag let go where it
+    // started fires no "change" at all.)
+    let briGesture = null, briIdle = null;
+    const endBriGesture = () => { clearTimeout(briIdle); briIdle = null; briGesture = null; };
     const sendBri = UI.throttle((v, g) => send({ bri: v, on: true }, g, true), 450);
     const bri = UI.slider({ label: 'Brightness', min: 1, max: 255, value: 128, format: (v) => Math.round(v / 2.55) + '%',
       onInput: (v) => { if (!briGesture) briGesture = newGesture(); sendBri(v, briGesture); },
       onChange: (v) => send({ bri: v, on: true }, briGesture) });
-    bri.input.addEventListener('change', () => { briGesture = null; });  // runs after onChange
+    bri.input.addEventListener('change', () => { clearTimeout(briIdle); briIdle = setTimeout(endBriGesture, 1500); });  // after onChange
+    bri.input.addEventListener('pointerdown', endBriGesture);
+    bri.input.addEventListener('keydown', () => { if (!briIdle) endBriGesture(); });
     const body = h('div', { class: 'stack lights-panel' }, targetBar, status,
       h('div', { class: 'row wrap' }, h('div', { class: 'btn-group' }, onBtn, offBtn), h('div', { class: 'grow', style: { minWidth: '200px' } }, bri)),
       result, tabsEl, content);
@@ -175,16 +180,19 @@
     // drag or one colour-picker session; only its first request asks the
     // server to remember the lights, and Undo puts them back to before it.
     let undo = null, gestures = 0, latest = null;
-    const newGesture = () => ({ n: ++gestures, started: false, undo: null });
+    const newGesture = () => ({ n: ++gestures, started: false });
     async function send(intent, gesture, quiet) {
       const g = gesture || newGesture();
       const first = !g.started;
       g.started = true;
-      if (first) latest = g;  // the most recently *started* step
+      if (first) {
+        latest = g;  // the most recently *started* step
+        if (g !== briGesture) endBriGesture();  // anything else ends a brightness step
+      }
       const r = await apply(targetValue(key), withOpts(intent), { quiet: true, status: showResult, undo: first });
-      if (r && r.undo && first) g.undo = r.undo;
-      // Replies can come back out of order: only the newest step's undo counts.
-      if (latest === g && g.undo) undo = g.undo;
+      // Replies can come back out of order: only the newest step's undo counts,
+      // and only from the reply that carries it (a used one never comes back).
+      if (r && r.undo && first && latest === g) undo = r.undo;
       if (r) drawUndo();
       if (r && !quiet) refreshState();
       return r;

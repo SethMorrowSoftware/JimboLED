@@ -510,6 +510,9 @@
     const host = h('input', { class: 'input mono', value: d.host, placeholder: '192.168.1.50 or wled-abc123.local' });
     let iconName = d.icon || 'bulb', color = d.color || '';
     const body = h('div', { class: 'stack' }, UI.field('Name', name), UI.field('Address', host, 'IP address or hostname of the controller'), h('h4', { text: 'Icon' }), UI.iconPicker(iconName, (n) => { iconName = n; }), h('h4', { text: 'Colour' }), UI.colorPicker(color, (c) => { color = c; }));
+    if (d.wrong_device) {
+      body.prepend(h('div', { class: 'alert warn', text: 'A different WLED controller answers at this address. If you replaced this light\'s controller, Save makes the new one this light (its scenes, groups and schedules stay). If the light just moved, enter its new address instead.' }));
+    }
     const save = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
     const m = UI.modal({ title: 'Edit controller', icon: 'edit', body, footer: [save] });
     save.onclick = () => UI.busy(save, (async () => { await api.put(`/api/devices/${d.id}`, { name: name.value.trim(), host: host.value.trim(), icon: iconName, color }); UI.toast('Saved', 'success'); m.close(); onSaved && onSaved(); if (window.App) App.refresh(); })().catch(UI.notifyError));
