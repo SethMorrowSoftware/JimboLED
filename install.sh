@@ -169,8 +169,10 @@ imports_ok() { ( cd / && "$VENV_DIR/bin/python" -I -c "import flask, waitress, r
 if reqs_satisfied 2>/dev/null; then
   ok "packages already installed"
 else
-  say "  installing Python packages ${DIM}(needs the internet; a few minutes on a Pi Zero)${RESET}"
-  if ! "$VENV_DIR/bin/python" -m pip install -q --prefer-binary --timeout 30 --retries 3 -r "$APP_DIR/requirements.txt"; then
+  # Shown even with --quiet: without it, pip's retry warnings on a bad
+  # connection look like the update has hung.
+  printf '  installing Python packages (needs the internet; a few minutes on a Pi Zero)…\n'
+  if ! "$VENV_DIR/bin/python" -m pip install -q --prefer-binary --timeout 10 --retries 1 -r "$APP_DIR/requirements.txt"; then
     if imports_ok; then
       warn "Could not download newer Python packages (is the internet down, or DNS?)."
       warn "Keeping the ones already installed – JimboLED works with them. Run the update again later."
