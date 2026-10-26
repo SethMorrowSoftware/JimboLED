@@ -36,6 +36,7 @@
       // Rebuild the buttons only when what they show changed: replacing them
       // on every 2 s poll swallowed taps that landed mid-rebuild.
       const sig = JSON.stringify([mainColors(d).slice(0, 3), d.online, d.effect_name, d.palette_name, d.last_error,
+        d.info && d.info.live, d.info && d.info.live_source, d.state && d.state.lor,
         root.contains(presets) ? [(d._presets || []).slice(0, 6).map((p) => [p.id, p.name]), d.state && d.state.ps] : null]);
       if (sig === chipSig) return;
       chipSig = sig;

@@ -166,13 +166,24 @@
     }
     // Undo goes back one step.  A brightness drag sends several changes
     // (the in-between ones "quiet"), and those count as one step.
-    let undo = null, lastChange = 0, dragging = false, lastSig = '';
+    let undo = null, lastChange = 0, dragging = false, lastSig = '', gesture = 0, owner = null;
     async function send(intent, quiet) {
-      const r = await apply(targetValue(key), withOpts(intent), { quiet: true, status: showResult });
+      // Which request starts a new undo step is decided *before* waiting: the
+      // replies of a drag can come back in any order, and the step must go
+      // back to before the drag's first request.
       const sig = Object.keys(intent).sort().join();
-      const continuing = dragging && sig === lastSig && Date.now() - lastChange < 3000;
-      if (r && r.undo && !continuing) undo = r.undo;
-      if (r) { lastChange = Date.now(); dragging = !!quiet; lastSig = sig; drawUndo(); }
+      // Part of the same drag: more of its in-between ("quiet") updates, its
+      // final value, or the throttle's last in-between update arriving just
+      // *after* that final value.
+      const continuing = sig === lastSig && Date.now() - lastChange < 1500 && (dragging || quiet);
+      if (!continuing) { gesture += 1; owner = null; }
+      const mine = gesture, first = !continuing;
+      dragging = !!quiet || (continuing && dragging); lastSig = sig; lastChange = Date.now();
+      const r = await apply(targetValue(key), withOpts(intent), { quiet: true, status: showResult });
+      if (r && r.undo && mine === gesture) {
+        if (first) { undo = r.undo; owner = 'first'; } else if (!owner) { undo = r.undo; owner = 'later'; }
+      }
+      if (r) drawUndo();
       if (r && !quiet) refreshState();
       return r;
     }
@@ -504,7 +515,15 @@
     const devs = devices();
     if (devs.length) { const od = h('optgroup', { label: 'One light' }); for (const d of devs) od.append(h('option', { value: 'devices:' + d.id, text: d.name, selected: cur === 'devices:' + d.id || cur === 'device:' + d.id })); sel.append(od); }
     if (cur.startsWith('devices:') && cur.includes(',')) sel.append(h('option', { value: cur, text: targetLabel(cur), selected: true }));
-    sel.getValue = () => targetValue(sel.value);
+    // A light or group that has since been removed must not silently become
+    // "All lights" (the browser's fallback when nothing matches): say so, and
+    // make the person choose.
+    const wanted = cur.startsWith('device:') ? 'devices:' + cur.slice(7) : cur;
+    if (![...sel.options].some((o) => o.value === wanted)) {
+      sel.prepend(h('option', { value: '', selected: true, text: cur.startsWith('group:') ? 'Deleted group – choose which lights' : 'Removed light – choose which lights' }));
+      sel.value = '';
+    }
+    sel.getValue = () => { if (!sel.value) throw new Error('Choose which lights this should change'); return targetValue(sel.value); };
     return sel;
   }
 
@@ -527,11 +546,12 @@
     const trans = h('input', { class: 'input', type: 'number', min: 0, max: 60, step: 0.1, placeholder: 'default', value: intent.transition ?? '' });
     // Slow fades run on the controllers themselves (WLED's nightlight), so
     // they finish even if the Pi or the Wi-Fi goes away halfway.
-    const nl = intent.nightlight && intent.nightlight.on ? intent.nightlight : null;
-    const curFade = !nl ? '' : (nl.tbri || 0) > 0 ? 'in' : 'out';
+    const stored = intent.nightlight || null;
+    const nl = stored && stored.on ? stored : null;
+    const curFade = stored && stored.on === false ? 'stop' : !nl ? '' : (nl.tbri || 0) > 0 ? 'in' : 'out';
     const fade = h('select', { class: 'select' });
-    [['', 'No slow fade'], ['out', 'Fade out, then off'], ['in', 'Wake-up: fade in from dim']].forEach(([v, t]) => fade.append(h('option', { value: v, text: t, selected: curFade === v })));
-    const fadeMin = h('input', { class: 'input', type: 'number', min: 1, max: 255, value: nl ? (nl.dur || 30) : 30, placeholder: 'minutes' });
+    [['', 'No slow fade'], ['out', 'Fade out, then off'], ['in', 'Wake-up: fade in from dim'], ['stop', 'Stop a fade that is running']].forEach(([v, t]) => fade.append(h('option', { value: v, text: t, selected: curFade === v })));
+    const fadeMin = h('input', { class: 'input', type: 'number', min: 1, max: 255, value: nl ? (nl.dur || nl.minutes || 30) : 30, placeholder: 'minutes' });
     const fadeWrap = h('div', { class: 'row' }, fade, h('div', { style: { width: '90px', flex: 'none' } }, fadeMin), h('span', { class: 'small muted', text: 'min' }));
     root.append(UI.field('Power', power), UI.field('Brightness %', bri),
       UI.field('Colour', h('label', { class: 'check' }, useCol, col, h('span', { class: 'small muted', text: 'set a colour' }))),
@@ -542,23 +562,44 @@
       const list = (id, names) => { let dl = document.getElementById(id); if (!dl) { dl = h('datalist', { id }); document.body.append(dl); } dl.innerHTML = ''; names.forEach((n) => dl.append(h('option', { value: n }))); };
       list('jl-preset-names', cat.presets.map((p) => p.name)); list('jl-effect-names', cat.effects.map((e) => e.name)); list('jl-palette-names', cat.palettes.map((p) => p.name));
     }).catch(() => {});
+    // Only what the person changed is rewritten; everything else is kept
+    // exactly as saved – colours 2 and 3, a sunrise-mode fade, an exact
+    // brightness that the percentage box can only show rounded, …
+    const touched = new Set();
+    const watch = (key, ...els) => els.forEach((e) => ['input', 'change'].forEach((ev) => e.addEventListener(ev, () => touched.add(key))));
+    watch('on', power); watch('bri', bri); watch('color', useCol, col); watch('preset', preset); watch('effect', effect);
+    watch('palette', palette); watch('transition', trans); watch('fade', fade, fadeMin);
+    const isWake = (n) => !!(n && n.on && ((n.tbri ?? n.target) || 0) > 0);
     root.getValue = () => {
-      const out = {};
-      if (power.value) out.on = power.value === 't' ? 't' : power.value === 'on';
-      if (bri.value) out.brightness = Math.max(1, Math.min(100, +bri.value));
-      if (useCol.checked) out.color = col.value;
-      if (preset.value.trim()) out.preset = preset.value.trim();
-      if (effect.value.trim()) out.effect = effect.value.trim();
-      if (palette.value.trim()) out.palette = palette.value.trim();
-      if (trans.value !== '') out.transition = +trans.value;
-      // Keep what this simple form can't show (white, speed, …).
-      for (const k of ['white', 'cct', 'kelvin', 'speed', 'intensity', 'custom', 'sync', 'preset_slot', 'segments', 'best_effort']) if (intent[k] !== undefined) out[k] = intent[k];
+      const out = JSON.parse(JSON.stringify(intent));
+      if (touched.has('on')) { delete out.on; if (power.value) out.on = power.value === 't' ? 't' : power.value === 'on'; }
+      if (touched.has('bri')) { delete out.bri; delete out.brightness; if (bri.value) out.brightness = Math.max(1, Math.min(100, +bri.value)); }
+      if (touched.has('color')) {
+        delete out.color;
+        const rest = (intent.colors || []).slice(1);
+        if (useCol.checked) out.colors = [Color.hexToRgb(col.value), ...rest];
+        else if (rest.some(Boolean)) out.colors = [null, ...rest];
+        else delete out.colors;
+      }
+      for (const [key, input] of [['preset', preset], ['effect', effect], ['palette', palette]]) {
+        if (touched.has(key)) { delete out[key]; if (input.value.trim()) out[key] = input.value.trim(); }
+      }
+      if (touched.has('transition')) { delete out.transition; if (trans.value !== '') out.transition = +trans.value; }
       const minutes = Math.max(1, Math.min(255, +fadeMin.value || 30));
-      if (fade.value === 'out') out.nightlight = { on: true, minutes, mode: 'fade', target: 0 };
-      else if (fade.value === 'in') {
-        // Start dim and climb to the chosen brightness (or full).
-        out.nightlight = { on: true, minutes, mode: 'fade', target: out.brightness ? Math.round(out.brightness * 2.55) : 255 };
-        out.on = true; delete out.brightness; out.bri = 1;
+      const wakeTo = () => (bri.value ? Math.round(Math.max(1, Math.min(100, +bri.value)) * 2.55) : 255);
+      if (touched.has('fade')) {
+        delete out.nightlight;
+        if (fade.value === 'out') out.nightlight = { on: true, minutes, mode: 'fade', target: 0 };
+        else if (fade.value === 'stop') out.nightlight = { on: false };
+        else if (fade.value === 'in') {
+          // Start dim and climb to the chosen brightness (or full).
+          out.nightlight = { on: true, minutes, mode: 'fade', target: wakeTo() };
+          out.on = true; delete out.brightness; out.bri = 1;
+        }
+      } else if (touched.has('bri') && isWake(out.nightlight)) {
+        // The brightness box shows where a wake-up fade ends.
+        out.nightlight = { ...out.nightlight, tbri: wakeTo() };
+        delete out.nightlight.target; delete out.brightness; out.bri = 1;
       }
       if (!Object.keys(out).some((k) => k !== 'transition' && k !== 'best_effort')) throw new Error('Say what the lights should do: power, brightness, a colour, a preset or an effect');
       return out;

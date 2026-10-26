@@ -566,6 +566,11 @@ pre.code { margin: 0; padding: var(--sp-4) var(--sp-5); background: var(--surfac
   /* Small screens keep the labels that matter and drop the rest. */
   .hide-sm { display: none; }
   .topbar-status .pill:not(#pill-devices):not(#pill-estop) { display: none; }
+  /* The two pills that stay are short on phones ("3/3", "stopped") and must
+     stay readable: the title gives way first. */
+  .topbar-status #pill-devices, .topbar-status #pill-estop { flex-shrink: 0; }
+  .brand { min-width: 0; flex-shrink: 1; }
+  .brand-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .estop-btn { padding: var(--sp-3) var(--sp-4); }
 }
 

@@ -86,11 +86,11 @@
     const devs = App.state.devices.filter((d) => d.enabled !== false), online = devs.filter((d) => d.online).length;
     const onSwitches = (App.state.gpio.switches || []).filter((s) => s.on);
     const pieces = [];
-    if (devs.length) pieces.push(`<span class="pill clickable" id="pill-devices" title="Controllers"><span class="dot ${online === devs.length ? 'ok' : online ? 'warn' : 'bad'}"></span>${online}/${devs.length} online</span>`);
+    if (devs.length) pieces.push(`<span class="pill clickable" id="pill-devices" title="${online} of ${devs.length} controllers online"><span class="dot ${online === devs.length ? 'ok' : online ? 'warn' : 'bad'}"></span>${online}/${devs.length}<span class="hide-sm">&nbsp;online</span></span>`);
     if (onSwitches.length) pieces.push(`<span class="pill" title="Relays energised"><span class="dot ok"></span>${esc(onSwitches.map((s) => s.name).join(', '))} on</span>`);
     if (App.state.gpio.simulated && (App.state.gpio.switches || []).length) pieces.push(`<span class="pill" title="No GPIO hardware – switches are simulated"><span class="dot warn"></span>GPIO simulated</span>`);
     const latched = (window.EStop ? EStop.engagedZones() : []);
-    if (latched.length) pieces.unshift(`<span class="pill" id="pill-estop" title="Relays are locked out"><span class="dot bad"></span>${esc(latched.map((z) => z.name).join(', '))} stopped</span>`);
+    if (latched.length) pieces.unshift(`<span class="pill" id="pill-estop" title="${esc(latched.map((z) => z.name).join(', '))} stopped – relays are locked out"><span class="dot bad"></span><span class="hide-sm">${esc(latched.map((z) => z.name).join(', '))}&nbsp;</span>stopped</span>`);
     if (App.state.dashboard && App.state.dashboard.show_clock !== false) pieces.push(`<span class="pill nowrap" id="pill-clock">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`);
     st.innerHTML = pieces.join('');
     const pd = document.getElementById('pill-devices'); if (pd) pd.onclick = () => { location.hash = '#/settings/devices'; };
@@ -195,8 +195,10 @@
   }
   function destroyTiles() { for (const ent of App.tiles.values()) { try { ent.destroy && ent.destroy(); } catch (e) {} } App.tiles.clear(); }
   function tileSignature(t) {
-    const extra = t.type === 'group' ? JSON.stringify((App.state.groups || []).find((g) => g.id === t.ref) || null)
-      : (t.type === 'all' ? JSON.stringify((App.state.dashboard && App.state.dashboard.favorite_colors) || []) : '');
+    // Group and All-lights tiles show the favourite colours as swatches.
+    const favs = (App.state.dashboard && App.state.dashboard.favorite_colors) || [];
+    const extra = t.type === 'group' ? JSON.stringify([(App.state.groups || []).find((g) => g.id === t.ref) || null, favs])
+      : (t.type === 'all' ? JSON.stringify(favs) : '');
     return [t.type, t.ref, t.size, t.hidden, t.name, t.icon, t.color, JSON.stringify(t.opts || {}), extra].join('|');
   }
   function updateTiles() {

@@ -202,7 +202,11 @@
     return grid;
   }
   function field(label, control, hint) {
-    const f = h('label', { class: 'field' }, h('span', { text: label }), control);
+    // Only a single form control goes in a <label>: a label hands *any* click
+    // inside it to its first control, so a tap beside a row of day or member
+    // chips would quietly toggle the first one.
+    const single = control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement;
+    const f = h(single ? 'label' : 'div', { class: 'field' }, h('span', { text: label }), control);
     if (hint instanceof Node) { hint.classList.add('hint'); f.append(hint); }
     else if (hint) f.append(h('span', { class: 'hint', text: hint }));
     return f;
