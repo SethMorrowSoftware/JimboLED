@@ -80,7 +80,8 @@ def test_editing_the_address_forgets_the_mac(client, fake_wled):
     client.put(f"/api/devices/{did}", json={"name": "Renamed"})
     assert client.application.extensions["jimboled"].store.get()["devices"][0]["mac"] == "aabbccdd0f04"
     client.put(f"/api/devices/{did}", json={"host": other.host})
-    assert client.application.extensions["jimboled"].store.get()["devices"][0]["mac"] == ""
+    # Learned afresh from the controller at the new address.
+    assert client.application.extensions["jimboled"].store.get()["devices"][0]["mac"] == "aabbccdd0f05"
 
 
 def test_two_controllers_that_swapped_addresses_are_both_followed(app, client, fake_wled):
@@ -217,3 +218,64 @@ def test_replace_never_takes_another_configured_lights_controller(app, client, f
     ctx.discovery._started_at = time.time() - 120
     moved = ctx.discovery.follow_moved([{"host": x.host, "mac": "aabbccdd0f11"}, {"host": y.host, "mac": "aabbccdd0f12"}])
     assert sorted(moved) == sorted([dx, dy])
+
+
+def test_a_light_not_learned_yet_never_adopts_another_lights_controller(app, client, fake_wled):
+    """'Garage' was added with "add anyway" (no MAC yet); after a power cut the
+    router gives its address to Porch's controller."""
+    ctx = app.extensions["jimboled"]
+    porch_board = fake_wled("Porch", 30, "aabbccdd0f20")
+    porch = client.post("/api/devices", json={"host": porch_board.host}).json["device"]["id"]
+    garage = client.post("/api/devices", json={"host": "127.0.0.1:9", "name": "Garage", "skip_probe": True}).json["device"]["id"]
+    hosts = {porch: "127.0.0.1:8", garage: porch_board.host}  # Porch's old address is dead now
+    ctx.store.update(lambda c: [d.update({"host": hosts[d["id"]]}) for d in c["devices"]])
+    for _ in range(2):
+        ctx.devices.refresh(garage)
+        ctx.devices.refresh(porch)
+    assert ctx.devices.wrong_device(garage) and "Porch" in ctx.devices.summary(garage)["last_error"]
+    assert next(d for d in ctx.store.get()["devices"] if d["id"] == garage)["mac"] == ""
+    porch_board.fake["state"]["bri"] = 66
+    assert client.post(f"/api/devices/{garage}/state", json={"bri": 3}).status_code != 200
+    assert porch_board.fake["state"]["bri"] == 66
+    # Porch is followed to the address that Garage still names.
+    ctx.discovery._started_at = time.time() - 120
+    assert ctx.discovery.follow_moved([{"host": porch_board.host, "mac": "aabbccdd0f20"}]) == [porch]
+
+
+def test_two_lights_cannot_be_given_the_same_address(client, fake_wled):
+    one, two_ = fake_wled("One", 30, "aabbccdd0f21"), fake_wled("Two", 30, "aabbccdd0f22")
+    a = client.post("/api/devices", json={"host": one.host}).json["device"]["id"]
+    client.post("/api/devices", json={"host": two_.host})
+    r = client.put(f"/api/devices/{a}", json={"host": two_.host})
+    assert r.status_code == 409 and "already added" in r.json["error"]
+
+
+def test_adding_a_moved_controller_again_updates_the_light(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    old = fake_wled("Porch", 30, "aabbccdd0f23")
+    did = client.post("/api/devices", json={"host": old.host}).json["device"]["id"]
+    # Still online: adding the same controller by another address is refused.
+    twin = fake_wled("Porch", 30, "aabbccdd0f23")
+    assert client.post("/api/devices", json={"host": twin.host}).status_code == 409
+    old.stop()
+    for _ in range(2):
+        ctx.devices.refresh(did)
+    r = client.post("/api/devices", json={"host": twin.host})
+    assert r.status_code == 200 and r.json["followed"] and r.json["device"]["id"] == did and r.json["device"]["online"]
+    assert [d["host"] for d in ctx.store.get()["devices"]] == [twin.host]
+
+
+def test_entering_a_new_address_after_the_warning_is_not_a_takeover(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    x, y = fake_wled("X", 30, "aabbccdd0f24"), fake_wled("Y", 30, "aabbccdd0f25")
+    dx = client.post("/api/devices", json={"host": x.host}).json["device"]["id"]
+    dy = client.post("/api/devices", json={"host": y.host}).json["device"]["id"]
+    # Y's controller now answers at X's address (and X's own is elsewhere).
+    x.fake["info"]["mac"] = "aabbccdd0f25"
+    ctx.devices.refresh(dx)
+    assert ctx.devices.wrong_device(dx)
+    elsewhere = fake_wled("X", 30, "aabbccdd0f24")
+    r = client.put(f"/api/devices/{dx}", json={"host": elsewhere.host, "replace": True})
+    assert r.status_code == 200 and "warning" not in r.json
+    assert {d["id"]: d["host"] for d in ctx.store.get()["devices"]} == {dx: elsewhere.host, dy: y.host}
+    assert r.json["device"]["online"] and not r.json["device"]["wrong_device"]

@@ -106,7 +106,7 @@
         flash.onclick = () => api.post('/api/discover/identify', { host: f.host }).then((r) => UI.toast(`${f.name || f.host}: ${r.message}`, 'info')).catch(UI.notifyError);
         item.append(flash);
         if (f.known) item.append(el(`<span class="badge ok">added</span>`));
-        else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, api.post('/api/devices', { host: f.host, name: f.name }).then(() => { UI.toast(`Added ${f.name || f.host}`, 'success'); f.known = true; draw(s); onDone && onDone(); if (window.App) App.refresh(); }).catch(UI.notifyError)); item.append(b); }
+        else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, api.post('/api/devices', { host: f.host, name: f.name }).then((r) => { UI.toast(r && r.followed ? r.message : `Added ${f.name || f.host}`, 'success'); f.known = true; draw(s); onDone && onDone(); if (window.App) App.refresh(); }).catch(UI.notifyError)); item.append(b); }
         list.append(item);
       }
       const fresh = all.filter((f) => !f.known && f.name);

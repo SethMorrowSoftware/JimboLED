@@ -514,13 +514,19 @@
     let iconName = d.icon || 'bulb', color = d.color || '';
     const body = h('div', { class: 'stack' }, UI.field('Name', name), UI.field('Address', host, 'IP address or hostname of the controller'), h('h4', { text: 'Icon' }), UI.iconPicker(iconName, (n) => { iconName = n; }), h('h4', { text: 'Colour' }), UI.colorPicker(color, (c) => { color = c; }));
     if (d.wrong_device) {
-      body.prepend(h('div', { class: 'alert warn', text: 'A different WLED controller answers at this address. If you replaced this light\'s controller, Save makes the new one this light (its scenes, groups and schedules stay). If the light just moved, enter its new address instead.' }));
+      const why = d.last_error ? d.last_error.charAt(0).toUpperCase() + d.last_error.slice(1) + '.' : 'A different WLED controller answers at this address.';
+      body.prepend(h('div', { class: 'alert warn', text: `${why} Saving without changing the address makes the controller there this light (its scenes, groups and schedules stay); if the light moved, enter its new address instead.` }));
     }
     const save = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
     const m = UI.modal({ title: 'Edit controller', icon: 'edit', body, footer: [save] });
     save.onclick = () => UI.busy(save, (async () => {
-      // "replace" only when the person saw the warning above.
-      const r = await api.put(`/api/devices/${d.id}`, { name: name.value.trim(), host: host.value.trim(), icon: iconName, color, ...(d.wrong_device ? { replace: true } : {}) });
+      // The address only when it was changed here: JimboLED may have followed
+      // the light to a new one while this dialog was open.  "replace" only
+      // when the person saw the warning above and kept the address.
+      const payload = { name: name.value.trim(), icon: iconName, color };
+      if (host.value.trim() !== d.host) payload.host = host.value.trim();
+      else if (d.wrong_device) payload.replace = true;
+      const r = await api.put(`/api/devices/${d.id}`, payload);
       if (r && r.warning) UI.toast(r.warning, 'warning', 9000); else UI.toast('Saved', 'success');
       m.close(); onSaved && onSaved(); if (window.App) App.refresh();
     })().catch(UI.notifyError));
@@ -541,7 +547,7 @@
     const body = h('div', { class: 'stack' }, UI.field('Controller address', host, 'Find it in your router\'s device list or in the WLED app. Or use "Find controllers" to search automatically.'), probe, UI.field('Name', name), h('label', { class: 'check' }, anyway, h('span', { text: 'Add even if it cannot be reached right now' })));
     const save = el(`<button class="btn primary" data-busy="Adding…">Add controller</button>`);
     const m = UI.modal({ title: 'Add a WLED controller', icon: 'plus', body, footer: [save] });
-    save.onclick = () => UI.busy(save, (async () => { const r = await api.post('/api/devices', { host: host.value.trim(), name: name.value.trim(), skip_probe: anyway.checked }); UI.toast(`Added ${r.device.name}`, 'success'); m.close(); onAdded && onAdded(r.device); if (window.App) App.refresh(); })().catch(UI.notifyError));
+    save.onclick = () => UI.busy(save, (async () => { const r = await api.post('/api/devices', { host: host.value.trim(), name: name.value.trim(), skip_probe: anyway.checked }); UI.toast(r.followed ? r.message : `Added ${r.device.name}`, 'success'); m.close(); onAdded && onAdded(r.device); if (window.App) App.refresh(); })().catch(UI.notifyError));
     host.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
   }
 

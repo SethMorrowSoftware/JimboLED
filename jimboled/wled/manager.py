@@ -363,21 +363,34 @@ class DeviceManager:
         """Poll one device now (blocking).  Never raises for network errors."""
         rec = self._get(device_id)
         polled = False
+        with self._lock:
+            # Controllers that are other lights' (by their remembered MAC).
+            others = {normalise_mac(r.cfg.get("mac")): str(r.cfg.get("name") or r.cfg.get("host"))
+                      for r in self._devices.values() if r is not rec and normalise_mac(r.cfg.get("mac"))}
         with rec.lock:
             t0 = time.monotonic()
             try:
                 doc = rec.client.get_state_info()
                 rec.latency_ms = round((time.monotonic() - t0) * 1000, 1)
                 mine, theirs = normalise_mac(rec.cfg.get("mac")), normalise_mac(_as_doc(doc["info"]).get("mac"))
+                owner = others.get(theirs) if theirs and not mine else None
+                problem = ""
                 if mine and theirs and mine != theirs:
                     # Another controller got this one's old address.  Its
                     # state is not this light's, and commands must not reach it.
-                    rec.wrong_device = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
-                                        f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
-                                        "again; if you replaced its controller, edit the light and save to use the new one")
-                    rec.wrong_mac = theirs
+                    problem = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
+                               f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
+                               "again; if you replaced its controller, edit the light and save to use the new one")
+                elif owner:
+                    # Not learned yet, and what answers is another light's
+                    # controller (it moved here): never adopt it.
+                    problem = (f"the controller answering at {rec.cfg.get('host')} is your light “{owner}”, "
+                               "which has moved there; this light's own controller is elsewhere now – "
+                               "edit the light and enter its new address")
+                if problem:
+                    rec.wrong_device, rec.wrong_mac = problem, theirs
                     rec.failures = max(rec.failures, 1)
-                    self._mark_offline(rec, rec.wrong_device)
+                    self._mark_offline(rec, problem)
                 else:
                     rec.wrong_device = rec.wrong_mac = ""
                     self._absorb(rec, doc["state"], doc["info"])

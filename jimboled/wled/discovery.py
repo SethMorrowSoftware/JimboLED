@@ -424,6 +424,12 @@ class DiscoveryService:
                 lost[mac] = (d["id"], str(d["host"]))
         return lost
 
+    def _answered_by_another(self, device_id: Any) -> bool:
+        try:
+            return bool(self.devices.wrong_device(device_id))
+        except Exception:
+            return False
+
     def follow_moved(self, found: Optional[List[Dict[str, Any]]] = None) -> List[str]:
         """Re-point controllers that came back at a new IP address.
 
@@ -439,9 +445,11 @@ class DiscoveryService:
             return []
         # Addresses of lights that are themselves lost don't count as taken:
         # two controllers that swapped addresses are each found at the other's.
+        # The same goes for the address of a light that some *other*
+        # controller answers at (it is not that light's any more).
         lost_ids = {did for did, _ in lost.values()}
         known_hosts = {d.get("host") for d in (self.store.section("devices") or [])
-                       if isinstance(d, dict) and d.get("id") not in lost_ids}
+                       if isinstance(d, dict) and d.get("id") not in lost_ids and not self._answered_by_another(d.get("id"))}
         entries = list(found or [])
         if found is None:
             candidates = [n["host"] for n in self.listener.snapshot(max_age_s=300)

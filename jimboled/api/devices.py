@@ -76,20 +76,38 @@ def add_device():
     new["id"] = f"wled-{mac_suffix}" if len(mac_suffix) == 6 else new_id("wled")
     new["mac"] = normalise_mac(mac) or new.get("mac", "")
 
+    followed: Dict[str, Any] = {}
+
     def mutate(cfg):
         for d in cfg["devices"]:
             if d.get("host") == new["host"]:
                 raise APIError(f"{new['host']} is already added as '{d.get('name')}'", 409)
+        same = next((d for d in cfg["devices"] if isinstance(d, dict) and new["mac"]
+                     and normalise_mac(d.get("mac")) == new["mac"]), None)
+        if same is not None:
+            # The same controller (same MAC) as a light already added.
+            if ctx.devices.has(same["id"]) and ctx.devices.summary(same["id"]).get("online"):
+                raise APIError(f"that controller is already added as '{same.get('name')}' (at {same.get('host')})", 409)
+            # It moved: point that light at the new address, keeping its
+            # groups, scenes and schedules, rather than adding it twice.
+            same["host"] = new["host"]
+            followed.update(id=same["id"], name=same.get("name"))
+            return
+        for d in cfg["devices"]:
             if d.get("id") == new["id"]:
                 new["id"] = new_id("wled")
         cfg["devices"].append(new)
         ensure_tile(cfg, "device", new["id"], new["name"])
 
     ctx.store.update(mutate, backup_reason="add-device")
+    did = followed.get("id") or new["id"]
     try:
-        ctx.devices.refresh(new["id"])
+        ctx.devices.refresh(did)
     except DeviceError:
         pass
+    if followed:
+        return ok({"device": ctx.devices.summary(did), "followed": True,
+                   "message": f"That is “{followed['name']}”, which had moved: its address is updated"})
     return ok({"device": ctx.devices.summary(new["id"])}, 201)
 
 
@@ -120,24 +138,30 @@ def update_device(device_id):
         current = _device_cfg(cfg, device_id)
         merged = {**current, **{k: v for k, v in data.items() if k in ("name", "host", "enabled", "icon", "color", "notes", "poll_interval_s")}}
         cleaned = normalise_device(merged, existing_id=device_id)
-        takeover = replace
+        moved = cleaned["host"] != current.get("host")
+        if moved:
+            other = next((d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id
+                          and d.get("host") == cleaned["host"]), None)
+            if other:
+                raise APIError(f"{cleaned['host']} is already added as '{other.get('name')}'", 409)
+        takeover = replace and not moved  # a new address is simply learned afresh
         owner = next((d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id
                       and theirs and normalise_mac(d.get("mac")) == theirs), None)
         if takeover and owner:
             takeover = False
             outcome["warning"] = (f"The controller at this address is “{owner.get('name')}”, so this light was "
                                   "not switched to it. Both lights are found again once they answer at their new addresses.")
-        if cleaned["host"] != current.get("host") or takeover:
+        if moved or takeover:
             # A new address may be a different controller: learn its MAC afresh.
             cleaned["mac"] = ""
-        outcome["replaced"] = takeover and cleaned["host"] == current.get("host")
+        outcome["replaced"], outcome["moved"] = takeover, moved
         current.update(cleaned)
         for tile in cfg["dashboard"].get("tiles", []):
             if tile.get("type") == "device" and tile.get("ref") == device_id and not tile.get("name"):
                 tile["title"] = cleaned["name"]
 
     ctx.store.update(mutate, backup_reason="edit-device")
-    if outcome["replaced"]:
+    if outcome["replaced"] or outcome.get("moved"):
         ctx.devices.refresh(device_id)  # usable straight away, not after the next poll
     out: Dict[str, Any] = {"device": ctx.devices.summary(device_id)}
     if outcome["warning"]:

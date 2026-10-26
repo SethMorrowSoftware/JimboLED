@@ -152,7 +152,9 @@
     // started fires no "change" at all.)
     let briGesture = null, briIdle = null;
     const endBriGesture = () => { clearTimeout(briIdle); briIdle = null; briGesture = null; };
-    const sendBri = UI.throttle((v, g) => send({ bri: v, on: true }, g, true), 450);
+    // A throttled send still queued when its step has ended (by Undo, say)
+    // is dropped: it would put the dragged brightness back.
+    const sendBri = UI.throttle((v, g) => { if (g === briGesture) send({ bri: v, on: true }, g, true); }, 450);
     const bri = UI.slider({ label: 'Brightness', min: 1, max: 255, value: 128, format: (v) => Math.round(v / 2.55) + '%',
       onInput: (v) => { if (!briGesture) briGesture = newGesture(); sendBri(v, briGesture); },
       onChange: (v) => send({ bri: v, on: true }, briGesture) });
