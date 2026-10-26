@@ -48,7 +48,7 @@ def app(data_dir):
     ctx.scheduler.stop()
     ctx.gpio.stop()
     ctx.devices.stop()
-    ctx.discovery.listener.stop()
+    ctx.discovery.stop()
 
 
 @pytest.fixture

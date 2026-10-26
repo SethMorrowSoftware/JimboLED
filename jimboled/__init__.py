@@ -183,16 +183,39 @@ def get_ctx() -> AppContext:
 
 
 # ---------------------------------------------------------------- security
-# What an API token may NOT do: it is meant for automations, so it cannot
-# mint more tokens, change the password or security settings, or swap the
-# whole configuration out from under the owner.
-TOKEN_DENIED = ("/api/tokens", "/api/settings", "/api/backup", "/api/backups", "/api/restore",
-                "/api/login", "/api/logout", "/api/system/update", "/api/system/reboot",
-                "/api/system/restart")
+# API tokens are for automations, so they may *operate* things – lights,
+# scenes, timers, switches, the emergency stop's engage button – but not change
+# how the system is set up: no settings, switches, stops, schedules or tokens,
+# no resetting an emergency stop, no holding a hold-to-run switch, and no
+# reading backups (they contain the password hash).
+TOKEN_DENIED_READS = ("/api/tokens", "/api/settings", "/api/backup", "/api/backups")
+TOKEN_ALLOWED_WRITES = tuple(re.compile(p) for p in (
+    r"^/api/lights/(apply|capture)$",
+    r"^/api/lights/undo/[^/]+$",
+    r"^/api/devices/[^/]+/identify$",
+    r"^/api/devices/[^/]+/(state|refresh|copy)$",
+    r"^/api/devices/[^/]+/presets/\d+/copy$",
+    r"^/api/scenes/[^/]+/run$",
+    r"^/api/schedules/[^/]+/run$",
+    r"^/api/timers$",
+    r"^/api/gpio/switches/[^/]+/action$",
+    r"^/api/gpio/all-off$",
+    r"^/api/system/shutdown-all$",
+    r"^/api/estop/engage$",
+))
+# Hold-to-run needs a person on the button; a script is not one.
+TOKEN_SWITCH_ACTIONS = ("on", "off", "toggle", "pulse")
 
 
-def _token_denied(path: str) -> bool:
-    return any(path == p or path.startswith(p + "/") for p in TOKEN_DENIED)
+def _token_allowed(method: str, path: str) -> bool:
+    if method in ("GET", "HEAD", "OPTIONS"):
+        return not any(path == p or path.startswith(p + "/") for p in TOKEN_DENIED_READS)
+    if method != "POST" or not any(rx.match(path) for rx in TOKEN_ALLOWED_WRITES):
+        return False
+    if path.startswith("/api/gpio/switches/"):
+        data = request.get_json(silent=True)
+        return isinstance(data, dict) and str(data.get("action") or "").lower() in TOKEN_SWITCH_ACTIONS
+    return True
 
 
 def match_token(server_cfg: Dict[str, Any], token: str) -> Optional[Dict[str, Any]]:
@@ -241,8 +264,9 @@ def _install_security(app: Flask, ctx: AppContext) -> None:
             rec = match_token(server_cfg, auth_header[7:].strip())
             if rec is None:
                 return jsonify({"error": "invalid API token"}), 401
-            if _token_denied(path):
-                return jsonify({"error": "API tokens cannot do this; use the dashboard"}), 403
+            if not _token_allowed(request.method, path):
+                return jsonify({"error": "API tokens can operate lights, scenes, timers and switches, but not "
+                                         "change settings or reset emergency stops; use the dashboard for that"}), 403
             ctx.token_last_used[rec["id"]] = time.time()
             g.authed = True
             g.token = rec["id"]

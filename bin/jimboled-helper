@@ -171,13 +171,16 @@ case "$cmd" in
     if ! printf '%s' "$tz" | grep -Eq '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+){0,2}$'; then
       echo "not a timezone name" >&2; exit 2
     fi
-    if [ ! -f "/usr/share/zoneinfo/$tz" ]; then
+    zf="/usr/share/zoneinfo/$tz"
+    # A real zone file, not one of the symlinks tzdata ships alongside them
+    # ("localtime" points back at /etc/localtime and would loop the clock).
+    if [ -L "$zf" ] || [ ! -f "$zf" ] || [ "$(head -c 4 "$zf" 2>/dev/null)" != "TZif" ]; then
       echo "unknown timezone '$tz'" >&2; exit 2
     fi
-    if command -v timedatectl >/dev/null 2>&1 && timedatectl set-timezone "$tz" 2>/dev/null; then
-      :
+    if command -v timedatectl >/dev/null 2>&1; then
+      timedatectl set-timezone "$tz"
     else
-      ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime
+      ln -sf "$zf" /etc/localtime
       printf '%s\n' "$tz" > /etc/timezone
     fi
     echo "timezone set to $tz"

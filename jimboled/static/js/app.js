@@ -2,6 +2,10 @@
 (function () {
   const { h, el, esc } = UI;
   const POLL_MS = 2000;
+  // A scene may wait up to 30 s in total (its delay budget) plus the time its
+  // lights and relays take to answer.
+  const SCENE_TIMEOUT_MS = 75000;
+  window.SCENE_TIMEOUT_MS = SCENE_TIMEOUT_MS;
   const App = {
     state: { devices: [], gpio: { switches: [] }, dashboard: null, groups: [], rev: -1, cfgRev: -1, presets: {}, presetsMeta: {} },
     editMode: false,
@@ -20,7 +24,13 @@
     if (parts[0] === 'device' && parts[1]) return { view: 'dashboard', device: parts[1], tab: parts[2], q };
     return { view: 'dashboard', q };
   }
-  window.addEventListener('hashchange', () => { App.route = parseHash(); render(); });
+  window.addEventListener('hashchange', () => {
+    App.route = parseHash();
+    // Appearance previews live on the page until saved; leaving the page
+    // without saving puts the saved look back.
+    if (App.state.dashboard && !(App.route.view === 'settings' && App.route.section === 'appearance')) applyTheme(App.state.dashboard);
+    render();
+  });
 
   // ------------------------------------------------------------ data
   let polling = null, inflight = false, failures = 0;
@@ -73,7 +83,7 @@
   let estopBtn = null;
   function renderTopbar() {
     const st = document.getElementById('topbar-status');
-    const devs = App.state.devices, online = devs.filter((d) => d.online).length;
+    const devs = App.state.devices.filter((d) => d.enabled !== false), online = devs.filter((d) => d.online).length;
     const onSwitches = (App.state.gpio.switches || []).filter((s) => s.on);
     const pieces = [];
     if (devs.length) pieces.push(`<span class="pill clickable" id="pill-devices" title="Controllers"><span class="dot ${online === devs.length ? 'ok' : online ? 'warn' : 'bad'}"></span>${online}/${devs.length} online</span>`);
@@ -93,7 +103,14 @@
       estopBtn = null;
       if (App.route.view === 'dashboard') {
         const panic = el(`<button class="btn danger sm" title="Turn every relay and every light off (they can be switched straight back on)">${icon('power')}<span class="hide-sm">All off</span></button>`);
-        panic.onclick = async () => { try { await api.post('/api/system/shutdown-all'); UI.toast('Everything switched off', 'success'); refresh(); } catch (e) { UI.notifyError(e); } };
+        panic.onclick = async () => {
+          try {
+            const r = await api.post('/api/system/shutdown-all');
+            // Only claim "everything" when every light actually answered.
+            UI.toast(r.message || 'Everything switched off', r.ok === false ? 'error' : 'success', r.ok === false ? 9000 : 3500);
+            refresh();
+          } catch (e) { UI.notifyError(e); }
+        };
         const edit = el(`<button class="btn sm ${App.editMode ? 'primary' : ''}" title="Rearrange, resize and hide tiles">${icon(App.editMode ? 'check' : 'edit')}<span class="hide-sm">${App.editMode ? 'Done' : 'Edit layout'}</span></button>`);
         edit.onclick = () => setEditMode(!App.editMode);
         const settings = el(`<a class="btn icon sm ghost" href="#/settings" title="Settings">${icon('settings')}</a>`);
@@ -269,7 +286,7 @@
       const shell = tileShell(t, { icon: t.icon || sc.icon || 'sparkles', name: t.name || sc.name, sub: `${sc.actions.length} action${sc.actions.length === 1 ? '' : 's'}` });
       if (!t.color && sc.color) shell.node.style.setProperty('--tile-color', sc.color);
       const btn = el(`<button class="hold-btn">${icon('play')}<span class="label">Run scene</span><span class="progress"></span></button>`);
-      btn.onclick = async () => { btn.classList.add('active'); try { const r = await api.post(`/api/scenes/${sc.id}/run`); UI.toast(r.failed.length ? 'Scene ran with problems: ' + r.failed.map((f) => f.error).join('; ') : `${sc.name} applied`, r.failed.length ? 'error' : 'success'); refresh(); } catch (e) { UI.notifyError(e); } finally { setTimeout(() => btn.classList.remove('active'), 400); } };
+      btn.onclick = async () => { if (btn.disabled) return; btn.classList.add('active'); btn.disabled = true; try { const r = await api.post(`/api/scenes/${sc.id}/run`, {}, { timeout: SCENE_TIMEOUT_MS }); UI.toast(r.failed.length ? 'Scene ran with problems: ' + r.failed.map((f) => f.error).join('; ') : `${sc.name} applied`, r.failed.length ? 'error' : 'success'); refresh(); } catch (e) { UI.notifyError(e); } finally { btn.disabled = false; setTimeout(() => btn.classList.remove('active'), 400); } };
       shell.node.append(btn);
       return { el: shell.node, update: () => {} };
     }
@@ -350,6 +367,15 @@
   }
   // drag & drop with pointer events (touch friendly)
   let drag = null;
+  // Scroll while a tile is held near the top or bottom edge, so it can be
+  // carried to a place that is off screen.
+  let scrollTimer = null, scrollSpeed = 0;
+  function autoScroll(y) {
+    const edge = 70;
+    scrollSpeed = y < edge ? -Math.ceil((edge - y) / 6) : y > window.innerHeight - edge ? Math.ceil((y - (window.innerHeight - edge)) / 6) : 0;
+    if (scrollSpeed && !scrollTimer) scrollTimer = setInterval(() => { if (!scrollSpeed) return stopScroll(); window.scrollBy(0, scrollSpeed); }, 16);
+  }
+  function stopScroll() { clearInterval(scrollTimer); scrollTimer = null; scrollSpeed = 0; }
   function attachDrag(node, handle) {
     handle.addEventListener('pointerdown', (e) => {
       if (!App.editMode) return;
@@ -358,18 +384,24 @@
       node.classList.add('dragging');
       handle.setPointerCapture(e.pointerId);
       const move = (ev) => {
+        autoScroll(ev.clientY);
         const under = document.elementFromPoint(ev.clientX, ev.clientY);
         const t = under && under.closest('.tile[data-tile]');
-        grid.querySelectorAll('.drop-before, .drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after'));
+        grid.querySelectorAll('.drop-before, .drop-after, .drop-above, .drop-below').forEach((x) => x.classList.remove('drop-before', 'drop-after', 'drop-above', 'drop-below'));
         if (!t || t === node) { drag.target = null; return; }
         const r = t.getBoundingClientRect();
-        drag.before = ev.clientX < r.left + r.width / 2;
-        drag.target = t; t.classList.add(drag.before ? 'drop-before' : 'drop-after');
+        // A tile that fills its row (one column on a phone, or an XL tile) is
+        // "above or below"; otherwise "left or right".
+        const fullRow = r.width > grid.clientWidth * 0.75;
+        drag.before = fullRow ? ev.clientY < r.top + r.height / 2 : ev.clientX < r.left + r.width / 2;
+        drag.target = t;
+        t.classList.add(fullRow ? (drag.before ? 'drop-above' : 'drop-below') : (drag.before ? 'drop-before' : 'drop-after'));
       };
       const up = async (ev) => {
         handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', cancel);
         node.classList.remove('dragging');
-        grid.querySelectorAll('.drop-before, .drop-after').forEach((x) => x.classList.remove('drop-before', 'drop-after'));
+        stopScroll();
+        grid.querySelectorAll('.drop-before, .drop-after, .drop-above, .drop-below').forEach((x) => x.classList.remove('drop-before', 'drop-after', 'drop-above', 'drop-below'));
         if (drag && drag.target && ev && ev.type === 'pointerup') {
           const ids = App.state.dashboard.tiles.map((t) => t.id);
           const from = ids.indexOf(drag.id); ids.splice(from, 1);

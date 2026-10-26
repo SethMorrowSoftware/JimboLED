@@ -122,7 +122,7 @@
         toggle.title = s.enabled ? 'Pause' : 'Resume';
         const more = el(`<button class="btn ghost icon sm" aria-label="More">${icon('more')}</button>`);
         more.onclick = () => UI.menu(more, [
-          { label: 'Run now', icon: 'play', onClick: () => api.post(`/api/schedules/${s.id}/run`).then((r) => { UI.toast(r.ok ? (r.message || 'Done') : r.error, r.ok ? 'success' : 'error'); draw(); if (window.App) App.refresh(); }).catch(UI.notifyError) },
+          { label: 'Run now', icon: 'play', onClick: () => api.post(`/api/schedules/${s.id}/run`, {}, { timeout: 75000 }).then((r) => { UI.toast(r.ok ? (r.message || 'Done') : r.error, r.ok ? 'success' : 'error'); draw(); if (window.App) App.refresh(); }).catch(UI.notifyError) },
           { label: 'Edit', icon: 'edit', onClick: () => scheduleDialog(s, ctx, draw) },
           { label: 'Duplicate', icon: 'layers', onClick: () => { const copy = JSON.parse(JSON.stringify(s)); delete copy.id; copy.name = (s.name || 'Schedule') + ' (copy)'; scheduleDialog(copy, ctx, draw, true); } },
           '-',
@@ -149,6 +149,9 @@
         if (zonesLoaded) return; zonesLoaded = true;
         try { const r = await api.get('/api/location?zones=1'); const cur = tz.value; tz.innerHTML = ''; for (const z of r.zones) tz.append(h('option', { value: z, text: z.replace(/_/g, ' '), selected: z === cur })); if (!r.zones.includes(cur)) tz.prepend(h('option', { value: cur, text: cur, selected: true })); } catch (e) { zonesLoaded = false; }
       };
+      const here = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
+      const useTz = el(`<button class="btn sm ghost" type="button">${icon('clock')} Use this device's timezone${here ? ' (' + esc(here) + ')' : ''}</button>`);
+      useTz.onclick = () => { if (!here) return; if (![...tz.options].some((o) => o.value === here)) tz.append(h('option', { value: here, text: here.replace(/_/g, ' ') })); tz.value = here; };
       const save = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
       save.onclick = () => UI.busy(save, (async () => {
         const payload = { lat: lat.value === '' ? null : +lat.value, lon: lon.value === '' ? null : +lon.value, label: label.value.trim() };
@@ -160,11 +163,14 @@
       const sunLine = loc.lat != null ? `Today: sunrise ${fmt(listing.sun.sunrise)}, sunset ${fmt(listing.sun.sunset)}.` : 'Set a location so schedules can follow sunrise and sunset.';
       const piNow = new Date(listing.now * 1000);
       const browserOffset = -new Date().getTimezoneOffset();
+      const clockNote = listing.clock_synced === false ? `<div class="alert warn">${icon('clock')} The Pi's clock is not synchronised with the internet, so it may be wrong (a Pi has no clock battery). Schedules run by this clock – check the time shown here, and the Pi's internet connection.</div>` : '';
       const tzNote = browserOffset !== listing.utc_offset_min ? `<div class="alert warn">${icon('clock')} The Pi's clock is on ${esc(listing.timezone)} time, which differs from this device. Schedules run on the Pi's time – pick your timezone below if it is wrong.</div>` : '';
       locCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Where & when' }), h('span', { class: 'hint', text: `Pi time ${piNow.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` })),
         el(`<p class="muted small">${esc(sunLine)}${listing.running ? '' : ' <b>The scheduler is not running.</b>'}</p>`),
+        clockNote ? el(clockNote) : '',
         tzNote ? el(tzNote) : '',
         h('div', { class: 'form-grid' }, UI.field('Latitude', lat), UI.field('Longitude', lon), UI.field('Place name (optional)', label), UI.field('Timezone', tz, 'Changing it needs the installed service.')),
+        here && here !== listing.timezone ? h('div', { class: 'row end' }, useTz) : '',
         h('div', { class: 'row wrap between' }, geo, save));
     }
     draw();

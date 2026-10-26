@@ -82,6 +82,15 @@ def _location(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return loc if isinstance(loc, dict) else {"lat": None, "lon": None, "label": ""}
 
 
+def _known_zones() -> set:
+    try:
+        import zoneinfo
+
+        return set(zoneinfo.available_timezones()) - {"localtime", "posixrules", "Factory"}
+    except Exception:  # pragma: no cover - no tzdata: let the helper decide
+        return {"UTC"}
+
+
 def current_timezone() -> str:
     """The Pi's IANA timezone name, best effort."""
     try:
@@ -98,6 +107,35 @@ def current_timezone() -> str:
     except OSError:
         pass
     return os.environ.get("TZ") or (time.tzname[0] if time.tzname else "UTC")
+
+
+_clock_cache: Dict[str, Any] = {"at": 0.0, "value": None}
+
+
+def clock_synced() -> Optional[bool]:
+    """Whether the system clock is NTP-synchronised (``None`` = can't tell).
+
+    A Pi has no battery-backed clock: after a power cut without internet it
+    carries on from the last time it saved, and every schedule runs at the
+    wrong time.  Cached for a minute.
+    """
+    import shutil
+    import subprocess
+
+    now = time.monotonic()
+    if now - _clock_cache["at"] < 60:
+        return _clock_cache["value"]
+    value: Optional[bool] = None
+    if shutil.which("timedatectl"):
+        try:
+            out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                                 capture_output=True, text=True, timeout=3)
+            if out.returncode == 0 and out.stdout.strip() in ("yes", "no"):
+                value = out.stdout.strip() == "yes"
+        except (OSError, subprocess.TimeoutExpired):
+            value = None
+    _clock_cache.update(at=now, value=value)
+    return value
 
 
 def _sun_today(loc: Dict[str, Any]) -> Dict[str, Optional[float]]:
@@ -127,6 +165,7 @@ def _listing() -> Dict[str, Any]:
         "timezone": current_timezone(),
         "sun": _sun_today(loc),
         "running": bool(ctx.scheduler.started),
+        "clock_synced": clock_synced(),
     }
 
 
@@ -244,7 +283,7 @@ def get_location():
         try:
             import zoneinfo
 
-            out["zones"] = sorted(z for z in zoneinfo.available_timezones() if "/" in z and not z.startswith(("Etc/", "SystemV/", "posix/", "right/")))
+            out["zones"] = sorted(z for z in _known_zones() if "/" in z and not z.startswith(("Etc/", "SystemV/", "posix/", "right/")))
         except Exception:  # pragma: no cover - very old Python / no tzdata
             out["zones"] = []
     return ok(out)
@@ -272,7 +311,7 @@ def set_location():
     tz = data.get("timezone")
     if tz and tz != current_timezone():
         tz = str(tz).strip()
-        if not TZ_RE.match(tz) or ".." in tz:
+        if not TZ_RE.match(tz) or ".." in tz or tz not in _known_zones():
             raise APIError("that is not a timezone name (e.g. Europe/London)")
         from .system import run_helper
 

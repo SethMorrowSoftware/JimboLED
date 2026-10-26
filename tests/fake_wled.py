@@ -112,7 +112,9 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
         if "ps" in payload:
             slot = str(int(payload["ps"]))
             preset = f["presets"].get(slot)
-            if preset:
+            # Like real WLED: asking for the preset it already considers
+            # current does nothing (it only forgets that on a real state change).
+            if preset and int(slot) != st.get("ps"):
                 st["ps"] = int(slot)
                 if "playlist" in preset:
                     st["pl"] = int(slot)
@@ -163,14 +165,17 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
                     elif k in existing or k in ("startY", "stopY", "i"):
                         existing[k] = v
                 existing["len"] = existing["stop"] - existing["start"]
-            if "ps" not in payload:
+            if "ps" not in payload and "pd" not in payload:
                 st["ps"] = -1
-        if any(k in payload for k in ("on", "bri", "seg", "nl")):
-            pass
+        if "pd" in payload:
+            # WLED's own app sends a preset's content plus "pd": mark it current.
+            st["ps"] = int(payload["pd"])
 
     def maybe_fail():
-        if app.config["FAKE"]["fail"]:
-            from flask import abort
+        from flask import abort, request
+
+        f = app.config["FAKE"]
+        if f["fail"] or request.path in f.setdefault("fail_paths", set()):
             abort(503)
 
     @app.get("/json")

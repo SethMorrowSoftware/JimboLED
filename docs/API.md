@@ -10,15 +10,94 @@ JimboLED from Home Assistant, Node-RED, cron jobs or a Stream Deck.
   header `X-Requested-With: JimboLED` (anti-CSRF). GETs need nothing.
 * If a dashboard password is set, log in first: `POST /api/login {"password": "…"}`
   and keep the session cookie.
+* **Or use an API token** (Settings → Integrations): send
+  `Authorization: Bearer jl_…`. A token replaces both the login and the
+  `X-Requested-With` header, and is for *operating* things: it may read
+  everything except `/api/tokens`, `/api/settings` and backups, and may POST to
+  `/api/lights/apply|capture|undo/…`, `/api/devices/<id>/state|refresh|copy|identify`,
+  `/api/devices/<id>/presets/<slot>/copy`, `/api/scenes/<id>/run`,
+  `/api/schedules/<id>/run`, `/api/timers`, `/api/gpio/all-off`,
+  `/api/system/shutdown-all`, `/api/estop/engage`, and
+  `/api/gpio/switches/<id>/action` with `on`/`off`/`toggle`/`pulse`. Everything
+  else – changing settings, switches, schedules or stops, resetting an
+  emergency stop, holding a hold-to-run switch – gets **403**. A wrong token
+  gets **401**.
 * Errors are `{"error": "message"}` with a 4xx/5xx status.
 * Requests must use an IP address, a plain host name, or a private-style name (`*.local`, `*.lan`, `*.home`, …) in the `Host` header; other names get **421** unless listed in `server.allowed_hosts`. This blocks DNS-rebinding attacks from the internet.
-* Hold-to-run switches must receive a heartbeat at least every second (the dashboard sends one every 0.4 s); the relay releases automatically otherwise.
+* Hold-to-run switches must receive a heartbeat at least every second (the dashboard sends one every 0.4 s); the relay releases automatically otherwise. They can't be pulsed, toggled or turned on by a scene, a schedule or a script – only held by a person (the 2 s *Test this pin* blip while setting up is the one exception).
 
 ```bash
 # turn a controller on at 60 %
 curl -s -X POST -H 'X-Requested-With: JimboLED' -H 'Content-Type: application/json' \
   http://jimboled.local/api/devices/wled-a1b2c3/state -d '{"on":true,"bri":153}'
 ```
+
+## Every light at once
+
+These endpoints take a **target** and a device-agnostic **intent**, and work out
+what each controller needs: effects, palettes and presets are matched *by name*
+(each controller numbers them differently), colours go to every segment, and
+white/CCT only to strips that have them.
+
+**Targets:** `"all"` (default, every enabled controller) · `"group:<id>"` ·
+`"device:<id>"` · `{"devices": ["wled-…", …]}`.
+
+**Intent fields** (all optional, at least one): `on` (true/false/`"toggle"`),
+`bri` 1–255 or `brightness` 1–100 %, `color` `"#rrggbb"`, `colors` (up to 3,
+`null` leaves a slot alone), `kelvin` 1000–12000 (white light the best way each
+strip can: white LEDs/CCT where present, a colour mix where not), `white`
+0–255, `cct` 0–255, `effect` (name, `"Solid"`), `palette` (name), `preset`
+(name), `preset_slot` 1–250, `speed`, `intensity` 0–255, `custom`
+`{c1,c2,c3,o1,o2,o3}`, `transition` seconds 0–60, `nightlight`
+`{"on":true,"minutes":30,"mode":"fade|instant|color|sunrise","target":0}`,
+`sync` (restart effects together), `segments` (`"all"`/`"main"`),
+`best_effort` (don't report features a light lacks). A colour, effect or preset
+also switches the light on unless `on` says otherwise.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/api/lights/apply` | `{"target":"all","intent":{"preset":"Movie"}}` or flat: `{"target":"group:grp-…","color":"#ff0000","brightness":60}`. Returns `ok`, `changed`, `total`, a plain-English `message` and per-light `results[]` (`status` ok/partial/skipped/offline/error, `notes`) |
+| GET | `/api/lights/catalog?target=…` (or `?devices=a,b`) | effects, palettes and presets by name with `count` (how many of the online lights have each), `caps` {white, cct}, `led_count`, `power_ma` |
+| POST | `/api/lights/capture` | `{"target":…}` → the exact current look as scene `actions[]` |
+| POST | `/api/lights/undo/<undo>` | every `/lights/apply` that changed something returns an `undo` key; this puts those lights back as they were (kept 10 minutes, last 20 changes) |
+| POST | `/api/devices/<id>/copy` | `{"target":…, "include_brightness":true}` – make other lights look like this one |
+| POST | `/api/devices/<id>/presets/<slot>/copy` | `{"target":…, "overwrite":true}` – store this preset on other controllers under the same name (same-name slot, else the same number if free, else the first free slot). Playlists can't be copied |
+| GET / POST | `/api/groups` | `{"name":"Bedroom","icon":"bed","color":"#…","devices":["wled-…"]}`; names are unique; each group gets a dashboard tile |
+| PUT / DELETE | `/api/groups/<id>` | |
+
+```bash
+# every light warm white at 40 %, fading over 2 s
+curl -s -X POST -H 'Authorization: Bearer jl_…' -H 'Content-Type: application/json' \
+  http://jimboled.local/api/lights/apply -d '{"target":"all","kelvin":2700,"brightness":40,"transition":2}'
+```
+
+## Schedules and timers
+
+A schedule is `{"name", "enabled", "when", "days", "random", "action", "delete_after"}`:
+
+* `when`: `{"type":"time","time":"07:00"}` · `{"type":"sun","event":"sunset","offset":15}` (minutes, −180…180) · `{"type":"once","at":<unix seconds>}`
+* `days`: weekday numbers, Monday = 0 (ignored for `once`)
+* `random`: 0–60 minutes of variation either side, fixed per day
+* `action`: `{"type":"lights","target":…,"intent":{…}}` · `{"type":"scene","ref":"scene-…"}` · `{"type":"switch","ref":"sw-…","action":"off|on|toggle|pulse"}` (hold-to-run switches: `off` only) · `{"type":"all_off"}`
+
+Runs that were due while the Pi was off are skipped after 3 minutes and shown as *missed*.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/schedules` | schedules with `next_run`, `last_run`, `last_ok`, `last_message`, `missed_at`, `problem`; plus `location`, `timezone`, `now`, today's `sun` |
+| POST | `/api/schedules` | create (max 100) |
+| PUT / PATCH / DELETE | `/api/schedules/<id>` | any edit re-arms from now |
+| POST | `/api/schedules/<id>/run` | run it now |
+| POST | `/api/timers` | `{"minutes":30,"action":{…},"name":"Sleep timer"}` – a one-off that removes itself (default action: everything off) |
+| GET / PUT | `/api/location` | `{"lat":51.5,"lon":-0.12,"label":"Home","timezone":"Europe/London"}`; `?zones=1` lists timezones. Setting the timezone needs the installed helper |
+
+## API tokens
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/tokens` | `[{id, name, prefix, created, last_used}]` |
+| POST | `/api/tokens` | `{"name":"Home Assistant"}` → `{"token":"jl_…"}`, shown **once**; only a SHA-256 is stored |
+| DELETE | `/api/tokens/<id>` | |
 
 ## State
 
@@ -41,11 +120,13 @@ curl -s -X POST -H 'X-Requested-With: JimboLED' -H 'Content-Type: application/js
 | POST | `/api/devices/<id>/refresh` | poll now |
 | POST | `/api/devices/<id>/catalog` | reload effects/palettes |
 | GET | `/api/devices/<id>/presets` | |
-| POST | `/api/devices/<id>/presets` | `{"name":"Movie","slot":5,"quick_label":"MV","include_brightness":true,"save_segment_bounds":true}` (slot optional = next free) |
+| POST | `/api/devices/<id>/presets` | `{"name":"Movie","slot":5,"quick_label":"MV","include_brightness":true,"save_segment_bounds":true}` (slot optional = next free) saves the current look. Add `"state":{…}` to save that instead, or `"rename":true` to rename the preset in `slot` while keeping what it does (playlists included) |
 | DELETE | `/api/devices/<id>/presets/<slot>` | |
 | POST | `/api/devices/<id>/reboot` | |
+| POST | `/api/devices/<id>/identify` | blink it white for 3 s, then put it back – to see which light is which |
+| POST | `/api/discover/identify` | `{"host":"192.168.1.40"}` – the same for a controller found but not added yet |
 | POST | `/api/discover` | `{"methods":["mdns","nodes","subnet"],"subnet":"192.168.1.0/24"}` (all optional) |
-| GET | `/api/discover` | progress + `found[]` + `passive[]` (controllers heard broadcasting) |
+| GET | `/api/discover` | progress + `found[]` + `passive[]` (controllers heard broadcasting). A controller that has been offline for a minute and turns up at a new address with the same MAC (after a router restart, say) is followed automatically |
 
 ## GPIO switches
 
@@ -108,12 +189,13 @@ it is deliberately **not** part of a backup.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET / PUT | `/api/dashboard` | `title`, `subtitle`, `theme` (`auto`/midnight/graphite/ocean/oled/daylight/paper), `accent`, `density` (comfortable/compact/roomy), `radius` (sharp/soft/round), `text_scale` (85–150 %), `show_offline`, `show_clock`, `show_estop`, `tiles[]`, `scenes[]` |
+| GET / PUT | `/api/dashboard` | `title`, `subtitle`, `theme` (`auto`/midnight/graphite/ocean/oled/daylight/paper), `accent`, `density` (comfortable/compact/roomy), `radius` (sharp/soft/round), `text_scale` (85–150 %), `show_offline`, `show_clock`, `show_estop`, `show_lights_button`, `favorite_colors[]` (up to 24 hex colours), `tiles[]`, `scenes[]`. GET also returns `groups[]` |
 | POST | `/api/dashboard/tiles` | add a `heading`, `note`, `clock` or `all` tile |
 | PUT / DELETE | `/api/dashboard/tiles/<id>` | `size` (s/m/l/xl), `hidden`, `name`, `icon`, `color`, `opts` |
 | POST | `/api/dashboard/order` | `{"ids":[…]}` |
-| GET / POST | `/api/scenes` | `{"name":"Goodnight","icon":"moon","actions":[{"type":"all","state":{"on":false}},{"type":"switch","ref":"sw-…","action":"off"},{"type":"delay","ms":500}]}` |
+| GET / POST | `/api/scenes` | `{"name":"Goodnight","icon":"moon","actions":[{"type":"lights","target":"all","intent":{"on":false}},{"type":"switch","ref":"sw-…","action":"off"},{"type":"delay","ms":500}]}`. Action types: `lights` (target + intent, as above), `device` (`ref` + exact WLED `state`), `all` (exact `state` for every controller), `switch`, `all_off`, `delay` (≤ 10 s) |
 | PUT / DELETE | `/api/scenes/<id>` | |
+| POST | `/api/scenes/test` | `{"actions":[…]}` – run actions without saving them (the editor's *Try it*) |
 | POST | `/api/scenes/<id>/run` | a scene runs on the request thread, so its `delay` actions share a 30 s budget; waits past that are skipped and reported, the actions after them still run |
 | GET / PUT | `/api/settings` | `wled.poll_interval_s`, `wled.request_timeout_s`, `gpio.hold_timeout_s`, `gpio.interlock_dead_time_ms`, `gpio.backend`, `server.port`, `server.allowed_hosts` (extra host names the dashboard answers to), `setup_complete` |
 | POST | `/api/settings/password` | `{"current":"…","password":"new or empty to remove"}` |
@@ -125,9 +207,9 @@ it is deliberately **not** part of a backup.
 | --- | --- | --- |
 | GET | `/api/system` | version, Pi model, addresses, uptime, temperature, memory, GPIO backend |
 | GET | `/api/system/logs?limit=200` | in-memory log tail |
-| GET | `/api/backup` | download `config.json` (secret key stripped) |
-| POST | `/api/restore` | upload a backup (multipart `file` or raw JSON body). Switches and the whole emergency-stop section must validate or the restore is refused with **400** – a backup must not be able to quietly remove a stop. Unusable tiles and scenes are dropped instead. |
+| GET | `/api/backup` | download `config.json` (secret key, password hash and API tokens stripped) |
+| POST | `/api/restore` | upload a backup (multipart `file` or raw JSON body). Switches and the whole emergency-stop section must validate or the restore is refused with **400** – a backup must not be able to quietly remove a stop. Unusable tiles, scenes, groups and schedules are dropped instead; restored schedules start fresh (nothing "missed" fires); the current password and API tokens are kept. |
 | GET | `/api/backups` · POST `/api/backups/<name>/restore` | automatic snapshots |
 | POST | `/api/system/restart`, `/reboot`, `/update/check`, `/update` | need the installed helper |
-| POST | `/api/system/shutdown-all` | *All off*: every relay off, every light off. Convenience, not a latch. |
+| POST | `/api/system/shutdown-all` | *All off*: every relay off, every light off (lights marked offline are tried too). Returns `ok`, `failed` and a `message` naming any light that was not reached. Convenience, not a latch. |
 | GET | `/healthz` | `{"ok":true,"version":"…"}` |

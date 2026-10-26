@@ -54,16 +54,24 @@
   /** The header button. One tap stops the master zone; long-press picks a zone. */
   function headerButton() {
     const btn = el(`<button class="estop-btn" type="button"></button>`);
-    let heldTimer = null, longPressed = false;
-    const openSheet = () => { longPressed = true; sheet(); };
-    btn.addEventListener('pointerdown', () => { heldTimer = setTimeout(openSheet, 550); });
+    // The click that ends a long-press must not also engage the stop, but
+    // only *that* click: a flag left set would swallow the next real tap on
+    // an emergency stop.  So remember when the sheet opened instead.
+    let heldTimer = null, sheetOpenedAt = 0;
+    const openSheet = () => {
+      clearTimeout(heldTimer); heldTimer = null;
+      if (Date.now() - sheetOpenedAt < 800) return;  // long-press and contextmenu both fire on touch
+      sheetOpenedAt = Date.now();
+      sheet();
+    };
+    btn.addEventListener('pointerdown', () => { clearTimeout(heldTimer); heldTimer = setTimeout(openSheet, 550); });
     const clear = () => { clearTimeout(heldTimer); heldTimer = null; };
     btn.addEventListener('pointerup', clear);
     btn.addEventListener('pointerleave', clear);
     btn.addEventListener('pointercancel', clear);
     btn.addEventListener('contextmenu', (e) => { e.preventDefault(); openSheet(); });
     btn.onclick = () => {
-      if (longPressed) { longPressed = false; return; }
+      if (Date.now() - sheetOpenedAt < 800) return;
       if (engagedZones().length) return sheet();
       if (zones().length > 1) return sheet();
       engage('all');

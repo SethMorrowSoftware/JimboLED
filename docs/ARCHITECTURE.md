@@ -15,6 +15,10 @@ waitress (8 threads) ──► Flask app (jimboled/)
                           ├── /                dashboard SPA (templates/index.html + static/)
                           ├── /api/state       aggregate snapshot polled by browsers every 2 s
                           ├── /api/devices     WLED CRUD, control, presets, discovery
+                          ├── /api/lights      every light / a group at once, copy look & presets
+                          ├── /api/groups      rooms of controllers
+                          ├── /api/schedules   schedules, timers, location, timezone
+                          ├── /api/tokens      bearer tokens for integrations
                           ├── /api/gpio        switch CRUD, press/heartbeat/release, all-off
                           ├── /api/estop       emergency-stop zones, inputs, engage/reset
                           ├── /api/dashboard   tiles, appearance, scenes
@@ -23,6 +27,8 @@ waitress (8 threads) ──► Flask app (jimboled/)
                           │
                           ├── DeviceManager   (wled/manager.py)  poller thread + 4 workers, per-device cache
                           │     └── WLEDClient (wled/client.py)   requests.Session, short timeouts, busy retry
+                          │     └── intents   (wled/intents.py)  device-agnostic "what to do" → per-device payload
+                          ├── Scheduler       (scheduler.py)     5 s tick, sun times (sun.py), schedules-state.json
                           ├── DiscoveryService (wled/discovery.py) avahi / built-in mDNS / UDP 65506 / sweep
                           ├── GPIOManager     (gpio/manager.py)  gpiozero OutputDevices + 100 ms watchdog
                           │     └── EStopController (gpio/estop.py) latch state + DigitalInputDevices
@@ -44,7 +50,7 @@ front end re-fetches the (larger) dashboard layout only when `cfg_rev` moves.
 | `/opt/jimboled/app` | application code, rsynced from the git clone by `install.sh` |
 | `/opt/jimboled/venv` | Python virtualenv (`--system-site-packages` so apt's gpiozero/lgpio are used) |
 | `/opt/jimboled/app/bin/jimboled-helper` | root-only helper reachable via a one-line sudoers rule |
-| `/var/lib/jimboled` | **user data**: `config.json`, `estop.json`, `backups/` – never touched by installs |
+| `/var/lib/jimboled` | **user data**: `config.json`, `estop.json`, `schedules-state.json`, `backups/` – never touched by installs |
 | `/etc/jimboled/install.env` | install metadata (clone path, owner, port, git revision) |
 | `/etc/jimboled/jimboled.env` | optional service overrides loaded by systemd |
 | `/etc/systemd/system/jimboled.service` | service unit |
@@ -69,6 +75,10 @@ Two more helper commands keep relays safe outside the Python process:
   every configured pin to its OFF level with `pinctrl`.
 * `bootpins` – writes `gpio=<pin>=op,<dl|dh>` lines into `config.txt` so the
   firmware holds relays off from power-on until the service starts.
+
+And one for schedules: `timezone <Area/City>` sets the system timezone with
+`timedatectl` (falling back to `/etc/localtime`), accepting only names that
+exist under `/usr/share/zoneinfo`.
 
 ## Emergency stop
 
@@ -130,6 +140,9 @@ lives in `gpio/estop.py`.
   active-low output is claimed *with* its safe level (no LOW blip).
 * Without GPIO hardware/libraries the app uses gpiozero's mock factory and the
   UI shows a clear "simulated" badge.
+* Hold-to-run switches only ever run while a person holds the button: they
+  refuse `on`, `toggle` and `pulse` from anywhere (scenes, schedules, API
+  tokens), so nothing can run a bed motor unattended.
 * A latched emergency stop outranks all of the above; see the section above.
 
 ## WLED integration notes
@@ -140,16 +153,57 @@ lives in `gpio/estop.py`.
   firmware build; presets are re-read when `info.fs.pmt` changes or after a
   reboot, and right after we save/delete one.
 * Writes go to `/json/state` with `v:true`; the returned state updates the
-  cache immediately. Requests to one device are serialised (WLED has a single
+  cache immediately. A preset is sent the way WLED's own app sends it – its
+  content plus `pd` – because a bare `ps` equal to the preset WLED still
+  considers current is ignored. `"on":"t"` becomes an explicit on/off, and a
+  `seg` object without an id is addressed to every segment. Commands that are
+  not idempotent are never retried on a 503, since WLED can apply a command and
+  still answer "busy". Names are cut to 32 UTF-8 bytes, the size of WLED's
+  buffers, and replies are decoded leniently so one bad character can't hide a
+  controller's presets. The catalogue (effects, palettes, presets, previews) is
+  downloaded outside the command lock and only remembered once it is complete. Requests to one device are serialised (WLED has a single
   JSON buffer) and HTTP 503 "busy" answers are retried briefly.
 * The effect metadata parser mirrors WLED's own UI rules so each effect shows
   exactly the sliders, checkboxes, colour slots and palette it uses.
 
+## Controlling many lights at once
+
+WLED numbers its effects, palettes and presets per firmware build and per
+device, so "effect 66" or "preset 3" means different things on different
+controllers, and a `"seg"` object without an id only reaches the *selected*
+segments. `wled/intents.py` therefore works with **intents** – "red", "the
+preset called Movie", "Rainbow at half speed", "2700 K white" – and plans one
+payload per controller from what the poller already knows about it: its
+segments (every segment is addressed by id), its light capabilities (`lc`:
+white channel, CCT), and its effect, palette and preset names. Anything a
+controller can't do is left out of *its* payload and reported as a note, so
+the rest still applies and the person is told plainly what didn't.
+`DeviceManager.apply_intent()` sends the payloads in parallel on the command
+pool. Copying a look reads one controller's state back into an intent; copying
+a preset rewrites its effect and palette numbers for each target by name and
+saves it with `psave`.
+
+## Schedules
+
+`scheduler.py` wakes every 5 s and fires each enabled schedule whose most
+recent due time has passed and has not fired yet. "Has fired" is recorded per
+schedule in `schedules-state.json` (atomic writes) *before* the action runs, so
+a crash mid-action can't make it run twice. A due time more than 3 minutes in
+the past – the Pi was off – is recorded as *missed* and skipped. Editing a
+schedule sets `updated_at`, which re-arms it from that moment. Sunrise and
+sunset come from the NOAA approximation in `sun.py` (no network needed);
+random variation is derived from a hash of the schedule id and the date, so it
+is stable across restarts. Actions go through the same code as scenes, so the
+GPIO safety rules and emergency stops apply unchanged, and a hold-to-run switch
+can only be scheduled *off*.
+
 ## Front-end layers
 
 No build step: the browser loads the files in `static/js/` in order and each
-attaches one global (`UI`, `api`, `GPIO`, `EStop`, `Device`, `Settings`,
-`Wizard`, `App`).
+attaches one global (`UI`, `api`, `GPIO`, `EStop`, `Device`, `Lights`,
+`Automation`, `Settings`, `Wizard`, `App`). `lights.js` holds the Lights panel,
+group tiles and the light-settings editor shared by scenes and schedules;
+`automation.js` holds the Groups, Schedules and Integrations settings pages.
 
 `static/css/app.css` is layered deliberately:
 
@@ -166,8 +220,9 @@ attaches one global (`UI`, `api`, `GPIO`, `EStop`, `Device`, `Settings`,
 
 ## Config file
 
-`config.json` is the single source of truth (devices, switches, dashboard
-layout, scenes, appearance, server settings). Writes go through
+`config.json` is the single source of truth (devices, groups, switches,
+schedules, location, dashboard layout, scenes, appearance, server settings and
+hashed API tokens). Writes go through
 `atomicio.write_json_atomic()`: serialise, temp file, fsync, rename, then
 fsync the *directory* – the rename lives there, so without it a power cut can
 still bring the old file back. The payload is built before anything on disk is

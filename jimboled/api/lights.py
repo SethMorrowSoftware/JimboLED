@@ -14,6 +14,7 @@ differently.
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any, Dict, List, Tuple
 
 from flask import Blueprint, request
@@ -111,8 +112,53 @@ def lights_apply():
     except I.IntentError as exc:
         raise APIError(str(exc))
     label, ids = resolve_target(ctx.store.get(), data.get("target"))
+    # Remember how the lights looked, so the change can be undone.
+    before = ctx.devices.capture(ids)
     out = summarise(ctx.devices.apply_intent(ids, intent))
     out.update({"label": label, "devices": ctx.devices.snapshot()})
+    if before and out["changed"]:
+        out["undo"] = _remember_undo(before)
+    return ok(out)
+
+
+# --------------------------------------------------------------------- undo
+UNDO_KEEP_S = 600
+UNDO_MAX = 20
+_undo: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+_undo_lock = threading.Lock()
+
+
+def _remember_undo(snapshots: List[Dict[str, Any]]) -> str:
+    import secrets
+    import time as _time
+
+    key = secrets.token_urlsafe(9)
+    now = _time.monotonic()
+    with _undo_lock:
+        for k in [k for k, (t, _) in _undo.items() if now - t > UNDO_KEEP_S]:
+            _undo.pop(k, None)
+        while len(_undo) >= UNDO_MAX:
+            _undo.pop(min(_undo, key=lambda k: _undo[k][0]), None)
+        _undo[key] = (now, snapshots)
+    return key
+
+
+@bp.post("/lights/undo/<key>")
+def lights_undo(key):
+    """Put the lights back as they were before one /lights/apply."""
+    ctx = get_ctx()
+    with _undo_lock:
+        entry = _undo.pop(key, None)
+    if entry is None:
+        raise APIError("that change can no longer be undone", 404)
+    plans = {s["id"]: s["state"] for s in entry[1] if ctx.devices.has(s["id"])}
+    results = ctx.devices.apply_plans(plans)
+    names = {s["id"]: s["name"] for s in entry[1]}
+    rows = [{"id": did, "name": names.get(did, did), "status": "ok" if res == "ok" else "error",
+             "message": "" if res == "ok" else res, "notes": []} for did, res in results.items()]
+    out = summarise(rows)
+    out["message"] = "Put back as it was." if out["ok"] else out["message"]
+    out["devices"] = ctx.devices.snapshot()
     return ok(out)
 
 

@@ -91,7 +91,9 @@ def test_device_manager_lifecycle(fake_wled, data_dir):
         assert r["state"]["bri"] == 99 and r["effect_name"] == "Rainbow"
         with pytest.raises(DeviceError):
             dm.set_state("ghost", {"on": True})
-        assert dm.set_state_all({"on": False}) == {"a": "ok"}
+        res = dm.set_state_all({"on": False})
+        # The offline controller is tried (briefly) and reported, not skipped.
+        assert res["a"] == "ok" and "not reachable" in res["ghost"]
         dm.save_preset("a", 7, "Seven")
         assert any(p["id"] == 7 for p in dm.presets("a"))
         assert dm.set_state("a", {"ps": 7})["preset_name"] == "Seven"

@@ -162,7 +162,9 @@
     if (opts.label == null) row.append(h('span', { class: 'val', text: opts.format ? opts.format(opts.value) : opts.value }));
     wrap.append(row);
     wrap.input = input;
-    wrap.setValue = (v) => { if (document.activeElement === input) return; input.value = v; setPct(input); const t = opts.format ? opts.format(+v) : v; val.textContent = t; const vv = row.querySelector('.val'); if (vv) vv.textContent = t; };
+    // A value pushed in from outside (a poll) means the next drag back to the
+    // last value sent is a real change again.
+    wrap.setValue = (v) => { if (document.activeElement === input) return; lastSent = null; input.value = v; setPct(input); const t = opts.format ? opts.format(+v) : v; val.textContent = t; const vv = row.querySelector('.val'); if (vv) vv.textContent = t; };
     return wrap;
   }
   function toggle(on, onChange, cls) {

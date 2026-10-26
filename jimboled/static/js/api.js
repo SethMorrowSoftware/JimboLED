@@ -27,7 +27,7 @@
     try {
       resp = await fetch(path, { method, headers, body: payload, credentials: 'same-origin', signal: limit ? limit.signal : opts.signal, keepalive: !!opts.keepalive });
     } catch (err) {
-      if (timedOut) throw new ApiError('JimboLED took too long to answer. Trying again…', 0);
+      if (timedOut) throw new ApiError('No answer from JimboLED yet – it may still be doing it. Check the lights before trying again.', 0);
       if (err.name === 'AbortError') throw err;
       throw new ApiError('Cannot reach JimboLED. Is the Pi switched on and on the same network?', 0);
     } finally {

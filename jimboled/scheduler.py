@@ -182,7 +182,10 @@ def last_due(sched: Dict[str, Any], now: datetime, location: Dict[str, Any]) -> 
         at = datetime.fromtimestamp(float(when["at"])).astimezone()
         return at if at <= now else None
     best = None
-    for back in range(0, 3):  # today, yesterday, the day before (jitter + offsets can cross midnight)
+    # Tomorrow's calendar day too: a 00:05 run with ±15 min of variation can
+    # fall at 23:52 *today*.  Jitter and sun offsets can also push a run past
+    # midnight the other way, hence the two days back.
+    for back in range(-1, 3):
         t = occurrence(sched, (now - timedelta(days=back)).date(), location)
         if t is not None and t <= now and (best is None or t > best):
             best = t
@@ -335,12 +338,34 @@ class Scheduler:
             log.exception("could not retire one-off schedule %s", sid)
 
     def run_now(self, sched: Dict[str, Any]) -> Dict[str, Any]:
-        result = self.runner(sched["action"]) or {}
+        """Run a schedule's action straight away (the "Run now" button).
+
+        A one-off timer that is run by hand is used up: it must not go off a
+        second time later, after somebody has switched things back on.
+        """
+        sid = sched["id"]
         with self._lock:
-            self._state[sched["id"]] = {**(self._state.get(sched["id"]) or {}), "last_run": time.time(),
-                                        "ok": not result.get("error"),
-                                        "message": str(result.get("error") or result.get("message") or "done")[:300]}
+            if sid in self._running:
+                return {"error": "it is already running"}
+            self._running.add(sid)
+        try:
+            result = self.runner(sched["action"]) or {}
+        except Exception as exc:  # pragma: no cover - runner already catches device errors
+            log.exception("schedule %s failed", sched.get("name"))
+            result = {"error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            with self._lock:
+                self._running.discard(sid)
+        once = (sched.get("when") or {}).get("type") == "once"
+        with self._lock:
+            entry = {**(self._state.get(sid) or {}), "last_run": time.time(), "ok": not result.get("error"),
+                     "message": str(result.get("error") or result.get("message") or "done")[:300]}
+            if once:
+                entry["fired_for"] = float((sched.get("when") or {}).get("at") or time.time())
+            self._state[sid] = entry
             self._save_state()
+        if once:
+            self._finish_once(sched)
         return result
 
     def describe(self, sched: Dict[str, Any], location: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:

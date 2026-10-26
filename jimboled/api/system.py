@@ -304,6 +304,7 @@ def download_backup():
     # A backup is a file people email themselves; it should not carry working
     # keys to this Pi.  Restoring keeps whatever tokens exist at the time.
     cfg["server"].pop("api_tokens", None)
+    cfg["server"].pop("password_hash", None)
     payload = json.dumps(cfg, indent=2).encode("utf-8")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return send_file(io.BytesIO(payload), mimetype="application/json", as_attachment=True,
@@ -343,7 +344,10 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     server["port"] = int(_num(server.get("port", current_server.get("port", 80)), 1, 65535, "port", int))
     server["host"] = str(server.get("host") or "0.0.0.0")[:64]
     server["secret_key"] = current_server.get("secret_key")
-    server["password_hash"] = server.get("password_hash") if isinstance(server.get("password_hash"), str) else current_server.get("password_hash")
+    # The password in force stays in force.  Bringing back an old one (which
+    # may be exactly the one a housemate was locked out of) is not something
+    # "restore my scenes" should do quietly.
+    server["password_hash"] = current_server.get("password_hash")
     server["session_version"] = int(current_server.get("session_version") or 0)
     hosts = server.get("allowed_hosts")
     server["allowed_hosts"] = [str(h).lower()[:253] for h in hosts if isinstance(h, str)][:50] if isinstance(hosts, list) else []
@@ -631,4 +635,11 @@ def emergency_all_off():
     ctx = get_ctx()
     gpio = ctx.gpio.all_off("panic")
     lights = ctx.devices.set_state_all({"on": False})
-    return ok({"gpio": gpio, "lights": lights})
+    missed = {k: v for k, v in lights.items() if v != "ok"}
+    names = {d["id"]: d["name"] for d in ctx.devices.snapshot()}
+    if missed:
+        message = (f"Relays off. {len(lights) - len(missed)} of {len(lights)} lights off – not reached: "
+                   + ", ".join(names.get(k, k) for k in missed) + ".")
+    else:
+        message = "Everything switched off."
+    return ok({"gpio": gpio, "lights": lights, "failed": missed, "message": message, "ok": not missed})

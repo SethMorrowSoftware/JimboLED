@@ -130,9 +130,25 @@ def delete_device(device_id):
         for group in cfg.get("groups", []):
             if isinstance(group, dict) and isinstance(group.get("devices"), list):
                 group["devices"] = [d for d in group["devices"] if d != device_id]
+        # Scenes and schedules that named this controller stop doing so,
+        # rather than failing with "unknown device" every time they run.
+        for scene in cfg["dashboard"].get("scenes", []):
+            if isinstance(scene, dict) and isinstance(scene.get("actions"), list):
+                scene["actions"] = [a for a in scene["actions"] if not (a.get("type") == "device" and a.get("ref") == device_id)]
+                for a in scene["actions"]:
+                    _forget_in_target(a, device_id)
+        for sched in cfg.get("schedules", []):
+            if isinstance(sched, dict) and isinstance(sched.get("action"), dict):
+                _forget_in_target(sched["action"], device_id)
 
     ctx.store.update(mutate, backup_reason="remove-device")
     return ok()
+
+
+def _forget_in_target(action, device_id: str) -> None:
+    target = action.get("target") if isinstance(action, dict) else None
+    if isinstance(target, dict) and isinstance(target.get("devices"), list) and len(target["devices"]) > 1:
+        target["devices"] = [d for d in target["devices"] if d != device_id]
 
 
 @bp.post("/devices/<device_id>/state")
@@ -202,6 +218,11 @@ def save_preset(device_id):
         raise APIError("Preset slot must be a number between 1 and 250")
     if not 1 <= slot <= 250:
         raise APIError("Preset slot must be between 1 and 250")
+    if data.get("rename"):
+        # Rename only: keep what the preset does.  (A plain save would store
+        # whatever the lights show right now in it, and wipe a playlist.)
+        presets = ctx.devices.rename_preset(device_id, slot, name, quick_label=str(data.get("quick_label") or "")[:2])
+        return ok({"presets": presets, "slot": slot})
     state = None
     if isinstance(data.get("state"), dict) and data["state"]:
         state = sanitise_state(data["state"])
@@ -225,6 +246,31 @@ def delete_preset(device_id, slot):
     if not ctx.devices.has(device_id):
         raise APIError(f"unknown device '{device_id}'", 404)
     return ok({"presets": ctx.devices.delete_preset(device_id, slot)})
+
+
+@bp.post("/devices/<device_id>/identify")
+def identify_device(device_id):
+    """Blink this controller for a few seconds so you can see which one it is."""
+    ctx = get_ctx()
+    if not ctx.devices.has(device_id):
+        raise APIError(f"unknown device '{device_id}'", 404)
+    ctx.devices.identify(device_id)
+    return ok({"message": "Look for the blinking light"})
+
+
+@bp.post("/discover/identify")
+def identify_found():
+    """The same for a controller that was found on the network but not added yet."""
+    from ..wled.manager import identify_client
+
+    host = str(body().get("host") or "").strip()
+    if not host:
+        raise APIError("which controller? (host)")
+    try:
+        identify_client(WLEDClient(host, timeout=3.0))
+    except (DeviceError, WLEDError) as exc:
+        raise APIError(f"{host}: {exc}", 502)
+    return ok({"message": "Look for the blinking light"})
 
 
 @bp.post("/devices/<device_id>/reboot")

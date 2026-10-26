@@ -28,10 +28,17 @@
     root.append(top);
     if (size !== 's') root.append(h('div', { class: 'row between' }, swatches, effectLine));
     if (size === 'l' || size === 'xl') root.append(presets);
+    let chipSig = null;
     root.update = (dd) => {
       d = dd;
       power.setOn(isOn(d)); power.disabled = !d.online;
       bri.setValue((d.state && d.state.bri) || 0); bri.input.disabled = !d.online;
+      // Rebuild the buttons only when what they show changed: replacing them
+      // on every 2 s poll swallowed taps that landed mid-rebuild.
+      const sig = JSON.stringify([mainColors(d).slice(0, 3), d.online, d.effect_name, d.palette_name, d.last_error,
+        root.contains(presets) ? [(d._presets || []).slice(0, 6).map((p) => [p.id, p.name]), d.state && d.state.ps] : null]);
+      if (sig === chipSig) return;
+      chipSig = sig;
       swatches.innerHTML = '';
       mainColors(d).slice(0, 3).forEach((c, i) => {
         const s = h('button', { class: 'swatch', style: { background: Color.css(c) }, title: `Colour ${i + 1}` });
@@ -41,6 +48,14 @@
       const fx = d.effect_name ? `${d.effect_name}` : '';
       const pal = d.palette_name && d.palette_name !== 'Default' ? ` · ${d.palette_name}` : '';
       effectLine.innerHTML = d.online ? `${icon('wand')}<span class="ellipsis">${esc(fx)}${esc(pal)}</span>` : `<span class="muted">${esc(d.last_error || 'offline')}</span>`;
+      if (d.online && d.info && d.info.live && !(d.state && d.state.lor)) {
+        // Another program (Hyperion, LedFx, xLights…) is streaming to it, so
+        // changes made here don't show until it stops – say so.
+        effectLine.innerHTML = `${icon('radio')}<span class="ellipsis" title="Changes made here won't show while another app is streaming to this light">${esc(d.info.live_source || 'Another app')} is in control</span>`;
+        const take = el(`<button class="btn sm ghost">Take over</button>`);
+        take.onclick = (e) => { e.stopPropagation(); send(d, { lor: 1 }); };
+        effectLine.append(take);
+      }
       if (root.contains(presets)) {
         presets.innerHTML = '';
         const list = (d._presets || []).slice(0, 6);
@@ -58,8 +73,15 @@
 
   // ---------------------------------------------------------- panel
   const panels = {};
+  const opening = {};
   async function openPanel(deviceId, tab) {
     if (panels[deviceId]) { panels[deviceId].setTab(tab || 'control'); return panels[deviceId]; }
+    // A double tap must not build two panels (each with its own poll).
+    if (opening[deviceId]) return opening[deviceId];
+    opening[deviceId] = openPanelNow(deviceId, tab).finally(() => { delete opening[deviceId]; });
+    return opening[deviceId];
+  }
+  async function openPanelNow(deviceId, tab) {
     let d;
     try { d = (await api.get(`/api/devices/${deviceId}`)).device; } catch (e) { return UI.notifyError(e); }
     const body = h('div', { class: 'stack' });
@@ -72,6 +94,7 @@
       { label: 'Open WLED\'s own page', icon: 'externalLink', onClick: () => window.open(`http://${d.host}`, '_blank') },
       { label: 'Reload effect list', icon: 'list', onClick: async () => { try { d = (await api.post(`/api/devices/${d.id}/catalog`)).device; render(); UI.toast('Effects reloaded', 'success'); } catch (e) { UI.notifyError(e); } } },
       { label: 'Copy this look to other lights…', icon: 'layers', onClick: () => Lights.copyLookDialog(d) },
+      { label: 'Flash it, to see which light it is', icon: 'zap', onClick: () => identify(d) },
       '-',
       { label: 'Reboot controller', icon: 'rotate', onClick: async () => { if (await UI.confirm({ title: 'Reboot', message: `Reboot ${d.name}? Lights go off for a few seconds.`, okText: 'Reboot' })) { try { await api.post(`/api/devices/${d.id}/reboot`); UI.toast('Rebooting…', 'success'); } catch (e) { UI.notifyError(e); } } } },
       { label: 'Remove from dashboard', icon: 'trash', danger: true, onClick: () => removeDevice(d, () => m.close()) },
@@ -335,7 +358,7 @@
     UI.menu(anchor, [
       { label: 'Apply', icon: 'play', onClick: () => send(d, { ps: p.id }).then(() => refreshPanel(d.id, 'presets')) },
       { label: 'Overwrite with current look', icon: 'save', onClick: async () => { if (await UI.confirm({ title: 'Overwrite preset', message: `Replace "${p.name}" with the current look?`, okText: 'Overwrite' })) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name: p.name, quick_label: p.quick_label }); UI.toast('Preset updated', 'success'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
-      { label: 'Rename', icon: 'edit', onClick: async () => { const name = await UI.prompt({ title: 'Rename preset', label: 'Name', value: p.name, maxlength: 32 }); if (name && name !== p.name) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name, quick_label: p.quick_label }); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
+      { label: 'Rename', icon: 'edit', onClick: async () => { const name = await UI.prompt({ title: 'Rename preset', label: 'Name', value: p.name, maxlength: 32 }); if (name && name !== p.name) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name, quick_label: p.quick_label, rename: true }); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
       { label: 'Copy to other lights…', icon: 'layers', onClick: () => (p.is_playlist ? UI.toast('Playlists point at other presets by number, so they can\'t be copied. Copy the presets in it instead.', 'error', 8000) : Lights.copyPresetDialog(d, p)) },
       '-',
       { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await UI.confirm({ title: 'Delete preset', message: `Delete "${p.name}" from ${d.name}?`, okText: 'Delete', danger: true })) { try { await api.del(`/api/devices/${d.id}/presets/${p.id}`); UI.toast('Preset deleted', 'success'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
@@ -510,5 +533,9 @@
     host.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
   }
 
-  window.Device = { tileBody, openPanel, send, editDevice, removeDevice, addDeviceDialog, isOn, mainColors, signalIcon, paletteGradient };
+  async function identify(d) {
+    try { const r = await api.post(`/api/devices/${d.id}/identify`); UI.toast(`${d.name}: ${r.message}`, 'info'); } catch (e) { UI.notifyError(e); }
+  }
+
+  window.Device = { identify, tileBody, openPanel, send, editDevice, removeDevice, addDeviceDialog, isOn, mainColors, signalIcon, paletteGradient };
 })();

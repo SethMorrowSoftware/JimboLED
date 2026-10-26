@@ -42,6 +42,39 @@ class WLEDBusy(WLEDError):
     """Device answered 503: its single JSON buffer is in use."""
 
 
+class WLEDNotFound(WLEDError):
+    """Device answered 404: this firmware does not have that endpoint."""
+
+
+def fit_name(text: str, limit: int = 32) -> str:
+    """Cut ``text`` to WLED's name limit, counted in UTF-8 *bytes*.
+
+    WLED copies names into fixed 33-byte buffers.  Cutting by characters lets
+    an emoji or an umlaut straddle the end, WLED then stores half a character,
+    and presets.json stops being valid UTF-8 – which used to hide every preset
+    on that controller.
+    """
+    raw = str(text).encode("utf-8")[:limit]
+    return raw.decode("utf-8", "ignore")
+
+
+def is_idempotent(payload: Dict[str, Any]) -> bool:
+    """Whether sending ``payload`` twice does the same as sending it once.
+
+    WLED can answer 503 *after* applying a command (the reply needs the JSON
+    buffer a second time), so a retry must never toggle back or skip on.
+    """
+    def walk(value: Any) -> bool:
+        if isinstance(value, dict):
+            return all(k not in ("np",) and walk(v) for k, v in value.items())
+        if isinstance(value, list):
+            return all(walk(v) for v in value)
+        if isinstance(value, str):
+            return not (value == "t" or "~" in value or value == "r")
+        return True
+    return walk(payload)
+
+
 def normalise_host(host: str) -> str:
     """Accept ``192.168.1.5``, ``wled-abc.local``, ``http://x``, ``x:8080``."""
     host = (host or "").strip()
@@ -64,36 +97,41 @@ class WLEDClient:
         self.base = f"http://{self.host}"
         self.timeout = (connect_timeout, timeout)
         self.session = requests.Session()
+        # Controllers are on the LAN: an HTTP(S)_PROXY in the environment must
+        # never route "turn the bedroom off" through some other machine.
+        self.session.trust_env = False
         self.session.headers["User-Agent"] = "JimboLED"
         # WLED is single-threaded; never hammer it with parallel requests.
         adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=2, max_retries=0)
         self.session.mount("http://", adapter)
 
     # ------------------------------------------------------------- transport
-    def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Any:
+    def _request(self, method: str, path: str, payload: Optional[Dict[str, Any]] = None, *,
+                 retry_busy: bool = True, timeout: Optional[Any] = None) -> Any:
         url = self.base + path
         data = json.dumps(payload, separators=(",", ":")) if method != "GET" else None
         resp = None
-        for attempt in range(3):
+        limits = timeout or self.timeout
+        for attempt in range(3 if retry_busy else 1):
             try:
                 if method == "GET":
-                    resp = self.session.get(url, timeout=self.timeout, stream=True)
+                    resp = self.session.get(url, timeout=limits, stream=True)
                 else:
-                    resp = self.session.post(url, data=data, timeout=self.timeout, stream=True,
+                    resp = self.session.post(url, data=data, timeout=limits, stream=True,
                                              headers={"Content-Type": "application/json"})
             except (requests.ConnectionError, requests.Timeout, socket.gaierror) as exc:
                 raise WLEDUnreachable(_short_error(exc)) from exc
             except requests.RequestException as exc:
                 raise WLEDError(_short_error(exc)) from exc
             # WLED has a single JSON buffer; it answers 503 {"error":3} when busy.
-            if resp.status_code == 503 and attempt < 2:
+            if resp.status_code == 503 and retry_busy and attempt < 2:
                 resp.close()
                 time.sleep(0.25 * (attempt + 1))
                 continue
             break
         try:
             if resp.status_code == 404:
-                raise WLEDError(f"{path} not found on this device (old firmware?)")
+                raise WLEDNotFound(f"{path} not found on this device (old firmware?)")
             if resp.status_code == 503:
                 raise WLEDBusy("device busy, try again")
             body = _read_capped(resp, path)
@@ -102,7 +140,9 @@ class WLEDClient:
             if not body:
                 return {}
             try:
-                return json.loads(body)
+                # Lenient: one broken character in a preset name must not
+                # make the whole document unreadable.
+                return json.loads(body.decode("utf-8", "replace"))
             except ValueError as exc:
                 raise WLEDError(f"invalid JSON from {path}") from exc
         finally:
@@ -111,8 +151,8 @@ class WLEDClient:
     def get(self, path: str) -> Any:
         return self._request("GET", path)
 
-    def post(self, path: str, payload: Dict[str, Any]) -> Any:
-        return self._request("POST", path, payload)
+    def post(self, path: str, payload: Dict[str, Any], *, timeout: Optional[Any] = None) -> Any:
+        return self._request("POST", path, payload, retry_busy=is_idempotent(payload), timeout=timeout)
 
     # --------------------------------------------------------------- reads
     def get_state_info(self) -> Dict[str, Any]:
@@ -152,11 +192,11 @@ class WLEDClient:
         return [str(p) for p in pal] if isinstance(pal, list) else []
 
     def get_fxdata(self) -> List[str]:
+        # Only "this firmware has no such endpoint" means "no metadata".  A busy
+        # or garbled answer must raise, or an empty list gets cached for good.
         try:
             data = self.get("/json/fxdata")
-        except WLEDError as exc:
-            if isinstance(exc, WLEDUnreachable):
-                raise
+        except WLEDNotFound:
             return []
         return [str(d) for d in data] if isinstance(data, list) else []
 
@@ -171,9 +211,7 @@ class WLEDClient:
         while page <= max_page and page < max_pages:
             try:
                 doc = self.get(f"/json/palx?page={page}")
-            except WLEDError as exc:
-                if isinstance(exc, WLEDUnreachable):
-                    raise
+            except WLEDNotFound:
                 break
             if not isinstance(doc, dict):
                 break
@@ -190,9 +228,7 @@ class WLEDClient:
         """Presets file as ``{"1": {...}, ...}`` (slot 0 is always empty)."""
         try:
             doc = self.get("/presets.json")
-        except WLEDError as exc:
-            if isinstance(exc, WLEDUnreachable):
-                raise
+        except WLEDNotFound:
             return {}
         if not isinstance(doc, dict):
             return {}
@@ -216,12 +252,12 @@ class WLEDClient:
         return doc if isinstance(doc, dict) else {}
 
     # -------------------------------------------------------------- writes
-    def set_state(self, payload: Dict[str, Any], *, verbose: bool = True) -> Dict[str, Any]:
+    def set_state(self, payload: Dict[str, Any], *, verbose: bool = True, timeout: Optional[Any] = None) -> Dict[str, Any]:
         """POST a (partial) state.  Returns the new full state when ``verbose``."""
         body = dict(payload)
         if verbose:
             body["v"] = True
-        result = self.post("/json/state", body)
+        result = self.post("/json/state", body, timeout=timeout)
         if verbose and isinstance(result, dict) and "on" in result:
             return result
         if isinstance(result, dict) and result.get("success") is False:
@@ -233,10 +269,10 @@ class WLEDClient:
     def save_preset(self, slot: int, name: str, *, include_brightness: bool = True,
                     save_segment_bounds: bool = True, quick_label: str = "",
                     state: Optional[Dict[str, Any]] = None) -> None:
-        payload: Dict[str, Any] = {"psave": int(slot), "n": name[:32],
+        payload: Dict[str, Any] = {"psave": int(slot), "n": fit_name(name),
                                    "ib": bool(include_brightness), "sb": bool(save_segment_bounds)}
         if quick_label:
-            payload["ql"] = quick_label[:2]
+            payload["ql"] = fit_name(quick_label, 2)
         if state:
             payload.update(state)
             payload["o"] = True  # overwrite: save the supplied state, not the current one

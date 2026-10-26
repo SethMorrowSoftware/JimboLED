@@ -138,9 +138,17 @@ def clean_scene(raw: Dict[str, Any]) -> Dict[str, Any]:
             raise APIError("scene action must be an object")
         kind = a.get("type")
         if kind in ("device", "all"):
+            from ..wled.manager import DeviceError, sanitise_state
+
             state = a.get("state")
             if not isinstance(state, dict) or not state:
                 raise APIError("device action needs a state object")
+            try:
+                # Checked (and hex colours turned into numbers) now, not every
+                # time the scene runs and fails.
+                state = sanitise_state(state)
+            except DeviceError as exc:
+                raise APIError(f"scene action: {exc}")
             entry = {"type": kind, "ref": str(a.get("ref") or ""), "state": state}
             if a.get("label"):
                 entry["label"] = str(a["label"])[:60]
@@ -371,6 +379,15 @@ def delete_scene(scene_id):
 
     ctx.store.update(mutate, backup_reason="scene")
     return ok({"dashboard": ctx.store.section("dashboard")})
+
+
+@bp.post("/scenes/test")
+def test_scene():
+    """Run a scene that has not been saved yet (the editor's Try it button)."""
+    data = body()
+    scene = clean_scene({"name": "Test", "actions": data.get("actions")})
+    results = run_scene_actions(get_ctx(), scene)
+    return ok({"results": results, "failed": [r for r in results if r.get("error")]})
 
 
 @bp.post("/scenes/<scene_id>/run")

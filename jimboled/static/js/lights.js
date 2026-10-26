@@ -164,8 +164,15 @@
       if (opts.sync && (intent.effect || intent.preset)) out.sync = true;
       return out;
     }
+    // Undo goes back one step.  A brightness drag sends several changes
+    // (the in-between ones "quiet"), and those count as one step.
+    let undo = null, lastChange = 0, dragging = false, lastSig = '';
     async function send(intent, quiet) {
       const r = await apply(targetValue(key), withOpts(intent), { quiet: true, status: showResult });
+      const sig = Object.keys(intent).sort().join();
+      const continuing = dragging && sig === lastSig && Date.now() - lastChange < 3000;
+      if (r && r.undo && !continuing) undo = r.undo;
+      if (r) { lastChange = Date.now(); dragging = !!quiet; lastSig = sig; drawUndo(); }
       if (r && !quiet) refreshState();
       return r;
     }
@@ -173,8 +180,15 @@
       result.className = 'lights-result small ' + (r.ok ? 'ok' : 'warn');
       result.innerHTML = (r.ok ? icon('check') : icon('alert')) + '<span></span>';
       result.querySelector('span').textContent = r.message;
-      clearTimeout(showResult.t);
-      if (r.ok) showResult.t = setTimeout(() => { result.innerHTML = ''; result.className = 'lights-result small'; }, 4000);
+    }
+    function drawUndo() {
+      if (!undo || result.querySelector('.undo')) return;
+      const b = el(`<button class="btn sm ghost undo">${icon('rotate')}<span>Undo</span></button>`);
+      b.onclick = async () => {
+        const k = undo; undo = null; b.remove();
+        try { const r = await api.post(`/api/lights/undo/${k}`); if (r.devices && App.setDevices) App.setDevices(r.devices); showResult(r); refreshState(); } catch (e) { UI.notifyError(e); }
+      };
+      result.append(b);
     }
     function drawTargets() {
       targetBar.innerHTML = '';
@@ -501,7 +515,9 @@
     const power = h('select', { class: 'select' });
     const curOn = intent.on === undefined ? '' : intent.on === 't' ? 't' : intent.on ? 'on' : 'off';
     [['', 'Leave as is'], ['on', 'Turn on'], ['off', 'Turn off'], ['t', 'Toggle']].forEach(([v, t]) => power.append(h('option', { value: v, text: t, selected: curOn === v })));
-    const bri = h('input', { class: 'input', type: 'number', min: 1, max: 100, placeholder: 'leave as is', value: intent.bri ? Math.round(intent.bri / 2.55) : '' });
+    const wakeTarget = intent.nightlight && intent.nightlight.on && intent.nightlight.tbri ? intent.nightlight.tbri : null;
+    const briValue = wakeTarget ? Math.round(wakeTarget / 2.55) : (intent.bri ? Math.round(intent.bri / 2.55) : '');
+    const bri = h('input', { class: 'input', type: 'number', min: 1, max: 100, placeholder: 'leave as is', value: briValue });
     const useCol = h('input', { type: 'checkbox', checked: !!(intent.colors && intent.colors[0]) });
     const col = h('input', { class: 'color-input', type: 'color', value: intent.colors && intent.colors[0] ? Color.rgbToHex(intent.colors[0]) : '#ff8000' });
     col.oninput = () => { useCol.checked = true; };
@@ -509,9 +525,18 @@
     const effect = h('input', { class: 'input', list: 'jl-effect-names', placeholder: 'leave as is', value: intent.effect || '', maxlength: 64 });
     const palette = h('input', { class: 'input', list: 'jl-palette-names', placeholder: 'leave as is', value: intent.palette || '', maxlength: 64 });
     const trans = h('input', { class: 'input', type: 'number', min: 0, max: 60, step: 0.1, placeholder: 'default', value: intent.transition ?? '' });
+    // Slow fades run on the controllers themselves (WLED's nightlight), so
+    // they finish even if the Pi or the Wi-Fi goes away halfway.
+    const nl = intent.nightlight && intent.nightlight.on ? intent.nightlight : null;
+    const curFade = !nl ? '' : (nl.tbri || 0) > 0 ? 'in' : 'out';
+    const fade = h('select', { class: 'select' });
+    [['', 'No slow fade'], ['out', 'Fade out, then off'], ['in', 'Wake-up: fade in from dim']].forEach(([v, t]) => fade.append(h('option', { value: v, text: t, selected: curFade === v })));
+    const fadeMin = h('input', { class: 'input', type: 'number', min: 1, max: 255, value: nl ? (nl.dur || 30) : 30, placeholder: 'minutes' });
+    const fadeWrap = h('div', { class: 'row' }, fade, h('div', { style: { width: '90px', flex: 'none' } }, fadeMin), h('span', { class: 'small muted', text: 'min' }));
     root.append(UI.field('Power', power), UI.field('Brightness %', bri),
       UI.field('Colour', h('label', { class: 'check' }, useCol, col, h('span', { class: 'small muted', text: 'set a colour' }))),
-      UI.field('Preset (by name)', preset), UI.field('Effect', effect), UI.field('Palette', palette), UI.field('Fade time (seconds)', trans));
+      UI.field('Preset (by name)', preset), UI.field('Effect', effect), UI.field('Palette', palette), UI.field('Fade time (seconds)', trans),
+      h('div', { class: 'full' }, UI.field('Slow fade', fadeWrap, 'Fade out over a while for bedtime, or fade in slowly to wake up.')));
     // Name suggestions from every light; typing any name still works.
     catalog('all', 60000).then((cat) => {
       const list = (id, names) => { let dl = document.getElementById(id); if (!dl) { dl = h('datalist', { id }); document.body.append(dl); } dl.innerHTML = ''; names.forEach((n) => dl.append(h('option', { value: n }))); };
@@ -526,8 +551,15 @@
       if (effect.value.trim()) out.effect = effect.value.trim();
       if (palette.value.trim()) out.palette = palette.value.trim();
       if (trans.value !== '') out.transition = +trans.value;
-      // Keep what this simple form can't show (white, speed, nightlight…).
-      for (const k of ['white', 'cct', 'speed', 'intensity', 'custom', 'nightlight', 'sync', 'preset_slot', 'segments', 'best_effort']) if (intent[k] !== undefined) out[k] = intent[k];
+      // Keep what this simple form can't show (white, speed, …).
+      for (const k of ['white', 'cct', 'kelvin', 'speed', 'intensity', 'custom', 'sync', 'preset_slot', 'segments', 'best_effort']) if (intent[k] !== undefined) out[k] = intent[k];
+      const minutes = Math.max(1, Math.min(255, +fadeMin.value || 30));
+      if (fade.value === 'out') out.nightlight = { on: true, minutes, mode: 'fade', target: 0 };
+      else if (fade.value === 'in') {
+        // Start dim and climb to the chosen brightness (or full).
+        out.nightlight = { on: true, minutes, mode: 'fade', target: out.brightness ? Math.round(out.brightness * 2.55) : 255 };
+        out.on = true; delete out.brightness; out.bri = 1;
+      }
       if (!Object.keys(out).some((k) => k !== 'transition' && k !== 'best_effort')) throw new Error('Say what the lights should do: power, brightness, a colour, a preset or an effect');
       return out;
     };
@@ -544,8 +576,9 @@
     if (intent.colors && intent.colors[0]) parts.push(Color.rgbToHex(intent.colors[0]));
     if (intent.effect) parts.push(intent.effect);
     if (intent.palette) parts.push(intent.palette);
-    if (intent.bri) parts.push(Math.round(intent.bri / 2.55) + '%');
-    if (intent.nightlight && intent.nightlight.on) parts.push(`fade out over ${intent.nightlight.dur || 60} min`);
+    if (intent.bri && !(intent.nightlight && intent.nightlight.on && intent.nightlight.tbri)) parts.push(Math.round(intent.bri / 2.55) + '%');
+    if (intent.kelvin) parts.push(`white ${intent.kelvin} K`);
+    if (intent.nightlight && intent.nightlight.on) parts.push(`${(intent.nightlight.tbri || 0) > 0 ? 'fade in' : 'fade out'} over ${intent.nightlight.dur || 60} min`);
     return parts.join(', ') || 'change';
   }
 

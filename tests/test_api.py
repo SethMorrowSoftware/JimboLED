@@ -40,7 +40,8 @@ def test_device_crud_and_control(client, fake_wled):
     assert [t["ref"] for t in tiles] == [did, off]
     assert tiles[0]["title"] == "Bedroom"
     r = client.post("/api/devices/all/state", json={"on": False})
-    assert r.json["failed"] == {}
+    # The unreachable controller is tried and reported, not silently skipped.
+    assert set(r.json["failed"]) == {off}
     assert client.delete(f"/api/devices/{off}").status_code == 200
     assert client.delete(f"/api/devices/{off}").status_code == 404
     assert len(client.get("/api/dashboard").json["dashboard"]["tiles"]) == 1

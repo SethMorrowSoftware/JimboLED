@@ -510,10 +510,18 @@ class GPIOManager:
             self._check_estop(rt)
         return self.turn_on(switch_id, source)
 
-    def pulse(self, switch_id: str, duration_ms: Optional[int] = None, source: str = "api") -> Dict[str, Any]:
+    def pulse(self, switch_id: str, duration_ms: Optional[int] = None, source: str = "api", *,
+              _identify: bool = False) -> Dict[str, Any]:
         with self._lock:
             rt = self._get(switch_id)
             self._check_estop(rt)
+            if rt.cfg.mode == "momentary" and not _identify:
+                # Hold-to-run exists so that somebody is watching while it
+                # moves.  A pulse up to 60 s – from a scene, a schedule or a
+                # script, possibly repeated – would run it with nobody there.
+                # The 2 s "test this pin" blip while setting up is the only
+                # exception.
+                raise GPIOError(f"'{rt.cfg.name}' is a hold-to-run switch; it only runs while the button is held")
             try:
                 ms = int(duration_ms) if duration_ms else rt.cfg.pulse_ms
             except (TypeError, ValueError):
@@ -710,7 +718,7 @@ class GPIOManager:
                     self._release_test_pin(pin)
                     raise
         if configured is not None:
-            self.pulse(configured, duration_ms, source="test")
+            self.pulse(configured, duration_ms, source="test", _identify=True)
             return True
         # ``_stop`` rather than sleep(): a shutdown mid-test releases the pin at once.
         self._stop.wait(duration_ms / 1000.0)

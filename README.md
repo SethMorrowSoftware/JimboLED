@@ -17,11 +17,18 @@
 
 ## What it does
 
+* **Every light at once** – the **Lights** button sets all your WLED lights (or a room, or the ones you pick) to a colour, a warm or cool white, a preset, an effect or a palette in one tap. Presets and effects are matched *by name*, so "Movie" works even when each controller keeps it in a different slot; the panel tells you plainly if a light doesn't have one. Fade-to-off, switch-off timers, and "save this look as a scene" are right there too.
+* **Groups and schedules** – put lights into rooms with their own tiles; run lights, scenes or switches at set times or relative to sunrise/sunset, on chosen weekdays, optionally varied a little each day so an empty house looks lived-in.
 * **Controls any number of WLED controllers** – power, brightness, colours (incl. white / CCT), every effect with its own sliders and options, palettes, presets & playlists, segments, sleep timer, sync, reboot… Finds them on your network automatically.
 * **Drives relays from the Pi's GPIO pins** – on/off switches, tap (pulse) buttons and *hold‑to‑run* buttons that only move a motor while your finger is on the screen. Built‑in safety rules (interlocks, time limits, watchdog) so an adjustable bed can never run away.
 * **Latching emergency stops** – a red **E‑stop** in the header, and optionally a real mushroom button wired to the Pi. Unlike *All off*, a stop **latches**: the relays it covers stay locked out until somebody resets it. Give the bed and the awning separate stops so one does not lock out the other.
 * **Customisable dashboard** – drag tiles into any order, resize, hide, rename, add headings, notes, a clock, and one‑tap **scenes** ("Goodnight" = all lights off + bed flat). Four dark themes, two light ones, one that follows your phone, any accent colour, and text you can scale up to 150 %.
+* **Works with Home Assistant, Shortcuts and scripts** – create an API token under Settings → Integrations and send simple JSON like `{"target": "all", "preset": "Movie"}`.
 * **Made for non‑technical users** – a setup wizard, plain‑language settings, confirmations where they matter, an **All off** button, automatic backups, one‑click updates.
+
+<p align="center">
+  <img src="docs/screenshots/lights.png" width="560" alt="The Lights panel: every light at once"> <img src="docs/screenshots/mobile-lights.png" width="200" alt="The Lights panel on a phone">
+</p>
 
 ## Install (Raspberry Pi)
 

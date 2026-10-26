@@ -126,6 +126,33 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any], _path: str = "")
     return out
 
 
+# Lists that every consumer iterates over, and what their items must be.  A
+# hand-edited ``"groups": null`` would otherwise break the dashboard (or
+# quietly stop every schedule), the same way a scalar section would.
+LIST_SECTIONS = ((("devices",), dict), (("groups",), dict), (("schedules",), dict),
+                 (("dashboard", "tiles"), dict), (("dashboard", "scenes"), dict),
+                 (("dashboard", "favorite_colors"), str), (("gpio", "switches"), dict),
+                 (("server", "api_tokens"), dict), (("server", "allowed_hosts"), str))
+
+
+def _repair_lists(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    for path, item_type in LIST_SECTIONS:
+        parent: Any = cfg
+        for key in path[:-1]:
+            parent = parent.get(key) if isinstance(parent, dict) else None
+        if not isinstance(parent, dict):
+            continue
+        name, value = path[-1], parent.get(path[-1])
+        if isinstance(value, list):
+            parent[name] = [v for v in value if isinstance(v, item_type)]
+            continue
+        if value is not None:
+            log.error("config.json: '%s' should be a list, not %s; using an empty one",
+                      ".".join(path), type(value).__name__)
+        parent[name] = []
+    return cfg
+
+
 def default_data_dir() -> Path:
     env = os.environ.get("JIMBOLED_DATA_DIR")
     if env:
@@ -171,7 +198,7 @@ class ConfigStore:
             else:
                 raw = {}
             migrated = self._migrate(raw)
-            self._data = _deep_merge(DEFAULT_CONFIG, migrated)
+            self._data = _repair_lists(_deep_merge(DEFAULT_CONFIG, migrated))
             if not self.path.exists() or migrated != raw:
                 self._write_locked()
             return copy.deepcopy(self._data)
@@ -274,7 +301,7 @@ class ConfigStore:
         """Replace the whole config (used by restore-from-backup)."""
         if not isinstance(new_config, dict):
             raise ConfigError("config must be a JSON object")
-        merged = _deep_merge(DEFAULT_CONFIG, self._migrate(new_config))
+        merged = _repair_lists(_deep_merge(DEFAULT_CONFIG, self._migrate(new_config)))
         return self.update(lambda cfg: (cfg.clear(), cfg.update(merged)), backup_reason=backup_reason)
 
     def on_change(self, listener: Callable[[Dict[str, Any], Dict[str, Any]], None]) -> None:

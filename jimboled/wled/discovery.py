@@ -348,8 +348,77 @@ class DiscoveryService:
         self._status: Dict[str, Any] = {"running": False, "started_at": None, "finished_at": None,
                                         "found": [], "errors": [], "progress": "", "methods": []}
         self.listener = NodeListener()
+        self._moved_stop = threading.Event()
         if passive:
             self.listener.start()
+            threading.Thread(target=self._follow_loop, name="wled-follow", daemon=True).start()
+
+    def stop(self) -> None:
+        self._moved_stop.set()
+        self.listener.stop()
+
+    # ------------------------------------------------- controllers that moved
+    FOLLOW_EVERY_S = 30.0
+    LOST_AFTER_S = 60.0
+
+    def _follow_loop(self) -> None:
+        while not self._moved_stop.wait(self.FOLLOW_EVERY_S):
+            try:
+                self.follow_moved()
+            except Exception:  # pragma: no cover - must never stop
+                log.exception("following moved controllers failed")
+
+    def _lost_controllers(self) -> Dict[str, str]:
+        """MAC → device id for enabled controllers that have been offline a while."""
+        lost: Dict[str, str] = {}
+        for d in self.store.section("devices") or []:
+            if not isinstance(d, dict) or not d.get("enabled", True) or not d.get("id"):
+                continue
+            try:
+                s = self.devices.summary(d["id"])
+            except Exception:
+                continue
+            mac = (s.get("info") or {}).get("mac")
+            if mac and not s.get("online") and time.time() - (s.get("last_seen") or 0) > self.LOST_AFTER_S:
+                lost[str(mac).lower()] = d["id"]
+        return lost
+
+    def follow_moved(self, found: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+        """Re-point controllers that came back at a new IP address.
+
+        Routers hand out new addresses after a power cut; a controller that
+        is suddenly "offline" while a WLED with the *same MAC address* answers
+        somewhere else is the same controller, so its address is updated
+        rather than leaving a non-technical owner with a dead tile.
+        """
+        lost = self._lost_controllers()
+        if not lost:
+            return []
+        known_hosts = {d.get("host") for d in (self.store.section("devices") or []) if isinstance(d, dict)}
+        entries = list(found or [])
+        if found is None:
+            for node in self.listener.snapshot(max_age_s=300):
+                if node["host"] not in known_hosts:
+                    entry = self.probe(node["host"])
+                    if entry:
+                        entries.append(entry)
+        moved = []
+        for entry in entries:
+            mac = str(entry.get("mac") or "").lower()
+            host = entry.get("host")
+            if not mac or mac not in lost or not host or host in known_hosts:
+                continue
+            did = lost.pop(mac)
+
+            def mutate(cfg, did=did, host=host):
+                for d in cfg.get("devices", []):
+                    if d.get("id") == did:
+                        d["host"] = host
+
+            self.store.update(mutate, backup_reason="controller-moved")
+            log.warning("controller %s moved to %s; following it", did, host)
+            moved.append(did)
+        return moved
 
     def passive_nodes(self) -> List[Dict[str, Any]]:
         """Controllers heard on UDP 65506 that are not configured yet."""
@@ -434,6 +503,12 @@ class DiscoveryService:
             with self._lock:
                 self._status["errors"].append(str(exc))
         finally:
+            with self._lock:
+                found = [dict(f) for f in self._status["found"]]
+            try:
+                self.follow_moved(found)
+            except Exception:  # pragma: no cover
+                log.exception("following moved controllers failed")
             with self._lock:
                 self._status["running"] = False
                 self._status["finished_at"] = time.time()

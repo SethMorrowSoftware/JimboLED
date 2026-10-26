@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from .client import WLEDClient, WLEDError, WLEDUnreachable, normalise_host
+from .client import fit_name, WLEDClient, WLEDError, WLEDUnreachable, normalise_host
 from .fxdata import build_effect_catalog, palette_catalog
 from . import intents as _intents
 
@@ -48,7 +48,11 @@ class DeviceRecord:
     cfg: Dict[str, Any]
     client: WLEDClient
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Held while the effect/palette/preset catalogue downloads, which can take
+    # dozens of requests: commands only wait for ``lock``, so they go first.
+    catalog_lock: threading.Lock = field(default_factory=threading.Lock)
     online: bool = False
+    last_try: float = 0.0
     state: Dict[str, Any] = field(default_factory=dict)
     info: Dict[str, Any] = field(default_factory=dict)
     effects: List[str] = field(default_factory=list)
@@ -134,7 +138,7 @@ def _sanitise_state(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif key in ("pl", "psave", "pdel", "pd", "mainseg", "lor", "ledmap", "bs", "tb", "time"):
             out[key] = int(value)
         elif key in ("on", "ib", "sb", "sc", "o", "np", "live"):
-            out[key] = value if value == "t" else bool(value)
+            out[key] = _strict_bool(value, key)
         elif key in ("nl", "udpn", "playlist"):
             if not isinstance(value, dict):
                 raise DeviceError(f"{key} must be an object")
@@ -144,6 +148,25 @@ def _sanitise_state(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not out:
         raise DeviceError("nothing to change")
     return out
+
+
+def _strict_bool(value: Any, key: str) -> Any:
+    """``True``/``False``/``"t"`` – never ``bool("false")``, which is True."""
+    if isinstance(value, bool):
+        return value
+    if value == "t":
+        return "t"
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("true", "on", "yes", "1"):
+            return True
+        if word in ("false", "off", "no", "0"):
+            return False
+        if word in ("t", "toggle"):
+            return "t"
+    raise DeviceError(f"{key} must be true or false")
 
 
 _VALUE_STRING = re.compile(r"^[~w]?-?\d{0,4}~?\d{0,4}~?r?$")
@@ -156,7 +179,7 @@ def _clean_segment(seg: Any) -> Dict[str, Any]:
     if "col" in clean:
         clean["col"] = _clean_colors(clean["col"])
     if "n" in clean:
-        clean["n"] = str(clean["n"])[:32]
+        clean["n"] = fit_name(str(clean["n"]))
     for k in ("start", "stop", "len", "grp", "spc", "of", "fx", "sx", "ix", "pal", "c1", "c2", "c3", "si", "m12", "bm", "set", "id", "cct", "bri", "startY", "stopY"):
         if k not in clean:
             continue
@@ -212,7 +235,10 @@ class DeviceManager:
         # A separate pool for what a person just asked for.  "All off" must not
         # queue behind four in-flight polls of controllers that are switched
         # off, each of which can take the full request timeout.
-        self._cmd_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="wled-cmd")
+        # Wide enough that "every light" goes out in one wave rather than in
+        # batches of four (a preset holds its worker for a moment while the
+        # controller loads it).
+        self._cmd_pool = ThreadPoolExecutor(max_workers=max(workers, 16), thread_name_prefix="wled-cmd")
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._on_change = on_change
@@ -316,13 +342,14 @@ class DeviceManager:
     def refresh(self, device_id: str) -> DeviceRecord:
         """Poll one device now (blocking).  Never raises for network errors."""
         rec = self._get(device_id)
+        polled = False
         with rec.lock:
             t0 = time.monotonic()
             try:
                 doc = rec.client.get_state_info()
                 rec.latency_ms = round((time.monotonic() - t0) * 1000, 1)
                 self._absorb(rec, doc["state"], doc["info"])
-                self._ensure_catalog(rec)
+                polled = True
             except WLEDUnreachable as exc:
                 self._mark_offline(rec, str(exc))
             except WLEDError as exc:
@@ -333,7 +360,32 @@ class DeviceManager:
             finally:
                 rec.last_poll = time.monotonic()
                 self._schedule(rec)
+        if polled:
+            self._load_catalog(rec)
         return rec
+
+    def _load_catalog(self, rec: DeviceRecord, force: bool = False) -> None:
+        """Fetch effects, palettes and presets without holding up commands.
+
+        A busy or garbled answer is not "this controller has no effects": the
+        catalogue is simply tried again on the next poll, and the controller
+        is not counted as offline for it.
+        """
+        if not rec.catalog_lock.acquire(blocking=force):
+            return  # another thread is loading it right now
+        try:
+            self._ensure_catalog(rec, force=force)
+        except WLEDUnreachable as exc:
+            with rec.lock:
+                self._mark_offline(rec, str(exc))
+            if force:
+                raise
+        except WLEDError as exc:
+            log.info("%s: effect list not loaded yet (%s); will retry", rec.cfg.get("name"), exc)
+            if force:
+                raise
+        finally:
+            rec.catalog_lock.release()
 
     def _absorb(self, rec: DeviceRecord, state: Dict[str, Any], info: Optional[Dict[str, Any]]) -> None:
         # Whatever a controller sends lands in the snapshot that /api/state
@@ -372,18 +424,27 @@ class DeviceManager:
         info = rec.info or {}
         key = f"{info.get('ver')}|{info.get('vid')}|{info.get('fxcount')}|{info.get('palcount')}|{info.get('cpalcount')}"
         if force or key != rec.catalog_key or not rec.effects:
-            rec.effects = rec.client.get_effects()
-            rec.palettes = rec.client.get_palettes()
-            rec.fxdata = rec.client.get_fxdata()
-            rec.catalog = build_effect_catalog(rec.effects, rec.fxdata)
-            rec.catalog_key = key
+            # Everything is fetched first and adopted together, and the key is
+            # only recorded once it all arrived: a half-loaded catalogue would
+            # otherwise be kept until the next firmware update.
+            effects = rec.client.get_effects()
+            palettes = rec.client.get_palettes()
+            fxdata = rec.client.get_fxdata()
+            presets = rec.client.get_presets()
             try:
-                rec.palette_data = rec.client.get_palette_data()
+                palette_data = rec.client.get_palette_data()
+            except WLEDUnreachable:
+                raise
             except WLEDError:
-                rec.palette_data = {}
-            rec.presets = rec.client.get_presets()
+                palette_data = rec.palette_data  # previews only; keep what we had
+            rec.effects, rec.palettes, rec.fxdata = effects, palettes, fxdata
+            rec.catalog = build_effect_catalog(effects, fxdata)
+            rec.palette_data = palette_data or {}
+            rec.presets = presets
             rec.presets_loaded_at = time.monotonic()
             rec.presets_key = _presets_key(info)
+            rec.catalog_key = key
+            self._notify(rec.cfg["id"])
             return
         # presets.json changed (mtime) or the device rebooted -> reload presets
         pkey = _presets_key(info)
@@ -433,8 +494,10 @@ class DeviceManager:
             "enabled": rec.cfg.get("enabled", True),
             "icon": rec.cfg.get("icon", "bulb"),
             "color": rec.cfg.get("color", ""),
-            "online": rec.online,
-            "last_error": rec.last_error,
+            # A disabled controller is not polled, so whatever it last said is
+            # stale; it must not count as "on" in the All lights tile.
+            "online": rec.online and rec.cfg.get("enabled", True),
+            "last_error": rec.last_error if rec.cfg.get("enabled", True) else "disabled",
             "last_seen": rec.last_seen,
             "latency_ms": rec.latency_ms,
             "changed_at": rec.changed_at,
@@ -473,6 +536,7 @@ class DeviceManager:
                 "rssi": wifi.get("rssi"),
                 "uptime": info.get("uptime"),
                 "live": info.get("live"),
+                "live_source": info.get("lm"),
                 "arch": info.get("arch"),
                 "mac": info.get("mac"),
                 "ip": info.get("ip"),
@@ -500,18 +564,21 @@ class DeviceManager:
         return base
 
     # -------------------------------------------------------------- control
-    def set_state(self, device_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def set_state(self, device_id: str, payload: Dict[str, Any], *, quick: bool = False) -> Dict[str, Any]:
+        """Send a state change.  ``quick`` = a short timeout, for trying a
+        controller that is marked offline without holding everybody up."""
         rec = self._get(device_id)
         clean = sanitise_state(payload)
         with rec.lock:
+            clean = self._prepare(rec, clean)
             try:
-                new_state = rec.client.set_state(clean)
+                new_state = rec.client.set_state(clean, timeout=(1.0, 2.0) if quick else None)
             except WLEDUnreachable as exc:
                 self._mark_offline(rec, str(exc))
                 raise DeviceError(f"{rec.cfg.get('name')} is not reachable ({exc})")
             except WLEDError as exc:
                 raise DeviceError(str(exc))
-            if "ps" in clean or "playlist" in clean or "pd" in clean or "np" in clean:
+            if "ps" in clean or "playlist" in clean or "np" in clean:
                 # Preset/playlist application is asynchronous on the device.
                 time.sleep(0.35)
                 try:
@@ -525,18 +592,65 @@ class DeviceManager:
             rec.next_poll = time.monotonic() + 1.0
         return self._summary(rec)
 
+    def _prepare(self, rec: DeviceRecord, clean: Dict[str, Any]) -> Dict[str, Any]:
+        """Make a sanitised payload do what was meant on *this* controller.
+
+        * ``"on": "t"`` becomes an explicit on/off from the cached state, so a
+          retry after WLED's "busy" answer can't toggle it straight back.
+        * A preset number is sent the way WLED's own app sends it: the preset's
+          content plus ``pd`` (mark as current).  A bare ``ps`` equal to the
+          preset WLED thinks is still current is silently ignored – which is
+          exactly the case after "Movie" → off → "Movie" again.
+        * A segment object without an id only reaches *selected* segments, so
+          it is addressed to every segment by id.
+        """
+        out = dict(clean)
+        st = _as_doc(rec.state)
+        if out.get("on") == "t" and isinstance(st.get("on"), bool):
+            out["on"] = not st["on"]
+        ps = out.get("ps")
+        if isinstance(ps, int) and ps > 0 and not isinstance(ps, bool):
+            body = rec.presets.get(str(ps)) if isinstance(rec.presets, dict) else None
+            if isinstance(body, dict) and body:
+                if "playlist" in body:
+                    out.setdefault("on", True)  # what WLED's UI does for playlists
+                elif "win" not in body:
+                    preset = {k: v for k, v in body.items() if k not in ("n", "ql", "ps", "psave", "pdel", "o")}
+                    rest = {k: v for k, v in out.items() if k != "ps"}
+                    out = {**preset, **rest, "pd": ps}
+        seg = out.get("seg")
+        if isinstance(seg, dict) and "id" not in seg:
+            ids = [s.get("id") for s in (st.get("seg") or []) if isinstance(s, dict) and isinstance(s.get("id"), int)]
+            if ids:
+                out["seg"] = [{**seg, "id": i} for i in ids]
+        return out
+
     def set_state_all(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply the same state to every online, enabled device in parallel."""
+        """Apply the same state to every enabled controller in parallel.
+
+        Controllers marked offline are tried too (with a short timeout, at most
+        every few seconds): "all off" should reach a light that only missed a
+        couple of polls, and one that really is gone is reported, not skipped.
+        """
         with self._lock:
-            targets = [r for r in self._devices.values() if r.online and r.cfg.get("enabled", True)]
+            targets = [r for r in self._devices.values() if r.cfg.get("enabled", True)]
         results: Dict[str, Any] = {}
+        ps = payload.get("ps") if isinstance(payload, dict) else None
 
         def _one(rec: DeviceRecord):
+            did = rec.cfg["id"]
+            if not rec.online and time.monotonic() - rec.last_try < OFFLINE_RETRY_S:
+                results[did] = f"{rec.cfg.get('name')} is offline"
+                return
+            if isinstance(ps, int) and rec.presets and str(ps) not in rec.presets:
+                results[did] = f"{rec.cfg.get('name')} has no preset #{ps}"
+                return
+            rec.last_try = time.monotonic()
             try:
-                self.set_state(rec.cfg["id"], payload)
-                results[rec.cfg["id"]] = "ok"
+                self.set_state(did, payload, quick=not rec.online)
+                results[did] = "ok"
             except DeviceError as exc:
-                results[rec.cfg["id"]] = str(exc)
+                results[did] = str(exc)
 
         try:
             futures = [self._cmd_pool.submit(_one, r) for r in targets]
@@ -574,7 +688,7 @@ class DeviceManager:
                 continue
         return out
 
-    def apply_plans(self, plans: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    def apply_plans(self, plans: Dict[str, Dict[str, Any]], quick: Optional[set] = None) -> Dict[str, str]:
         """Send a different payload to each controller, all at once.
 
         ``plans`` maps device id to a WLED state payload.  Returns device id to
@@ -583,9 +697,11 @@ class DeviceManager:
         """
         results: Dict[str, str] = {}
 
+        quick = quick or set()
+
         def _one(did: str, payload: Dict[str, Any]):
             try:
-                self.set_state(did, payload)
+                self.set_state(did, payload, quick=did in quick)
                 results[did] = "ok"
             except DeviceError as exc:
                 results[did] = str(exc)
@@ -612,6 +728,7 @@ class DeviceManager:
         """
         plans: Dict[str, Dict[str, Any]] = {}
         rows: Dict[str, Dict[str, Any]] = {}
+        quick: set = set()
         for did in device_ids:
             try:
                 rec = self._get(did)
@@ -624,18 +741,28 @@ class DeviceManager:
                 row.update(status="skipped", message="disabled")
                 continue
             if not rec.online:
-                row.update(status="offline", message=rec.last_error or "offline")
-                continue
+                # Missed a couple of polls?  Give it a quick try (not on every
+                # slider tick, though) rather than leave it out.
+                if time.monotonic() - rec.last_try < OFFLINE_RETRY_S:
+                    row.update(status="offline", message=rec.last_error or "offline")
+                    continue
+                rec.last_try = time.monotonic()
+                quick.add(did)
             payload, notes = _intents.plan(view, intent)
             row["notes"] = notes
             if payload is None:
                 row.update(status="skipped", message="; ".join(notes))
                 continue
             plans[did] = payload
-        for did, outcome in self.apply_plans(plans).items():
+        if len(plans) > 1:
+            # Controllers with WLED's own sync turned on would otherwise each
+            # re-broadcast this change and fight over it (double fades).
+            for payload in plans.values():
+                payload["udpn"] = {"nn": True}
+        for did, outcome in self.apply_plans(plans, quick).items():
             row = rows[did]
             if outcome != "ok":
-                row.update(status="error", message=outcome)
+                row.update(status="offline" if did in quick else "error", message=outcome)
             elif row["notes"]:
                 row.update(status="partial", message="; ".join(row["notes"]))
         return [rows[did] for did in device_ids if did in rows]
@@ -738,12 +865,30 @@ class DeviceManager:
 
     def reload_catalog(self, device_id: str) -> Dict[str, Any]:
         rec = self._get(device_id)
-        with rec.lock:
-            try:
-                self._ensure_catalog(rec, force=True)
-            except WLEDError as exc:
-                raise DeviceError(str(exc))
+        try:
+            self._load_catalog(rec, force=True)
+        except WLEDError as exc:
+            raise DeviceError(str(exc))
         return self.full(device_id)
+
+    def identify(self, device_id: str, seconds: float = 3.0) -> None:
+        """Blink a controller white for a few seconds, then put it back as it was."""
+        rec = self._get(device_id)
+        view = self._view(rec)
+        identify_client(rec.client, seconds, blink_fx=view.effect_id("Blink"), lock=rec.lock)
+        rec.next_poll = time.monotonic() + seconds + 0.5
+
+    def rename_preset(self, device_id: str, slot: int, name: str, quick_label: str = "") -> List[Dict[str, Any]]:
+        """Rename a preset *keeping its content* (a plain ``psave`` would save
+        whatever the lights show right now into it, and destroy a playlist)."""
+        rec = self._get(device_id)
+        body = rec.presets.get(str(slot)) if isinstance(rec.presets, dict) else None
+        if not isinstance(body, dict) or not body:
+            raise DeviceError(f"{rec.cfg.get('name')} has no preset #{slot}")
+        content = {k: v for k, v in body.items() if k not in ("n", "ql", "psave", "pdel", "o", "v")}
+        if not content:
+            raise DeviceError("that preset is empty")
+        return self.save_preset(device_id, slot, name, quick_label=quick_label, state=content)
 
     def reboot(self, device_id: str) -> None:
         rec = self._get(device_id)
@@ -756,6 +901,46 @@ class DeviceManager:
 
     def client_for(self, device_id: str) -> WLEDClient:
         return self._get(device_id).client
+
+
+def identify_client(client: WLEDClient, seconds: float = 3.0, *, blink_fx: Optional[int] = None,
+                    lock: Optional[threading.Lock] = None) -> None:
+    """Make a controller blink so a person can see which one it is.
+
+    The current state is read first and restored afterwards (on a timer, so
+    the request returns straight away).  Raises :class:`DeviceError` if the
+    controller does not answer.
+    """
+    guard = lock or threading.Lock()
+    with guard:
+        try:
+            before = client.get_state()
+            segs = [s for s in (before.get("seg") or []) if isinstance(s, dict) and isinstance(s.get("id"), int)]
+            blink = {"id": 0, "fx": 1 if blink_fx is None else blink_fx, "sx": 230, "ix": 128, "col": [[255, 255, 255], [0, 0, 0]]}
+            client.set_state({"on": True, "bri": 255, "tt": 0,
+                              "seg": [{**blink, "id": s["id"]} for s in segs] or blink}, verbose=False)
+        except WLEDError as exc:
+            raise DeviceError(f"could not reach it ({exc})")
+    restore: Dict[str, Any] = {k: before[k] for k in ("on", "bri") if k in before}
+    restore["tt"] = 0
+    restore["seg"] = [{k: s[k] for k in ("id", "fx", "sx", "ix", "col", "pal", "c1", "c2", "c3") if k in s} for s in segs]
+    if not restore["seg"]:
+        restore.pop("seg")
+
+    def _put_back():
+        with guard:
+            try:
+                client.set_state(restore, verbose=False)
+            except WLEDError:
+                log.info("could not restore %s after identifying it", client.host)
+
+    timer = threading.Timer(max(1.0, min(10.0, seconds)), _put_back)
+    timer.daemon = True
+    timer.start()
+
+
+# How often a controller marked offline is tried again by a command.
+OFFLINE_RETRY_S = 10.0
 
 
 def _as_doc(value: Any) -> Dict[str, Any]:

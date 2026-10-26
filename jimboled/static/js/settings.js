@@ -46,11 +46,18 @@
       for (const d of devices) {
         const item = h('div', { class: 'list-item clickable' });
         item.append(el(`<span class="tile-icon" style="--tile-color:${esc(d.color || 'var(--accent)')}">${icon(d.icon || 'bulb')}</span>`));
-        item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: d.name }), h('span', { class: 'sub', text: `${d.host} · ${d.online ? 'online' + (d.info && d.info.ver ? ' · WLED ' + d.info.ver : '') : 'offline' + (d.last_error ? ' – ' + d.last_error : '')}` })));
+        const inf = d.info || {};
+        const health = d.online ? [
+          'online', inf.ver ? 'WLED ' + inf.ver : '', inf.led_count ? inf.led_count + ' LEDs' : '',
+          inf.signal != null ? `Wi-Fi ${inf.signal}%${inf.signal < 40 ? ' (weak)' : ''}` : '',
+          inf.power_ma ? `${(inf.power_ma / 1000).toFixed(1)} A` : '', inf.uptime ? 'up ' + UI.fmtDuration(inf.uptime) : '',
+        ].filter(Boolean).join(' · ') : (d.enabled === false ? 'disabled' : 'offline' + (d.last_error ? ' – ' + d.last_error : ''));
+        item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: d.name }), h('span', { class: 'sub', text: `${d.host} · ${health}` })));
         item.append(el(`<span class="status-dot ${d.online ? 'ok' : 'bad'}"></span>`));
+        const flash = el(`<button class="btn ghost icon sm" aria-label="Flash it" title="Flash it, to see which light it is" ${d.online ? '' : 'disabled'}>${icon('zap')}</button>`); flash.onclick = (e) => { e.stopPropagation(); Device.identify(d); };
         const edit = el(`<button class="btn ghost icon sm" aria-label="Edit">${icon('edit')}</button>`); edit.onclick = (e) => { e.stopPropagation(); Device.editDevice(d, draw); };
         const del = el(`<button class="btn ghost icon sm" aria-label="Remove">${icon('trash')}</button>`); del.onclick = (e) => { e.stopPropagation(); Device.removeDevice(d, draw); };
-        item.append(edit, del);
+        item.append(flash, edit, del);
         item.onclick = () => Device.openPanel(d.id, 'settings');
         list.append(item);
       }
@@ -95,9 +102,22 @@
         const item = h('div', { class: 'list-item' });
         item.append(el(`<span class="tile-icon">${icon('bulb')}</span>`));
         item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: f.name || f.host }), h('span', { class: 'sub', text: `${f.host}${f.ver ? ' · WLED ' + f.ver : ''}${f.led_count ? ' · ' + f.led_count + ' LEDs' : ''}` })));
+        const flash = el(`<button class="btn ghost icon sm" title="Flash it, to see which light it is" aria-label="Flash it">${icon('zap')}</button>`);
+        flash.onclick = () => api.post('/api/discover/identify', { host: f.host }).then((r) => UI.toast(`${f.name || f.host}: ${r.message}`, 'info')).catch(UI.notifyError);
+        item.append(flash);
         if (f.known) item.append(el(`<span class="badge ok">added</span>`));
         else { const b = el(`<button class="btn sm primary" data-busy="Adding…">${icon('plus')} Add</button>`); b.onclick = () => UI.busy(b, api.post('/api/devices', { host: f.host, name: f.name }).then(() => { UI.toast(`Added ${f.name || f.host}`, 'success'); f.known = true; draw(s); onDone && onDone(); if (window.App) App.refresh(); }).catch(UI.notifyError)); item.append(b); }
         list.append(item);
+      }
+      const fresh = all.filter((f) => !f.known && f.name);
+      if (!s.running && fresh.length > 1) {
+        const addAll = el(`<button class="btn primary" data-busy="Adding…">${icon('plus')} Add all ${fresh.length}</button>`);
+        addAll.onclick = () => UI.busy(addAll, (async () => {
+          let added = 0;
+          for (const f of fresh) { try { await api.post('/api/devices', { host: f.host, name: f.name }); f.known = true; added++; } catch (e) { UI.notifyError(e); } }
+          UI.toast(`Added ${added} controller${added === 1 ? '' : 's'}`, 'success'); draw(s); onDone && onDone(); if (window.App) App.refresh(true);
+        })());
+        list.prepend(h('div', { class: 'row end' }, addAll));
       }
       if (s.errors && s.errors.length) list.append(el(`<div class="alert warn">${esc(s.errors.join(' '))}</div>`));
     }
@@ -184,7 +204,7 @@
       for (const s of scenes) {
         const item = h('div', { class: 'list-item' });
         item.append(el(`<span class="tile-icon" style="--tile-color:${esc(s.color || 'var(--accent)')}">${icon(s.icon || 'sparkles')}</span>`), h('div', { class: 'grow' }, h('span', { class: 'title', text: s.name }), h('span', { class: 'sub', text: sceneSummary(s) })));
-        const run = el(`<button class="btn sm">${icon('play')} Run</button>`); run.onclick = () => api.post(`/api/scenes/${s.id}/run`).then((r) => UI.toast(r.failed.length ? 'Scene ran with errors: ' + r.failed.map((f) => f.error).join('; ') : 'Scene applied', r.failed.length ? 'error' : 'success')).catch(UI.notifyError);
+        const run = el(`<button class="btn sm">${icon('play')} Run</button>`); run.onclick = () => api.post(`/api/scenes/${s.id}/run`, {}, { timeout: 75000 }).then((r) => UI.toast(r.failed.length ? 'Scene ran with errors: ' + r.failed.map((f) => f.error).join('; ') : 'Scene applied', r.failed.length ? 'error' : 'success')).catch(UI.notifyError);
         const edit = el(`<button class="btn ghost icon sm">${icon('edit')}</button>`); edit.onclick = () => sceneDialog(s, draw);
         const del = el(`<button class="btn ghost icon sm">${icon('trash')}</button>`); del.onclick = async () => { if (await UI.confirm({ title: 'Delete scene', message: `Delete "${s.name}"?`, okText: 'Delete', danger: true })) { await api.del(`/api/scenes/${s.id}`).catch(UI.notifyError); draw(); if (window.App) App.refresh(); } };
         item.append(run, edit, del);
@@ -220,7 +240,10 @@
     function actionRow(a, i) {
       const row = h('div', { class: 'list-item scene-action', style: { flexWrap: 'wrap' } });
       const type = h('select', { class: 'select', style: { width: '230px' } });
-      TYPES.forEach(([v, t]) => type.append(h('option', { value: v, text: t, selected: a.type === v })));
+      // "All lights: exact state" sends the same numbers to every controller,
+      // and preset or effect numbers mean different things on each one, so
+      // it is only kept for scenes that already use it.  "Lights" does it by name.
+      TYPES.filter(([v]) => v !== 'all' || a.type === 'all').forEach(([v, t]) => type.append(h('option', { value: v, text: t, selected: a.type === v })));
       type.onchange = () => { collect(false); a.type = type.value; if (a.type === 'device') { a.ref = devs[0]?.id; a.state = a.state || { on: true }; } if (a.type === 'all') { a.state = a.state || { on: true }; } if (a.type === 'switch') { a.ref = sws[0]?.id; a.action = 'off'; } if (a.type === 'delay') { a.ms = 1000; } if (a.type === 'lights') { a.target = a.target || 'all'; a.intent = a.intent || { on: true }; } draw(); };
       row.append(type);
       if (a.type === 'lights') {
@@ -240,7 +263,8 @@
           row.append(h('span', { class: 'badge accent', title: 'Colours, effect and segments exactly as they were captured', text: `saved look · ${st.seg.length} segment${st.seg.length === 1 ? '' : 's'}` }));
         } else {
           const ps = h('input', { class: 'input', type: 'number', min: 1, max: 250, value: st.ps || '', placeholder: 'preset #', style: { width: '100px' } }); ps.onchange = () => { if (ps.value) a.state.ps = +ps.value; else delete a.state.ps; };
-          const col = h('input', { class: 'input mono', value: st.seg && st.seg.col ? Color.rgbToHex(st.seg.col[0]) : '', placeholder: '#colour', style: { width: '100px' } }); col.onchange = () => { const rgb = Color.hexToRgb(col.value); if (rgb) a.state.seg = { col: [rgb], fx: 0 }; else delete a.state.seg; };
+          const first = st.seg && Array.isArray(st.seg.col) ? st.seg.col[0] : null;  // [r,g,b], or a kelvin number
+          const col = h('input', { class: 'input mono', value: Array.isArray(first) ? Color.rgbToHex(first) : (first ? String(first) : ''), placeholder: '#colour', style: { width: '100px' } }); col.onchange = () => { const rgb = Color.hexToRgb(col.value); if (rgb) a.state.seg = { col: [rgb], fx: 0 }; else delete a.state.seg; };
           row.append(ps, col);
         }
       } else if (a.type === 'switch') {
@@ -265,7 +289,14 @@
     const body = h('div', { class: 'stack' }, UI.field('Scene name', name), h('h4', { text: 'Actions (run in order)' }), list, h('div', { class: 'row wrap' }, add, capture), h('h4', { text: 'Icon' }), UI.iconPicker(scene.icon, (n) => { scene.icon = n; }), h('h4', { text: 'Colour' }), UI.colorPicker(scene.color, (c) => { scene.color = c; }));
     draw();
     const save = el(`<button class="btn primary" data-busy="Saving…">Save scene</button>`);
-    const m = UI.modal({ title: existing ? 'Edit scene' : 'New scene', icon: 'sparkles', body, footer: [save], wide: true, sticky: true });
+    const tryIt = el(`<button class="btn" data-busy="Running…">${icon('play')} Try it</button>`);
+    tryIt.onclick = () => UI.busy(tryIt, (async () => {
+      collect(true);
+      const r = await api.post('/api/scenes/test', { actions: scene.actions }, { timeout: 75000 });
+      UI.toast(r.failed.length ? 'Ran with problems: ' + r.failed.map((f) => f.error).join('; ') : 'That is how it looks', r.failed.length ? 'error' : 'success');
+      if (window.App) App.refresh();
+    })().catch(UI.notifyError));
+    const m = UI.modal({ title: existing ? 'Edit scene' : 'New scene', icon: 'sparkles', body, footer: [tryIt, save], wide: true, sticky: true });
     save.onclick = () => UI.busy(save, (async () => {
       collect(true);
       scene.name = name.value.trim();

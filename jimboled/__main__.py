@@ -48,7 +48,7 @@ def main(argv=None) -> int:
             except Exception:
                 logging.getLogger("jimboled").exception("error stopping the device poller")
             try:
-                ctx.discovery.listener.stop()
+                ctx.discovery.stop()
             except Exception:
                 pass
             sys.exit(0)
