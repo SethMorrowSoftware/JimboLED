@@ -208,3 +208,29 @@ def test_lights_scene_runs(client, two):
 def test_favourite_colours(client):
     r = client.put("/api/dashboard", json={"favorite_colors": ["#FF0000", "#ff0000", "bad", "#00ff00"]})
     assert r.json["dashboard"]["favorite_colors"] == ["#ff0000", "#00ff00"]
+
+
+def test_kelvin_is_done_the_best_way_each_strip_can():
+    def view(lc):
+        return _view(info={"leds": {"lc": lc}}, state={"on": True, "bri": 10, "seg": [
+            {"id": 0, "start": 0, "stop": 10, "col": [[1, 2, 3, 4], [0, 0, 0, 0], [0, 0, 0, 0]], "fx": 0}]})
+    rgb, _ = I.plan(view(1), I.normalise_intent({"kelvin": 2700}))
+    rgbw, _ = I.plan(view(3), I.normalise_intent({"kelvin": 2700}))
+    cct, _ = I.plan(view(7), I.normalise_intent({"kelvin": 2700}))
+    assert rgb["seg"][0]["col"][0] == I.kelvin_to_rgb(2700)
+    assert rgbw["seg"][0]["col"][0][3] == 255
+    assert cct["seg"][0]["col"][0] == [0, 0, 0, 255] and cct["seg"][0]["cct"] == I.kelvin_to_cct(2700)
+    assert I.kelvin_to_cct(1900) == 0 and I.kelvin_to_cct(20000) == 255
+
+
+def test_stored_intents_survive_being_saved_again():
+    first = I.normalise_intent({"nightlight": {"on": True, "minutes": 30, "mode": "fade", "target": 10},
+                                "color": "#ff0000", "kelvin": 3000, "best_effort": True, "transition": 1.5})
+    assert I.normalise_intent(first) == first
+    assert first["nightlight"] == {"on": True, "dur": 30, "mode": 1, "tbri": 10}
+
+
+def test_dashboard_lists_groups(client):
+    client.post("/api/groups", json={"name": "Kitchen"})
+    d = client.get("/api/dashboard").json
+    assert [g["name"] for g in d["groups"]] == ["Kitchen"]

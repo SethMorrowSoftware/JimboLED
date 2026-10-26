@@ -71,6 +71,7 @@
       { label: 'Refresh now', icon: 'refresh', onClick: () => reload(true) },
       { label: 'Open WLED\'s own page', icon: 'externalLink', onClick: () => window.open(`http://${d.host}`, '_blank') },
       { label: 'Reload effect list', icon: 'list', onClick: async () => { try { d = (await api.post(`/api/devices/${d.id}/catalog`)).device; render(); UI.toast('Effects reloaded', 'success'); } catch (e) { UI.notifyError(e); } } },
+      { label: 'Copy this look to other lights…', icon: 'layers', onClick: () => Lights.copyLookDialog(d) },
       '-',
       { label: 'Reboot controller', icon: 'rotate', onClick: async () => { if (await UI.confirm({ title: 'Reboot', message: `Reboot ${d.name}? Lights go off for a few seconds.`, okText: 'Reboot' })) { try { await api.post(`/api/devices/${d.id}/reboot`); UI.toast('Rebooting…', 'success'); } catch (e) { UI.notifyError(e); } } } },
       { label: 'Remove from dashboard', icon: 'trash', danger: true, onClick: () => removeDevice(d, () => m.close()) },
@@ -335,6 +336,7 @@
       { label: 'Apply', icon: 'play', onClick: () => send(d, { ps: p.id }).then(() => refreshPanel(d.id, 'presets')) },
       { label: 'Overwrite with current look', icon: 'save', onClick: async () => { if (await UI.confirm({ title: 'Overwrite preset', message: `Replace "${p.name}" with the current look?`, okText: 'Overwrite' })) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name: p.name, quick_label: p.quick_label }); UI.toast('Preset updated', 'success'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
       { label: 'Rename', icon: 'edit', onClick: async () => { const name = await UI.prompt({ title: 'Rename preset', label: 'Name', value: p.name, maxlength: 32 }); if (name && name !== p.name) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name, quick_label: p.quick_label }); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
+      { label: 'Copy to other lights…', icon: 'layers', onClick: () => (p.is_playlist ? UI.toast('Playlists point at other presets by number, so they can\'t be copied. Copy the presets in it instead.', 'error', 8000) : Lights.copyPresetDialog(d, p)) },
       '-',
       { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await UI.confirm({ title: 'Delete preset', message: `Delete "${p.name}" from ${d.name}?`, okText: 'Delete', danger: true })) { try { await api.del(`/api/devices/${d.id}/presets/${p.id}`); UI.toast('Preset deleted', 'success'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
     ]);
@@ -508,5 +510,5 @@
     host.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
   }
 
-  window.Device = { tileBody, openPanel, send, editDevice, removeDevice, addDeviceDialog, isOn, mainColors, signalIcon };
+  window.Device = { tileBody, openPanel, send, editDevice, removeDevice, addDeviceDialog, isOn, mainColors, signalIcon, paletteGradient };
 })();

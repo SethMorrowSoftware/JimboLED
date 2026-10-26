@@ -179,7 +179,8 @@ def get_dashboard():
     if cfg["dashboard"].get("tiles") != before:
         ctx.store.update(sync_tiles)
         dash = ctx.store.section("dashboard")
-    return ok({"dashboard": dash, "setup_complete": cfg.get("setup_complete", False)})
+    return ok({"dashboard": dash, "setup_complete": cfg.get("setup_complete", False),
+               "groups": [g for g in cfg.get("groups", []) if isinstance(g, dict)]})
 
 
 @bp.put("/dashboard")

@@ -559,7 +559,9 @@ class DeviceManager:
             state=_as_doc(rec.state),
             info=_as_doc(rec.info),
             effects=rec.catalog,
-            palettes=palette_catalog(rec.palettes, _as_doc(rec.info)),
+            # Previews included so the all-lights panel can draw gradients.
+            palettes=_with_previews(palette_catalog(rec.palettes, _as_doc(rec.info)),
+                                    rec.palette_data if isinstance(rec.palette_data, dict) else {}),
             presets=rec.presets if isinstance(rec.presets, dict) else {},
         )
 

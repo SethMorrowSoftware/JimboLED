@@ -1,13 +1,18 @@
-/* Settings pages: devices, switches, scenes, appearance, security, system, backup. */
+/* Settings pages: devices, groups, switches, scenes, schedules, appearance,
+   security, integrations, system, backup.  Groups, schedules and
+   integrations live in automation.js. */
 (function () {
   const { h, el, esc } = UI;
   const SECTIONS = [
     { id: 'devices', label: 'Controllers', icon: 'bulb' },
+    { id: 'groups', label: 'Groups', icon: 'home' },
     { id: 'switches', label: 'Switches', icon: 'switch' },
     { id: 'scenes', label: 'Scenes', icon: 'sparkles' },
+    { id: 'schedules', label: 'Schedules', icon: 'clock' },
     { id: 'estop', label: 'Emergency stop', icon: 'estop' },
     { id: 'appearance', label: 'Appearance', icon: 'palette' },
     { id: 'security', label: 'Security', icon: 'lock' },
+    { id: 'integrations', label: 'Integrations', icon: 'key' },
     { id: 'system', label: 'System', icon: 'cpu' },
     { id: 'backup', label: 'Backup', icon: 'box' },
   ];
@@ -20,7 +25,7 @@
     main.innerHTML = '';
     main.append(h('div', { class: 'row between', style: { marginBottom: '12px' } }, h('h2', { text: 'Settings' }), el(`<a class="btn" href="#/">${icon('arrowLeft')} Back to dashboard</a>`)));
     main.append(h('div', { class: 'settings' }, nav, body));
-    ({ devices: devicesSection, switches: switchesSection, scenes: scenesSection, estop: estopSection, appearance: appearanceSection, security: securitySection, system: systemSection, backup: backupSection })[section](body);
+    ({ devices: devicesSection, groups: Automation.groupsSection, switches: switchesSection, scenes: scenesSection, schedules: Automation.schedulesSection, estop: estopSection, appearance: appearanceSection, security: securitySection, integrations: Automation.integrationsSection, system: systemSection, backup: backupSection })[section](body);
   }
 
   // ---------------------------------------------------------- devices
@@ -178,7 +183,7 @@
       if (!scenes.length) list.append(el(`<div class="empty">${icon('sparkles')}<h3>No scenes yet</h3></div>`));
       for (const s of scenes) {
         const item = h('div', { class: 'list-item' });
-        item.append(el(`<span class="tile-icon" style="--tile-color:${esc(s.color || 'var(--accent)')}">${icon(s.icon || 'sparkles')}</span>`), h('div', { class: 'grow' }, h('span', { class: 'title', text: s.name }), h('span', { class: 'sub', text: `${s.actions.length} action${s.actions.length === 1 ? '' : 's'}` })));
+        item.append(el(`<span class="tile-icon" style="--tile-color:${esc(s.color || 'var(--accent)')}">${icon(s.icon || 'sparkles')}</span>`), h('div', { class: 'grow' }, h('span', { class: 'title', text: s.name }), h('span', { class: 'sub', text: sceneSummary(s) })));
         const run = el(`<button class="btn sm">${icon('play')} Run</button>`); run.onclick = () => api.post(`/api/scenes/${s.id}/run`).then((r) => UI.toast(r.failed.length ? 'Scene ran with errors: ' + r.failed.map((f) => f.error).join('; ') : 'Scene applied', r.failed.length ? 'error' : 'success')).catch(UI.notifyError);
         const edit = el(`<button class="btn ghost icon sm">${icon('edit')}</button>`); edit.onclick = () => sceneDialog(s, draw);
         const del = el(`<button class="btn ghost icon sm">${icon('trash')}</button>`); del.onclick = async () => { if (await UI.confirm({ title: 'Delete scene', message: `Delete "${s.name}"?`, okText: 'Delete', danger: true })) { await api.del(`/api/scenes/${s.id}`).catch(UI.notifyError); draw(); if (window.App) App.refresh(); } };
@@ -188,44 +193,86 @@
     }
     draw();
   }
+  function sceneSummary(s) {
+    const bits = s.actions.slice(0, 3).map((a) => {
+      if (a.type === 'lights') return `${Lights.targetLabel(a.target)}: ${Lights.describeIntent(a.intent)}`;
+      if (a.type === 'device') return a.label || 'one light';
+      if (a.type === 'all') return 'all lights';
+      if (a.type === 'switch') return `switch ${a.action}`;
+      if (a.type === 'all_off') return 'everything off';
+      return `wait ${((a.ms || 0) / 1000).toFixed(1)} s`;
+    });
+    return bits.join(' → ') + (s.actions.length > 3 ? ` (+${s.actions.length - 3} more)` : '');
+  }
   async function sceneDialog(existing, onDone) {
     const [devs, sws] = await Promise.all([api.get('/api/devices').then((r) => r.devices), api.get('/api/gpio/switches').then((r) => r.switches)]);
     const scene = existing ? JSON.parse(JSON.stringify(existing)) : { name: '', icon: 'sparkles', color: '', actions: [] };
     const name = h('input', { class: 'input', value: scene.name, placeholder: 'e.g. Goodnight', maxlength: 60 });
     const list = h('div', { class: 'list' });
+    const editors = new Map(); // action -> {target, intent} controls of a "lights" row
+    const TYPES = [['lights', 'Lights: colour, preset, effect…'], ['device', 'One light: exact saved look'], ['all', 'All lights: exact state'], ['switch', 'Switch'], ['all_off', 'Everything off'], ['delay', 'Wait']];
+    /** Pull what is typed into "lights" rows back into the actions (before a redraw or save). */
+    function collect(strict) {
+      for (const [a, ed] of editors) {
+        try { a.target = ed.target.getValue(); a.intent = ed.intent.getValue(); } catch (e) { if (strict) throw e; }
+      }
+    }
     function actionRow(a, i) {
-      const row = h('div', { class: 'list-item', style: { flexWrap: 'wrap' } });
-      const type = h('select', { class: 'select', style: { width: '150px' } });
-      [['all', 'All lights'], ['device', 'One controller'], ['switch', 'Switch'], ['delay', 'Wait']].forEach(([v, t]) => type.append(h('option', { value: v, text: t, selected: a.type === v })));
-      type.onchange = () => { a.type = type.value; if (a.type === 'device') { a.ref = devs[0]?.id; a.state = a.state || { on: true }; } if (a.type === 'all') { a.state = a.state || { on: true }; } if (a.type === 'switch') { a.ref = sws[0]?.id; a.action = 'off'; } if (a.type === 'delay') { a.ms = 1000; } draw(); };
+      const row = h('div', { class: 'list-item scene-action', style: { flexWrap: 'wrap' } });
+      const type = h('select', { class: 'select', style: { width: '230px' } });
+      TYPES.forEach(([v, t]) => type.append(h('option', { value: v, text: t, selected: a.type === v })));
+      type.onchange = () => { collect(false); a.type = type.value; if (a.type === 'device') { a.ref = devs[0]?.id; a.state = a.state || { on: true }; } if (a.type === 'all') { a.state = a.state || { on: true }; } if (a.type === 'switch') { a.ref = sws[0]?.id; a.action = 'off'; } if (a.type === 'delay') { a.ms = 1000; } if (a.type === 'lights') { a.target = a.target || 'all'; a.intent = a.intent || { on: true }; } draw(); };
       row.append(type);
-      if (a.type === 'device' || a.type === 'all') {
+      if (a.type === 'lights') {
+        const tgt = Lights.targetSelect(a.target || 'all');
+        const intent = Lights.intentEditor(a.intent || { on: true });
+        editors.set(a, { target: tgt, intent });
+        row.append(tgt, h('div', { style: { flexBasis: '100%' } }, intent));
+      } else if (a.type === 'device' || a.type === 'all') {
         if (a.type === 'device') { const ref = h('select', { class: 'select', style: { width: '180px' } }); for (const d of devs) ref.append(h('option', { value: d.id, text: d.name, selected: d.id === a.ref })); ref.onchange = () => { a.ref = ref.value; }; row.append(ref); }
         const st = a.state || {};
         const on = h('select', { class: 'select', style: { width: '110px' } }); [['on', 'Turn on'], ['off', 'Turn off']].forEach(([v, t]) => on.append(h('option', { value: v, text: t, selected: (st.on === false ? 'off' : 'on') === v }))); on.onchange = () => { a.state.on = on.value === 'on'; };
         const bri = h('input', { class: 'input', type: 'number', min: 1, max: 255, value: st.bri || '', placeholder: 'brightness', style: { width: '110px' } }); bri.onchange = () => { if (bri.value) a.state.bri = +bri.value; else delete a.state.bri; };
-        const ps = h('input', { class: 'input', type: 'number', min: 1, max: 250, value: st.ps || '', placeholder: 'preset #', style: { width: '100px' } }); ps.onchange = () => { if (ps.value) a.state.ps = +ps.value; else delete a.state.ps; };
-        const col = h('input', { class: 'input mono', value: st.seg && st.seg.col ? Color.rgbToHex(st.seg.col[0]) : '', placeholder: '#colour', style: { width: '100px' } }); col.onchange = () => { const rgb = Color.hexToRgb(col.value); if (rgb) a.state.seg = { col: [rgb], fx: 0 }; else delete a.state.seg; };
-        row.append(on, bri, ps, col);
+        row.append(on, bri);
+        if (Array.isArray(st.seg)) {
+          // A captured look: every segment exactly as it was.  Not editable
+          // field by field, but it can be re-captured.
+          row.append(h('span', { class: 'badge accent', title: 'Colours, effect and segments exactly as they were captured', text: `saved look · ${st.seg.length} segment${st.seg.length === 1 ? '' : 's'}` }));
+        } else {
+          const ps = h('input', { class: 'input', type: 'number', min: 1, max: 250, value: st.ps || '', placeholder: 'preset #', style: { width: '100px' } }); ps.onchange = () => { if (ps.value) a.state.ps = +ps.value; else delete a.state.ps; };
+          const col = h('input', { class: 'input mono', value: st.seg && st.seg.col ? Color.rgbToHex(st.seg.col[0]) : '', placeholder: '#colour', style: { width: '100px' } }); col.onchange = () => { const rgb = Color.hexToRgb(col.value); if (rgb) a.state.seg = { col: [rgb], fx: 0 }; else delete a.state.seg; };
+          row.append(ps, col);
+        }
       } else if (a.type === 'switch') {
         const ref = h('select', { class: 'select', style: { width: '180px' } }); for (const s of sws) ref.append(h('option', { value: s.id, text: s.name, selected: s.id === a.ref })); ref.onchange = () => { a.ref = ref.value; };
         const act = h('select', { class: 'select', style: { width: '120px' } }); ['off', 'on', 'toggle', 'pulse'].forEach((v) => act.append(h('option', { value: v, text: v, selected: a.action === v }))); act.onchange = () => { a.action = act.value; };
         row.append(ref, act, h('span', { class: 'small muted', text: 'hold-to-run switches only accept "off"' }));
+      } else if (a.type === 'all_off') {
+        row.append(h('span', { class: 'small muted', text: 'every light and every relay off' }));
       } else {
         const ms = h('input', { class: 'input', type: 'number', min: 0, max: 10000, step: 100, value: a.ms || 1000, style: { width: '120px' } }); ms.onchange = () => { a.ms = +ms.value; };
         row.append(ms, h('span', { class: 'small muted', text: 'milliseconds' }));
       }
-      const rm = el(`<button class="btn ghost icon sm">${icon('x')}</button>`); rm.onclick = () => { scene.actions.splice(i, 1); draw(); };
-      row.append(rm);
+      const up = el(`<button class="btn ghost icon sm" title="Move up">${icon('up')}</button>`); up.onclick = () => { if (i > 0) { collect(false); scene.actions.splice(i - 1, 0, scene.actions.splice(i, 1)[0]); draw(); } };
+      const rm = el(`<button class="btn ghost icon sm" title="Remove">${icon('x')}</button>`); rm.onclick = () => { collect(false); scene.actions.splice(i, 1); draw(); };
+      row.append(h('div', { class: 'row', style: { marginLeft: 'auto', gap: '2px' } }, up, rm));
       return row;
     }
-    function draw() { list.innerHTML = ''; scene.actions.forEach((a, i) => list.append(actionRow(a, i))); }
-    const add = el(`<button class="btn sm">${icon('plus')} Add action</button>`); add.onclick = () => { scene.actions.push({ type: 'all', state: { on: true } }); draw(); };
-    const body = h('div', { class: 'stack' }, UI.field('Scene name', name), h('h4', { text: 'Actions (run in order)' }), list, add, h('h4', { text: 'Icon' }), UI.iconPicker(scene.icon, (n) => { scene.icon = n; }), h('h4', { text: 'Colour' }), UI.colorPicker(scene.color, (c) => { scene.color = c; }));
+    function draw() { editors.clear(); list.innerHTML = ''; scene.actions.forEach((a, i) => list.append(actionRow(a, i))); if (!scene.actions.length) list.append(h('div', { class: 'small muted', text: 'No actions yet. Add one, or capture how the lights look right now.' })); }
+    const add = el(`<button class="btn sm">${icon('plus')} Add action</button>`); add.onclick = () => { collect(false); scene.actions.push({ type: 'lights', target: 'all', intent: { on: true } }); draw(); };
+    const capture = el(`<button class="btn sm" data-busy="Capturing…">${icon('save')} Capture the lights as they are now</button>`);
+    capture.onclick = () => UI.busy(capture, (async () => { collect(false); const r = await api.post('/api/lights/capture', { target: 'all' }); scene.actions.push(...r.actions); draw(); UI.toast(`Captured ${r.captured} light${r.captured === 1 ? '' : 's'}${r.captured < r.of ? ` (${r.of - r.captured} offline)` : ''}`, 'success'); })().catch(UI.notifyError));
+    const body = h('div', { class: 'stack' }, UI.field('Scene name', name), h('h4', { text: 'Actions (run in order)' }), list, h('div', { class: 'row wrap' }, add, capture), h('h4', { text: 'Icon' }), UI.iconPicker(scene.icon, (n) => { scene.icon = n; }), h('h4', { text: 'Colour' }), UI.colorPicker(scene.color, (c) => { scene.color = c; }));
     draw();
     const save = el(`<button class="btn primary" data-busy="Saving…">Save scene</button>`);
     const m = UI.modal({ title: existing ? 'Edit scene' : 'New scene', icon: 'sparkles', body, footer: [save], wide: true, sticky: true });
-    save.onclick = () => UI.busy(save, (async () => { scene.name = name.value.trim(); if (existing) await api.put(`/api/scenes/${existing.id}`, scene); else await api.post('/api/scenes', scene); UI.toast('Scene saved', 'success'); m.close(); onDone && onDone(); if (window.App) App.refresh(); })().catch(UI.notifyError));
+    save.onclick = () => UI.busy(save, (async () => {
+      collect(true);
+      scene.name = name.value.trim();
+      const payload = { ...scene, actions: scene.actions };
+      if (existing) await api.put(`/api/scenes/${existing.id}`, payload); else await api.post('/api/scenes', payload);
+      UI.toast('Scene saved', 'success'); m.close(); onDone && onDone(); if (window.App) App.refresh(true);
+    })().catch(UI.notifyError));
   }
 
 
@@ -517,6 +564,7 @@
     const showOffline = h('input', { type: 'checkbox', checked: dash.show_offline !== false });
     const showClock = h('input', { type: 'checkbox', checked: dash.show_clock !== false });
     const showEstop = h('input', { type: 'checkbox', checked: dash.show_estop !== false });
+    const showLights = h('input', { type: 'checkbox', checked: dash.show_lights_button !== false });
 
     const save = el(`<button class="btn primary" data-busy="Saving…">Save appearance</button>`);
     save.onclick = () => UI.busy(save, api.put('/api/dashboard', {
@@ -524,6 +572,7 @@
       theme: live.theme, accent: live.accent, density: live.density,
       radius: live.radius, text_scale: live.text_scale,
       show_offline: showOffline.checked, show_clock: showClock.checked, show_estop: showEstop.checked,
+      show_lights_button: showLights.checked,
     }).then(() => { Object.assign(original, live); UI.toast('Saved', 'success'); if (window.App) App.refresh(true); }).catch(UI.notifyError));
 
     const revert = el(`<button class="btn ghost">Undo changes</button>`);
@@ -541,7 +590,27 @@
       h('label', { class: 'check' }, showOffline, h('span', { text: 'Show controllers that are offline' })),
       h('label', { class: 'check' }, showClock, h('span', { text: 'Show the clock in the header' })),
       h('label', { class: 'check' }, showEstop, h('span', { text: 'Show the emergency stop button in the header' })),
+      h('label', { class: 'check' }, showLights, h('span', { text: 'Show the Lights button (every light at once) in the header' })),
       h('div', { class: 'row end' }, revert, save)));
+
+    // Favourite colours: shown first in the Lights panel and on group tiles.
+    const favs = [...(dash.favorite_colors || [])];
+    const favRow = h('div', { class: 'row wrap' });
+    const saveFavs = () => api.put('/api/dashboard', { favorite_colors: favs }).then(() => { drawFavs(); if (window.App) App.refresh(true); }).catch(UI.notifyError);
+    const pick = h('input', { type: 'color', class: 'color-input', value: '#ff8000', 'aria-label': 'Colour to add' });
+    const addFav = el(`<button class="btn sm">${icon('plus')} Add</button>`);
+    addFav.onclick = () => { const c = pick.value.toLowerCase(); if (!favs.includes(c)) { favs.push(c); saveFavs(); } };
+    function drawFavs() {
+      favRow.innerHTML = '';
+      if (!favs.length) favRow.append(h('span', { class: 'small muted', text: 'None yet. Add some here, or use “Add to favourites” in the Lights panel colour picker.' }));
+      favs.forEach((c, i) => {
+        const b = h('button', { type: 'button', class: 'swatch lg fav', style: { background: c }, title: `Remove ${c}`, 'aria-label': `Remove favourite ${c}` });
+        b.onclick = () => { favs.splice(i, 1); saveFavs(); };
+        favRow.append(b);
+      });
+    }
+    drawFavs();
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Favourite colours' }), h('span', { class: 'hint', text: 'Tap one to remove it' })), favRow, h('div', { class: 'row' }, pick, addFav)));
 
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Dashboard layout' })), el(`<p class="muted small">Use <b>Edit layout</b> on the dashboard to drag tiles into any order, resize them, hide the ones you don't need, rename them, and add headings, notes or a clock.</p>`), h('div', { class: 'row' }, el(`<a class="btn" href="#/?edit=1">${icon('edit')} Edit the layout</a>`))));
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Add to home screen' })), el(`<p class="muted small">On a phone or tablet, open this page in Safari or Chrome and choose <b>Add to Home Screen</b>. JimboLED then opens like an app, full screen.</p>`)));
@@ -622,5 +691,5 @@
     draw();
   }
 
-  window.Settings = { render, discoverDialog, bedTemplate, sceneDialog, SECTIONS };
+  window.Settings = { render, discoverDialog, bedTemplate, sceneDialog, sceneSummary, SECTIONS };
 })();

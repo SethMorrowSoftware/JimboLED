@@ -3,7 +3,7 @@
   const { h, el, esc } = UI;
   const POLL_MS = 2000;
   const App = {
-    state: { devices: [], gpio: { switches: [] }, dashboard: null, rev: -1, cfgRev: -1, presets: {}, presetsMeta: {} },
+    state: { devices: [], gpio: { switches: [] }, dashboard: null, groups: [], rev: -1, cfgRev: -1, presets: {}, presetsMeta: {} },
     editMode: false,
     tiles: new Map(), // tile id -> {el, kind, update}
     route: { view: 'dashboard' },
@@ -38,7 +38,8 @@
       // The layout only changes when the configuration changes, so fetch it lazily.
       if (full || !App.state.dashboard || s.cfg_rev !== prevCfg) {
         const d = await api.get('/api/dashboard', { timeout: STATE_TIMEOUT_MS });
-        App.state.dashboard = d.dashboard; App.state.setupComplete = d.setup_complete;
+        App.state.dashboard = d.dashboard; App.state.setupComplete = d.setup_complete; App.state.groups = d.groups || [];
+        if (window.Lights) Lights.clearCache();
         applyTheme(d.dashboard);
       }
       if (App.route.view === 'dashboard') renderDashboard();
@@ -51,6 +52,8 @@
     } finally { inflight = false; }
   }
   App.refresh = refresh;
+  /** Adopt a fresh device list (the lights API returns one after every change). */
+  App.setDevices = (list) => { if (Array.isArray(list)) { App.state.devices = list; updateTiles(); renderTopbar(); } };
   App.patchDevice = (dev) => { const i = App.state.devices.findIndex((d) => d.id === dev.id); if (i >= 0) App.state.devices[i] = { ...App.state.devices[i], ...dev }; else App.state.devices.push(dev); updateTiles(); };
   function setOffline(off) { document.getElementById('topbar').classList.toggle('offline', off); const st = document.getElementById('topbar-status'); if (off) st.innerHTML = `<span class="pill"><span class="dot bad"></span>Reconnecting to JimboLED…</span>`; }
   function applyTheme(dash) {
@@ -82,7 +85,8 @@
     st.innerHTML = pieces.join('');
     const pd = document.getElementById('pill-devices'); if (pd) pd.onclick = () => { location.hash = '#/settings/devices'; };
     const actions = document.getElementById('topbar-actions');
-    const sig = App.route.view + App.editMode + showEstop();
+    const showLights = App.route.view === 'dashboard' && devs.length > 0 && !(App.state.dashboard && App.state.dashboard.show_lights_button === false);
+    const sig = App.route.view + App.editMode + showEstop() + showLights;
     if (actions.dataset.rendered !== sig) {
       actions.dataset.rendered = sig;
       actions.innerHTML = '';
@@ -93,6 +97,11 @@
         const edit = el(`<button class="btn sm ${App.editMode ? 'primary' : ''}" title="Rearrange, resize and hide tiles">${icon(App.editMode ? 'check' : 'edit')}<span class="hide-sm">${App.editMode ? 'Done' : 'Edit layout'}</span></button>`);
         edit.onclick = () => setEditMode(!App.editMode);
         const settings = el(`<a class="btn icon sm ghost" href="#/settings" title="Settings">${icon('settings')}</a>`);
+        if (showLights) {
+          const lights = el(`<button class="btn sm primary" title="Colour, presets and effects for every light at once">${icon('sun')}<span class="hide-sm">Lights</span></button>`);
+          lights.onclick = () => Lights.open('all');
+          actions.append(lights);
+        }
         actions.append(panic, edit, settings);
       } else if (App.route.view === 'settings') {
         actions.append(el(`<a class="btn sm" href="#/">${icon('grid')}<span class="hide-sm">Dashboard</span></a>`));
@@ -168,7 +177,11 @@
     if (node) main.insertBefore(node, main.firstChild);
   }
   function destroyTiles() { for (const ent of App.tiles.values()) { try { ent.destroy && ent.destroy(); } catch (e) {} } App.tiles.clear(); }
-  function tileSignature(t) { return [t.type, t.ref, t.size, t.hidden, t.name, t.icon, t.color, JSON.stringify(t.opts || {})].join('|'); }
+  function tileSignature(t) {
+    const extra = t.type === 'group' ? JSON.stringify((App.state.groups || []).find((g) => g.id === t.ref) || null)
+      : (t.type === 'all' ? JSON.stringify((App.state.dashboard && App.state.dashboard.favorite_colors) || []) : '');
+    return [t.type, t.ref, t.size, t.hidden, t.name, t.icon, t.color, JSON.stringify(t.opts || {}), extra].join('|');
+  }
   function updateTiles() {
     const devById = Object.fromEntries(App.state.devices.map((d) => [d.id, d]));
     const swById = Object.fromEntries((App.state.gpio.switches || []).map((s) => [s.id, s]));
@@ -184,7 +197,7 @@
         }
       }
       else if (t.type === 'switch') { const s = swById[t.ref]; if (s) ent.update(s); }
-      else if (t.type === 'all') ent.update();
+      else if (t.type === 'all' || t.type === 'group') ent.update();
     }
   }
 
@@ -207,7 +220,7 @@
     const hide = el(`<button class="btn icon sm ghost" title="${t.hidden ? 'Show' : 'Hide'}">${icon(t.hidden ? 'eye' : 'eyeOff')}</button>`); hide.onclick = () => updateTile(t.id, { hidden: !t.hidden });
     const rename = el(`<button class="btn icon sm ghost" title="Rename / style">${icon('edit')}</button>`); rename.onclick = () => tileStyleDialog(t);
     bar.append(handle, sizes, up, down, hide, rename);
-    if (!['device', 'switch', 'scene'].includes(t.type)) { const del = el(`<button class="btn icon sm ghost" title="Remove tile">${icon('trash')}</button>`); del.onclick = () => api.del(`/api/dashboard/tiles/${t.id}`).then(() => refresh(true)).catch(UI.notifyError); bar.append(del); }
+    if (!['device', 'switch', 'scene', 'group'].includes(t.type)) { const del = el(`<button class="btn icon sm ghost" title="Remove tile">${icon('trash')}</button>`); del.onclick = () => api.del(`/api/dashboard/tiles/${t.id}`).then(() => refresh(true)).catch(UI.notifyError); bar.append(del); }
     node.append(bar);
     attachDrag(node, handle);
     return { node, title };
@@ -228,6 +241,7 @@
         { label: 'Open controls', icon: 'sliders', onClick: () => Device.openPanel(d.id) },
         { label: 'Presets', icon: 'star', onClick: () => Device.openPanel(d.id, 'presets') },
         { label: 'Toggle power', icon: 'power', onClick: () => Device.send(d, { on: 't' }) },
+        { label: 'Copy this look to other lights…', icon: 'layers', onClick: () => Lights.copyLookDialog(d) },
         '-',
         { label: 'Edit controller', icon: 'edit', onClick: () => Device.editDevice(d, () => refresh(true)) },
       ]); };
@@ -259,14 +273,25 @@
       shell.node.append(btn);
       return { el: shell.node, update: () => {} };
     }
-    if (t.type === 'all') {
-      const shell = tileShell(t, { icon: t.icon || 'sun', name: t.name || 'All lights', sub: '' });
-      const power = UI.toggle(false, (on) => api.post('/api/devices/all/state', { on }).then(() => refresh()).catch(UI.notifyError), 'lg');
-      const bri = UI.slider({ icon: 'sun', min: 1, max: 255, value: 128, format: (v) => Math.round(v / 2.55) + '%', onChange: (v) => api.post('/api/devices/all/state', { bri: v, on: true }).then(() => refresh()).catch(UI.notifyError) });
-      const offBtn = el(`<button class="btn sm">${icon('moon')} All off</button>`); offBtn.onclick = () => api.post('/api/devices/all/state', { on: false }).then(() => refresh()).catch(UI.notifyError);
-      const onBtn = el(`<button class="btn sm">${icon('sun')} All on</button>`); onBtn.onclick = () => api.post('/api/devices/all/state', { on: true }).then(() => refresh()).catch(UI.notifyError);
-      shell.node.append(h('div', { class: 'tile-body' }, h('div', { class: 'row' }, power, h('div', { class: 'grow' }, bri)), h('div', { class: 'row' }, onBtn, offBtn)));
-      return { el: shell.node, update: () => { const on = App.state.devices.filter((d) => d.online); const anyOn = on.some((d) => d.state && d.state.on); power.setOn(anyOn); shell.node.classList.toggle('is-on', anyOn); shell.title.querySelector('.sub').textContent = `${on.filter((d) => d.state && d.state.on).length} of ${on.length} on`; if (anyOn) { const avg = Math.round(on.filter((d) => d.state && d.state.on).reduce((a, d) => a + (d.state.bri || 0), 0) / Math.max(1, on.filter((d) => d.state && d.state.on).length)); bri.setValue(avg); } } };
+    if (t.type === 'all' || t.type === 'group') {
+      let target = 'all', name = 'All lights', ic = 'sun';
+      if (t.type === 'group') {
+        const g = (App.state.groups || []).find((x) => x.id === t.ref); if (!g) return null;
+        target = 'group:' + g.id; name = g.name; ic = g.icon || 'home';
+        if (!t.color && g.color) t = { ...t, color: g.color };
+      }
+      const open = el(`<button class="btn ghost icon sm" aria-label="Open the lights panel">${icon('sliders')}</button>`);
+      const shell = tileShell(t, { icon: t.icon || ic, name: t.name || name, sub: '', headRight: open });
+      open.onclick = (e) => { e.stopPropagation(); Lights.open(target); };
+      const body = Lights.tileBody(target, t.size || 'm', { label: t.name || name });
+      shell.node.append(body);
+      shell.node.addEventListener('click', (e) => { if (App.editMode) return; if (e.target.closest('button, input, .swatch, .chip, .toggle, a')) return; Lights.open(target); });
+      shell.node.style.cursor = 'pointer';
+      return { el: shell.node, update: () => {
+        const st = body.update();
+        shell.node.classList.toggle('is-on', st.on > 0);
+        shell.title.querySelector('.sub').textContent = !st.total ? 'no lights yet' : !st.online ? 'offline' : `${st.on} of ${st.online} on` + (st.online < st.total ? ` · ${st.total - st.online} offline` : '');
+      } };
     }
     if (t.type === 'clock') {
       const shell = tileShell(t, { icon: null, name: '', sub: '' }); shell.node.classList.add('clock'); shell.node.querySelector('.tile-head').remove();
@@ -318,6 +343,7 @@
       { label: 'Note', icon: 'note', onClick: async () => { const text = await UI.prompt({ title: 'Note', label: 'Text', value: '', maxlength: 500 }); if (text) api.post('/api/dashboard/tiles', { type: 'note', name: 'Note', opts: { text } }).then(() => refresh(true)).catch(UI.notifyError); } },
       '-',
       { label: 'New scene…', icon: 'sparkles', onClick: () => Settings.sceneDialog(null, () => refresh(true)) },
+      { label: 'New group of lights…', icon: 'home', onClick: () => Automation.groupDialog(null, () => refresh(true)) },
       { label: 'Show hidden tiles', icon: 'eye', onClick: async () => { const hidden = App.state.dashboard.tiles.filter((t) => t.hidden); for (const t of hidden) await api.put(`/api/dashboard/tiles/${t.id}`, { hidden: false }).catch(UI.notifyError); refresh(true); } },
     ]);
     return b;

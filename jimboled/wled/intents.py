@@ -21,6 +21,9 @@ Intent fields (all optional, at least one required)::
     colors        up to 3 of the above (null = leave that slot alone)
     white         0-255            white channel, on controllers that have one
     cct           0-255            warm (0) … cool (255), on CCT-capable strips
+    kelvin        1000-12000       "white light at this temperature", done the
+                                   best way each strip can: white LEDs (and CCT)
+                                   where it has them, a red/green/blue mix where not
     effect        name | "solid"   matched by name on every controller
     palette       name             matched by name
     speed, intensity  0-255
@@ -43,7 +46,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 HEX_COLOR = re.compile(r"^#?([0-9a-fA-F]{6})$")
 NIGHTLIGHT_MODES = {"instant": 0, "fade": 1, "color": 2, "colour": 2, "sunrise": 3}
-LOOK_KEYS = ("color", "colors", "white", "cct", "effect", "palette", "speed", "intensity", "custom", "preset", "preset_slot")
+LOOK_KEYS = ("color", "colors", "white", "cct", "kelvin", "effect", "palette", "speed", "intensity", "custom", "preset", "preset_slot")
 # Segment fields a snapshot keeps.  Geometry is included so restoring a
 # snapshot puts a split strip back exactly as it was, like a WLED preset saved
 # with "include segment bounds".
@@ -115,6 +118,8 @@ def normalise_intent(raw: Any) -> Dict[str, Any]:
         out["white"] = _int(raw["white"], 0, 255, "white")
     if raw.get("cct") is not None:
         out["cct"] = _int(raw["cct"], 0, 255, "cct")
+    if raw.get("kelvin") is not None:
+        out["kelvin"] = _int(raw["kelvin"], 1000, 12000, "kelvin")
     for key in ("effect", "palette", "preset"):
         if raw.get(key) not in (None, ""):
             value = raw[key]
@@ -155,6 +160,9 @@ def normalise_intent(raw: Any) -> Dict[str, Any]:
         out["segments"] = seg_mode
     if not any(k in out for k in ("on", "bri", "transition", "nightlight", "sync") + LOOK_KEYS):
         raise IntentError("say what to change: a colour, brightness, preset, effect or on/off")
+    if raw.get("best_effort"):
+        # Don't report what a controller can't do (no white channel, …).
+        out["best_effort"] = True
     return out
 
 
@@ -172,17 +180,40 @@ def _nightlight(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise IntentError("nightlight must be an object")
     nl: Dict[str, Any] = {"on": bool(raw.get("on", True))}
-    if raw.get("minutes") is not None:
-        nl["dur"] = _int(raw["minutes"], 1, 255, "nightlight.minutes")
+    # "minutes"/"target" are the friendly names; "dur"/"tbri" are what a
+    # stored intent holds, so re-saving a scene keeps them.
+    minutes = raw.get("minutes", raw.get("dur"))
+    if minutes is not None:
+        nl["dur"] = _int(minutes, 1, 255, "nightlight.minutes")
     mode = raw.get("mode")
     if mode is not None:
         if isinstance(mode, str) and mode.lower() in NIGHTLIGHT_MODES:
             nl["mode"] = NIGHTLIGHT_MODES[mode.lower()]
         else:
             nl["mode"] = _int(mode, 0, 3, "nightlight.mode")
-    if raw.get("target") is not None:
-        nl["tbri"] = _int(raw["target"], 0, 255, "nightlight.target")
+    target = raw.get("target", raw.get("tbri"))
+    if target is not None:
+        nl["tbri"] = _int(target, 0, 255, "nightlight.target")
     return nl
+
+
+def kelvin_to_rgb(kelvin: int) -> List[int]:
+    """Approximate colour of a black body at ``kelvin`` (Tanner Helland's fit)."""
+    t = max(1000, min(40000, kelvin)) / 100.0
+    if t <= 66:
+        r = 255.0
+        g = 99.4708025861 * math.log(t) - 161.1195681661
+        b = 0.0 if t <= 19 else 138.5177312231 * math.log(t - 10) - 305.0447927307
+    else:
+        r = 329.698727446 * ((t - 60) ** -0.1332047592)
+        g = 288.1221695283 * ((t - 60) ** -0.0755148492)
+        b = 255.0
+    return [int(max(0, min(255, round(v)))) for v in (r, g, b)]
+
+
+def kelvin_to_cct(kelvin: int) -> int:
+    """WLED's own mapping of a colour temperature onto its 0-255 CCT value."""
+    return int(max(0, min(255, (kelvin - 1900) // 32)))
 
 
 def describe_intent(intent: Dict[str, Any]) -> str:
@@ -196,6 +227,8 @@ def describe_intent(intent: Dict[str, Any]) -> str:
         first = next((c for c in intent["colors"] if c), None)
         if first:
             parts.append("#%02x%02x%02x" % tuple(first))
+    if intent.get("kelvin"):
+        parts.append(f"white {intent['kelvin']} K")
     if intent.get("effect"):
         parts.append(intent["effect"])
     if intent.get("palette"):
@@ -365,15 +398,28 @@ def plan(view: DeviceView, intent: Dict[str, Any]) -> Tuple[Optional[Dict[str, A
         segs = [s for s in segs if s.get("id") == main_id] or segs[:1]
 
     colors = intent.get("colors")
+    white = intent.get("white") if wants_white else None
+    if intent.get("kelvin") and not colors:
+        kelvin = intent["kelvin"]
+        if view.has_white and view.has_cct:
+            # Tunable white strip: real white LEDs at the right temperature.
+            colors, white = [[0, 0, 0]], 255 if white is None else white
+            seg_fields.setdefault("cct", kelvin_to_cct(kelvin))
+        elif view.has_white:
+            # One kind of white LED: let the colour LEDs tint it.
+            colors, white = [kelvin_to_rgb(kelvin)], 255 if white is None else white
+        else:
+            colors = [kelvin_to_rgb(kelvin)]
+        wants_white = white is not None and view.has_white
     if seg_fields or colors or wants_white:
         if segs:
-            payload["seg"] = [_segment_payload(s, seg_fields, colors, intent.get("white") if wants_white else None, view.has_white)
+            payload["seg"] = [_segment_payload(s, seg_fields, colors, white if wants_white else None, view.has_white)
                               for s in segs]
         else:
             # Nothing known about the segments yet (first poll pending): the
             # bare object reaches every *selected* segment, which is the best
             # WLED offers without ids.
-            payload["seg"] = _segment_payload({}, seg_fields, colors, intent.get("white") if wants_white else None, view.has_white)
+            payload["seg"] = _segment_payload({}, seg_fields, colors, white if wants_white else None, view.has_white)
 
     if "on" in intent:
         payload["on"] = intent["on"]
