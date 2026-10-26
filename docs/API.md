@@ -122,7 +122,7 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 | POST | `/api/devices` | `{"host":"192.168.1.50","name":"optional","skip_probe":false}` |
 | POST | `/api/devices/probe` | `{"host":…}` → name/version/LED count without adding |
 | GET | `/api/devices/<id>` | full state, info, effect catalogue (with slider metadata), palettes, presets |
-| PUT | `/api/devices/<id>` | `name`, `host`, `enabled`, `icon`, `color`, `notes`, `poll_interval_s` |
+| PUT | `/api/devices/<id>` | `name`, `host`, `enabled`, `icon`, `color`, `notes`, `poll_interval_s`. A changed `host` forgets the remembered MAC. When the light shows `wrong_device` (another WLED answers at its address), `"replace": true` makes that controller this light – for a replaced board; refused, with a `warning`, if that controller is another configured light |
 | DELETE | `/api/devices/<id>` | |
 | POST | `/api/devices/<id>/state` | any [WLED JSON state](https://kno.wled.ge/interfaces/json-api/) subset, e.g. `{"on":"t"}`, `{"seg":{"id":0,"fx":9,"fxdef":true}}`, `{"ps":3}`, `{"nl":{"on":true,"dur":15}}`. Colours accept `[r,g,b]`, `"#ff0000"` or `"ff0000"`. |
 | POST | `/api/devices/all/state` | same body, applied to every online controller |

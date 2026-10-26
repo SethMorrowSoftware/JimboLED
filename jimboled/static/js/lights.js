@@ -206,7 +206,7 @@
       if (!undo || result.querySelector('.undo')) return;
       const b = el(`<button class="btn sm ghost undo">${icon('rotate')}<span>Undo</span></button>`);
       b.onclick = async () => {
-        const k = undo; undo = null; b.remove();
+        const k = undo; undo = null; b.remove(); endBriGesture();  // the next change is a new step
         try { const r = await api.post(`/api/lights/undo/${k}`); if (r.devices && App.setDevices) App.setDevices(r.devices); showResult(r); refreshState(); } catch (e) { UI.notifyError(e); }
       };
       result.append(b);

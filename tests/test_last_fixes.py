@@ -175,11 +175,11 @@ def test_a_replaced_controller_is_taken_on_by_saving_the_light(app, client, fake
     ctx.devices.refresh(did)
     summary = client.get("/api/devices").json["devices"][0]
     assert summary["wrong_device"] and "save" in summary["last_error"]
-    # Changing only the name keeps refusing it (no address sent) …
-    client.put(f"/api/devices/{did}", json={"name": "Porch light"})
-    assert ctx.devices.wrong_device(did)
-    # … saving the light (the edit dialog always sends the address) takes it on.
-    r = client.put(f"/api/devices/{did}", json={"name": "Porch light", "host": srv.host})
+    # A plain save (the address included, as the edit dialog always sends it)
+    # doesn't take it on: only one made after the warning was shown does.
+    client.put(f"/api/devices/{did}", json={"name": "Porch light", "host": srv.host})
+    assert ctx.devices.wrong_device(did) and ctx.store.get()["devices"][0]["mac"] == "aabbccdd0f10"
+    r = client.put(f"/api/devices/{did}", json={"name": "Porch light", "host": srv.host, "replace": True})
     assert r.status_code == 200 and r.json["device"]["online"] and not r.json["device"]["wrong_device"]
     assert ctx.store.get()["devices"][0]["mac"] == "aabbccdd0f99"
     assert client.post(f"/api/devices/{did}/state", json={"bri": 12}).status_code == 200
@@ -196,3 +196,24 @@ def test_overwriting_a_preset_under_its_own_name_waits_for_the_new_content(two):
     presets = m.save_preset("a", 6, "Movie")
     assert m._get("a").presets["6"]["bri"] == 222
     assert any(p["id"] == 6 for p in presets)
+
+
+def test_replace_never_takes_another_configured_lights_controller(app, client, fake_wled):
+    """Two controllers swapped addresses: "replacing" one with the other would
+    leave one light driving the other's strip and nothing following."""
+    ctx = app.extensions["jimboled"]
+    x, y = fake_wled("X", 30, "aabbccdd0f11"), fake_wled("Y", 30, "aabbccdd0f12")
+    dx = client.post("/api/devices", json={"host": x.host}).json["device"]["id"]
+    dy = client.post("/api/devices", json={"host": y.host}).json["device"]["id"]
+    hosts = {dx: y.host, dy: x.host}
+    ctx.store.update(lambda c: [d.update({"host": hosts[d["id"]]}) for d in c["devices"]])
+    for did in (dx, dy):
+        for _ in range(2):
+            ctx.devices.refresh(did)
+    r = client.put(f"/api/devices/{dx}", json={"name": "X light", "host": y.host, "replace": True})
+    assert r.status_code == 200 and "“Y”" in r.json.get("warning", "")
+    macs = {d["id"]: d["mac"] for d in ctx.store.get()["devices"]}
+    assert macs == {dx: "aabbccdd0f11", dy: "aabbccdd0f12"}
+    ctx.discovery._started_at = time.time() - 120
+    moved = ctx.discovery.follow_moved([{"host": x.host, "mac": "aabbccdd0f11"}, {"host": y.host, "mac": "aabbccdd0f12"}])
+    assert sorted(moved) == sorted([dx, dy])

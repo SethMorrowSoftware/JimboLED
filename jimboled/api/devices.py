@@ -106,26 +106,43 @@ def get_device(device_id):
 def update_device(device_id):
     ctx = get_ctx()
     data = body()
-    # Saving the address while another controller answers there means "that
-    # one is this light now" (its controller was replaced): learn the new MAC.
-    replaced = "host" in data and ctx.devices.has(device_id) and ctx.devices.wrong_device(device_id)
+    # {"replace": true}: the person was told another controller answers at
+    # this address and saved anyway – its controller was replaced, so the new
+    # one is this light now (its MAC is learned afresh).  Never a controller
+    # that is another configured light's, though: that one has moved, and
+    # both are found again by their MAC.
+    replace = (bool(data.get("replace")) and ctx.devices.has(device_id)
+               and ctx.devices.wrong_device(device_id))
+    theirs = ctx.devices.wrong_mac(device_id) if replace else ""
+    outcome = {"replaced": False, "warning": ""}
 
     def mutate(cfg):
         current = _device_cfg(cfg, device_id)
         merged = {**current, **{k: v for k, v in data.items() if k in ("name", "host", "enabled", "icon", "color", "notes", "poll_interval_s")}}
         cleaned = normalise_device(merged, existing_id=device_id)
-        if cleaned["host"] != current.get("host") or replaced:
+        takeover = replace
+        owner = next((d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id
+                      and theirs and normalise_mac(d.get("mac")) == theirs), None)
+        if takeover and owner:
+            takeover = False
+            outcome["warning"] = (f"The controller at this address is “{owner.get('name')}”, so this light was "
+                                  "not switched to it. Both lights are found again once they answer at their new addresses.")
+        if cleaned["host"] != current.get("host") or takeover:
             # A new address may be a different controller: learn its MAC afresh.
             cleaned["mac"] = ""
+        outcome["replaced"] = takeover and cleaned["host"] == current.get("host")
         current.update(cleaned)
         for tile in cfg["dashboard"].get("tiles", []):
             if tile.get("type") == "device" and tile.get("ref") == device_id and not tile.get("name"):
                 tile["title"] = cleaned["name"]
 
     ctx.store.update(mutate, backup_reason="edit-device")
-    if replaced:
+    if outcome["replaced"]:
         ctx.devices.refresh(device_id)  # usable straight away, not after the next poll
-    return ok({"device": ctx.devices.summary(device_id)})
+    out: Dict[str, Any] = {"device": ctx.devices.summary(device_id)}
+    if outcome["warning"]:
+        out["warning"] = outcome["warning"]
+    return ok(out)
 
 
 @bp.delete("/devices/<device_id>")

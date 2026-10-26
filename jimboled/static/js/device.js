@@ -506,6 +506,9 @@
   }
 
   function editDevice(d, onSaved) {
+    // The caller's copy can be minutes old (a dashboard tile keeps the one it
+    // was built with); the warning below must reflect the light as it is now.
+    d = ((window.App && App.state.devices) || []).find((x) => x.id === d.id) || d;
     const name = h('input', { class: 'input', value: d.name, maxlength: 60 });
     const host = h('input', { class: 'input mono', value: d.host, placeholder: '192.168.1.50 or wled-abc123.local' });
     let iconName = d.icon || 'bulb', color = d.color || '';
@@ -515,7 +518,12 @@
     }
     const save = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
     const m = UI.modal({ title: 'Edit controller', icon: 'edit', body, footer: [save] });
-    save.onclick = () => UI.busy(save, (async () => { await api.put(`/api/devices/${d.id}`, { name: name.value.trim(), host: host.value.trim(), icon: iconName, color }); UI.toast('Saved', 'success'); m.close(); onSaved && onSaved(); if (window.App) App.refresh(); })().catch(UI.notifyError));
+    save.onclick = () => UI.busy(save, (async () => {
+      // "replace" only when the person saw the warning above.
+      const r = await api.put(`/api/devices/${d.id}`, { name: name.value.trim(), host: host.value.trim(), icon: iconName, color, ...(d.wrong_device ? { replace: true } : {}) });
+      if (r && r.warning) UI.toast(r.warning, 'warning', 9000); else UI.toast('Saved', 'success');
+      m.close(); onSaved && onSaved(); if (window.App) App.refresh();
+    })().catch(UI.notifyError));
   }
   async function removeDevice(d, onDone) {
     const ok = await UI.confirm({ title: 'Remove controller', message: `Remove "${d.name}" from the dashboard? Nothing on the controller itself is changed.`, okText: 'Remove', danger: true });

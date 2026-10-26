@@ -83,6 +83,7 @@ class DeviceRecord:
     # Set when a controller with a different MAC address answers at this
     # address (DHCP gave it the old one).  Nothing is sent to it then.
     wrong_device: str = ""
+    wrong_mac: str = ""  # the MAC of the controller that answers instead
 
 
 def normalise_mac(value: Any) -> str:
@@ -374,10 +375,11 @@ class DeviceManager:
                     rec.wrong_device = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
                                         f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
                                         "again; if you replaced its controller, edit the light and save to use the new one")
+                    rec.wrong_mac = theirs
                     rec.failures = max(rec.failures, 1)
                     self._mark_offline(rec, rec.wrong_device)
                 else:
-                    rec.wrong_device = ""
+                    rec.wrong_device = rec.wrong_mac = ""
                     self._absorb(rec, doc["state"], doc["info"])
                     polled = True
             except WLEDUnreachable as exc:
@@ -520,6 +522,10 @@ class DeviceManager:
     def wrong_device(self, device_id: str) -> bool:
         """Whether another controller (another MAC) answers at this light's address."""
         return bool(self._get(device_id).wrong_device)
+
+    def wrong_mac(self, device_id: str) -> str:
+        """The MAC of the controller answering instead (see :meth:`wrong_device`)."""
+        return self._get(device_id).wrong_mac
 
     @staticmethod
     def _check_identity(rec: DeviceRecord) -> None:
