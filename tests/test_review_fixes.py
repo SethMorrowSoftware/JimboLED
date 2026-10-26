@@ -306,3 +306,11 @@ def test_try_a_scene_before_saving(client, fake_wled):
     assert srv.fake["state"]["seg"][0]["col"][0][:3] == [0, 255, 0]
     assert client.get("/api/scenes").json["scenes"] == []
     assert client.post("/api/scenes/test", json={"actions": []}).status_code == 400
+
+
+def test_preset_with_a_colour_on_top(dm):
+    m, a = dm
+    m.save_preset("a", 6, "Glow", state={"on": True, "bri": 90, "seg": [{"id": 0, "fx": 2}, {"id": 1, "fx": 2}]})
+    m.set_state("a", {"ps": 6, "seg": [{"id": 0, "col": [[255, 0, 0]]}, {"id": 1, "col": [[255, 0, 0]]}]})
+    segs = a.fake["state"]["seg"]
+    assert all(s["fx"] == 2 and s["col"][0][:3] == [255, 0, 0] for s in segs) and a.fake["state"]["ps"] == 6

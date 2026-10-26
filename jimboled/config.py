@@ -59,6 +59,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # gpiozero (lgpio, rpigpio, pigpio, native).
         "backend": "auto",
         "switches": [],
+        # Bedside/wall push buttons wired to GPIO inputs: a tap runs one
+        # action, a hold another.  See jimboled/gpio/buttons.py.
+        "buttons": [],
         # Milliseconds to wait between turning one interlocked relay off and
         # the opposing one on (protects motor drivers from shoot-through).
         "interlock_dead_time_ms": 250,
@@ -131,7 +134,7 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any], _path: str = "")
 # quietly stop every schedule), the same way a scalar section would.
 LIST_SECTIONS = ((("devices",), dict), (("groups",), dict), (("schedules",), dict),
                  (("dashboard", "tiles"), dict), (("dashboard", "scenes"), dict),
-                 (("dashboard", "favorite_colors"), str), (("gpio", "switches"), dict),
+                 (("dashboard", "favorite_colors"), str), (("gpio", "switches"), dict), (("gpio", "buttons"), dict),
                  (("server", "api_tokens"), dict), (("server", "allowed_hosts"), str))
 
 

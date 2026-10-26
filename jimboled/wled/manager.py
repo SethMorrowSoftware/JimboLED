@@ -617,7 +617,14 @@ class DeviceManager:
                 elif "win" not in body:
                     preset = {k: v for k, v in body.items() if k not in ("n", "ql", "ps", "psave", "pdel", "o")}
                     rest = {k: v for k, v in out.items() if k != "ps"}
-                    out = {**preset, **rest, "pd": ps}
+                    merged = {**preset, **rest, "pd": ps}
+                    if isinstance(preset.get("seg"), list) and isinstance(rest.get("seg"), list):
+                        # "Movie, but red": the preset's segments with the
+                        # requested changes laid over them, segment by segment.
+                        mine = {sg.get("id"): sg for sg in rest["seg"] if isinstance(sg, dict)}
+                        segs = [{**sg, **mine.pop(sg.get("id"), {})} if isinstance(sg, dict) else sg for sg in preset["seg"]]
+                        merged["seg"] = segs + list(mine.values())
+                    out = merged
         seg = out.get("seg")
         if isinstance(seg, dict) and "id" not in seg:
             ids = [s.get("id") for s in (st.get("seg") or []) if isinstance(s, dict) and isinstance(s.get("id"), int)]

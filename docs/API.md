@@ -146,6 +146,22 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 A momentary switch **cannot** be turned on with `on`; it only runs while
 heartbeats arrive, and it always has a maximum on-time.
 
+## Buttons
+
+Push buttons wired to GPIO inputs. A button is
+`{"name", "pin", "pull": "up"|"down", "enabled", "press": action|null, "hold": action|null}`
+where an action has the same shape as a schedule's (`lights`, `scene`,
+`switch`, `all_off`). A press shorter than a second is a tap; holding it for a
+second runs `hold` (or, if there is none, `press` on release). Hold-to-run
+switches can't be run by a button.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/gpio/buttons` | buttons with live `pressed`, `available`, `error`, `presses`, `last_event` |
+| POST | `/api/gpio/buttons` | add one; the pin may not be used by a relay, an emergency-stop input or another button |
+| PUT / PATCH / DELETE | `/api/gpio/buttons/<id>` | |
+| POST | `/api/gpio/buttons/<id>/try` | `{"kind":"press"\|"hold"}` – do what the button would do |
+
 ## Emergency stop
 
 `all-off` and `shutdown-all` release everything, and the next request can turn

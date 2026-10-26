@@ -134,6 +134,23 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
     register_blueprints(app)
     _install_security(app, ctx)
 
+    # Physical buttons run the same actions as schedules, one at a time, on
+    # their own thread so a slow light never holds up the relay watchdog.
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .api.dashboard import clean_lights_action
+    from .scheduler import normalise_action
+
+    ctx.gpio.action_cleaner = lambda action: normalise_action(action, clean_action=clean_lights_action)
+    button_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="button")
+
+    def _run_button(item, kind):
+        result = run_scheduled_action(ctx, getattr(item, kind))
+        log.info("button '%s' %s: %s", item.name, "tap" if kind == "press" else "hold",
+                 result.get("error") or result.get("message"))
+
+    ctx.gpio.on_button = lambda item, kind: button_pool.submit(_run_button, item, kind)
+
     if start_services:
         ctx.devices.start()
         ctx.gpio.start()

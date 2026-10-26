@@ -211,13 +211,42 @@
     });
     drawWhen();
     // action
+    const action = actionEditor(s.action, ctx, { who: 'a schedule' });
+    const getAction = action.getValue;
+    const enabled = h('input', { type: 'checkbox', checked: s.enabled !== false });
+    const body = h('div', { class: 'stack' }, UI.field('Name', name), h('h4', { text: 'When' }), kindChips, whenWrap, h('h4', { text: 'What' }), action, h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
+    const save = el(`<button class="btn primary" data-busy="Saving…">Save schedule</button>`);
+    const m = UI.modal({ title: isEdit ? 'Edit schedule' : 'New schedule', icon: 'clock', body, footer: [save], wide: true, sticky: true });
+    save.onclick = () => UI.busy(save, (async () => {
+      let when;
+      if (kind === 'time') { if (!time.value) throw new Error('Pick a time'); when = { type: 'time', time: time.value.slice(0, 5) }; }
+      else if (kind === 'once') { const t = new Date(at.value).getTime(); if (!t) throw new Error('Pick a date and time'); if (t < Date.now()) throw new Error('That time has already passed'); when = { type: 'once', at: t / 1000 }; }
+      else when = { type: 'sun', event: kind, offset: (+offset.value || 0) * +offDir.value };
+      if (kind !== 'once' && !days.size) throw new Error('Pick at least one day');
+      const payload = { name: name.value.trim(), enabled: enabled.checked, when, days: [...days], random: +random.value || 0, action: getAction(), delete_after: kind === 'once' ? delAfter.checked : false };
+      if (isEdit) await api.put(`/api/schedules/${existing.id}`, payload); else await api.post('/api/schedules', payload);
+      UI.toast('Schedule saved', 'success'); m.close(); onDone && onDone();
+    })().catch(UI.notifyError));
+  }
+
+  /**
+   * What a schedule or a physical button should do.  ``ctx`` = {scenes, switches}.
+   * opts.allowNone adds "Nothing".  Returns an element with getValue() (null = nothing).
+   */
+  function actionEditor(current, ctx, opts) {
+    opts = opts || {};
+    current = current || (opts.allowNone ? null : { type: 'lights', target: 'all', intent: { on: true } });
+    const root = h('div', { class: 'stack' });
     const actType = h('select', { class: 'select' });
-    [['lights', 'Change lights'], ['scene', 'Run a scene'], ['switch', 'Use a switch'], ['all_off', 'Everything off (lights and relays)']].forEach(([v, t]) => actType.append(h('option', { value: v, text: t, selected: s.action.type === v })));
+    const types = [['lights', 'Change lights'], ['scene', 'Run a scene'], ['switch', 'Use a switch'], ['all_off', 'Everything off (lights and relays)']];
+    if (opts.allowNone) types.unshift(['', 'Nothing']);
+    types.forEach(([v, t]) => actType.append(h('option', { value: v, text: t, selected: (current ? current.type : '') === v })));
     const actWrap = h('div', { class: 'stack' });
-    let getAction = () => ({ type: 'all_off' });
+    let getAction = () => null;
     function drawAction() {
       actWrap.innerHTML = '';
-      const a = s.action.type === actType.value ? s.action : { type: actType.value };
+      const a = current && current.type === actType.value ? current : { type: actType.value };
+      if (actType.value === '') { getAction = () => null; return; }
       if (actType.value === 'lights') {
         const tgt = Lights.targetSelect(a.target || 'all');
         const editor = Lights.intentEditor(a.intent || { on: true });
@@ -232,7 +261,7 @@
         if (!ctx.switches.length) { actWrap.append(h('div', { class: 'alert info', text: 'There are no GPIO switches yet.' })); getAction = () => { throw new Error('Choose a switch'); }; return; }
         const sel = h('select', { class: 'select' }); for (const sw of ctx.switches) sel.append(h('option', { value: sw.id, text: sw.name + (sw.mode === 'momentary' ? ' (hold-to-run: off only)' : ''), selected: sw.id === a.ref }));
         const act = h('select', { class: 'select' }); [['off', 'Turn off'], ['on', 'Turn on'], ['toggle', 'Toggle'], ['pulse', 'Pulse']].forEach(([v, t]) => act.append(h('option', { value: v, text: t, selected: (a.action || 'off') === v })));
-        actWrap.append(h('div', { class: 'form-grid' }, UI.field('Switch', sel), UI.field('Do', act)), h('div', { class: 'small muted', text: 'For safety, hold-to-run switches (like a bed motor) can only be switched off by a schedule.' }));
+        actWrap.append(h('div', { class: 'form-grid' }, UI.field('Switch', sel), UI.field('Do', act)), h('div', { class: 'small muted', text: `For safety, hold-to-run switches (like a bed motor) can only be switched off by ${opts.who || 'an automation'}.` }));
         getAction = () => ({ type: 'switch', ref: sel.value, action: act.value });
       } else {
         actWrap.append(h('div', { class: 'small muted', text: 'Turns every light and every relay off, like the All off button.' }));
@@ -241,19 +270,67 @@
     }
     actType.onchange = drawAction;
     drawAction();
-    const enabled = h('input', { type: 'checkbox', checked: s.enabled !== false });
-    const body = h('div', { class: 'stack' }, UI.field('Name', name), h('h4', { text: 'When' }), kindChips, whenWrap, h('h4', { text: 'What' }), UI.field('Action', actType), actWrap, h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
-    const save = el(`<button class="btn primary" data-busy="Saving…">Save schedule</button>`);
-    const m = UI.modal({ title: isEdit ? 'Edit schedule' : 'New schedule', icon: 'clock', body, footer: [save], wide: true, sticky: true });
+    root.append(UI.field(opts.label || 'Action', actType), actWrap);
+    root.getValue = () => getAction();
+    return root;
+  }
+
+  // ----------------------------------------------------------- buttons
+  /** Settings → Switches: push buttons wired to the Pi that run an action. */
+  async function buttonsCard(body) {
+    const card = h('div', { class: 'card' });
+    const list = h('div', { class: 'list' });
+    const addBtn = el(`<button class="btn">${icon('plus')} Add a button</button>`);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Buttons' }), addBtn),
+      el(`<p class="muted small">Wire an ordinary push button to the Pi – by the bed, by the door – and choose what a <b>tap</b> and a <b>hold</b> do: "Goodnight" on a tap, everything off on a hold. Buttons run lights, scenes and switches, but never a hold-to-run motor, and they are not emergency stops.</p>`), list);
+    body.append(card);
+    let ctx = { scenes: [], switches: [] };
+    addBtn.onclick = () => buttonDialog(null, ctx, draw);
+    async function draw() {
+      let buttons = [];
+      try {
+        const [b, scenes, switches] = await Promise.all([api.get('/api/gpio/buttons'), api.get('/api/scenes').then((r) => r.scenes), api.get('/api/gpio/switches').then((r) => r.switches)]);
+        buttons = b.buttons; ctx = { scenes, switches };
+      } catch (e) { return UI.notifyError(e); }
+      list.innerHTML = '';
+      if (!buttons.length) list.append(h('div', { class: 'small muted', text: 'No buttons yet.' }));
+      const describe = (a) => { if (!a) return 'nothing'; if (a.type === 'scene') { const sc = ctx.scenes.find((x) => x.id === a.ref); return `run “${sc ? sc.name : 'deleted scene'}”`; } if (a.type === 'switch') { const sw = ctx.switches.find((x) => x.id === a.ref); return `${a.action} ${sw ? sw.name : 'deleted switch'}`; } if (a.type === 'all_off') return 'everything off'; return `${Lights.targetLabel(a.target)}: ${Lights.describeIntent(a.intent)}`; };
+      for (const b of buttons) {
+        const item = h('div', { class: 'list-item' }, el(`<span class="tile-icon">${icon('hand')}</span>`),
+          h('div', { class: 'grow' }, h('span', { class: 'title', text: b.name }), h('span', { class: 'sub', text: `GPIO${b.pin} · tap: ${describe(b.press)} · hold: ${describe(b.hold)}${b.error ? ' · ' + b.error : ''}` })));
+        item.append(el(`<span class="status-dot ${b.pressed ? 'ok' : (b.available ? '' : 'warn')}" title="${b.pressed ? 'pressed now' : b.available ? 'ready' : esc(b.error || 'not available')}"></span>`));
+        const tryIt = el(`<button class="btn sm">${icon('play')} Try</button>`);
+        tryIt.onclick = () => UI.menu(tryIt, [b.press ? { label: 'Do what a tap does', icon: 'play', onClick: () => api.post(`/api/gpio/buttons/${b.id}/try`, { kind: 'press' }).then((r) => UI.toast(r.message, 'success')).catch(UI.notifyError) } : null, b.hold ? { label: 'Do what a hold does', icon: 'play', onClick: () => api.post(`/api/gpio/buttons/${b.id}/try`, { kind: 'hold' }).then((r) => UI.toast(r.message, 'success')).catch(UI.notifyError) } : null].filter(Boolean));
+        const edit = el(`<button class="btn ghost icon sm" aria-label="Edit">${icon('edit')}</button>`); edit.onclick = () => buttonDialog(b, ctx, draw);
+        const del = el(`<button class="btn ghost icon sm" aria-label="Delete">${icon('trash')}</button>`);
+        del.onclick = async () => { if (await UI.confirm({ title: 'Remove button', message: `Remove “${b.name}”? The button itself stops doing anything.`, okText: 'Remove', danger: true })) api.del(`/api/gpio/buttons/${b.id}`).then(draw).catch(UI.notifyError); };
+        item.append(tryIt, edit, del);
+        list.append(item);
+      }
+    }
+    draw();
+  }
+
+  async function buttonDialog(existing, ctx, onDone) {
+    const b = existing ? JSON.parse(JSON.stringify(existing)) : { name: '', pin: null, pull: 'up', enabled: true, press: { type: 'all_off' }, hold: null };
+    const name = h('input', { class: 'input', value: b.name, placeholder: 'e.g. Bedside button', maxlength: 60 });
+    const pin = await Settings.pinSelect(existing ? b.pin : null);
+    const pull = h('select', { class: 'select' },
+      h('option', { value: 'up', text: 'Button between the pin and GND (recommended)', selected: b.pull === 'up' }),
+      h('option', { value: 'down', text: 'Button between the pin and 3.3 V', selected: b.pull === 'down' }));
+    const tap = actionEditor(b.press, ctx, { allowNone: true, label: 'When tapped', who: 'a button' });
+    const hold = actionEditor(b.hold, ctx, { allowNone: true, label: 'When held for a second', who: 'a button' });
+    const enabled = h('input', { type: 'checkbox', checked: b.enabled !== false });
+    const body = h('div', { class: 'stack' }, h('div', { class: 'form-grid' }, UI.field('Name', name), UI.field('GPIO pin', pin), h('div', { class: 'full' }, UI.field('Wiring', pull))),
+      h('h4', { text: 'Tap' }), tap, h('h4', { text: 'Hold' }), hold, h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
+    const save = el(`<button class="btn primary" data-busy="Saving…">Save button</button>`);
+    const m = UI.modal({ title: existing ? 'Edit button' : 'Add a button', icon: 'hand', body, footer: [save], wide: true, sticky: true });
     save.onclick = () => UI.busy(save, (async () => {
-      let when;
-      if (kind === 'time') { if (!time.value) throw new Error('Pick a time'); when = { type: 'time', time: time.value.slice(0, 5) }; }
-      else if (kind === 'once') { const t = new Date(at.value).getTime(); if (!t) throw new Error('Pick a date and time'); if (t < Date.now()) throw new Error('That time has already passed'); when = { type: 'once', at: t / 1000 }; }
-      else when = { type: 'sun', event: kind, offset: (+offset.value || 0) * +offDir.value };
-      if (kind !== 'once' && !days.size) throw new Error('Pick at least one day');
-      const payload = { name: name.value.trim(), enabled: enabled.checked, when, days: [...days], random: +random.value || 0, action: getAction(), delete_after: kind === 'once' ? delAfter.checked : false };
-      if (isEdit) await api.put(`/api/schedules/${existing.id}`, payload); else await api.post('/api/schedules', payload);
-      UI.toast('Schedule saved', 'success'); m.close(); onDone && onDone();
+      if (!pin.value) throw new Error('Pick a GPIO pin');
+      const payload = { name: name.value.trim() || 'Button', pin: +pin.value, pull: pull.value, enabled: enabled.checked, press: tap.getValue(), hold: hold.getValue() };
+      if (!payload.press && !payload.hold) throw new Error('Choose what a tap or a hold should do');
+      if (existing) await api.put(`/api/gpio/buttons/${existing.id}`, payload); else await api.post('/api/gpio/buttons', payload);
+      UI.toast('Button saved', 'success'); m.close(); onDone && onDone();
     })().catch(UI.notifyError));
   }
 
@@ -310,5 +387,5 @@
     drawExamples();
   }
 
-  window.Automation = { groupsSection, groupDialog, schedulesSection, scheduleDialog, integrationsSection, whenLabel };
+  window.Automation = { groupsSection, groupDialog, schedulesSection, scheduleDialog, integrationsSection, whenLabel, actionEditor, buttonsCard, buttonDialog };
 })();

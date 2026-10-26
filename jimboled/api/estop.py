@@ -113,12 +113,16 @@ def delete_zone(zone_id):
 
 # ------------------------------------------------------------------ inputs
 def _switch_pins(cfg: Dict[str, Any]) -> Dict[int, str]:
+    """Pins an emergency-stop input may not use: relays and action buttons."""
     out: Dict[int, str] = {}
     for s in cfg.get("gpio", {}).get("switches", []):
         try:
             out[int(s.get("pin"))] = str(s.get("name") or s.get("id"))
         except (TypeError, ValueError):
             continue
+    for b in cfg.get("gpio", {}).get("buttons", []) or []:
+        if isinstance(b, dict) and isinstance(b.get("pin"), int):
+            out[b["pin"]] = f"{b.get('name') or 'button'} (button)"
     return out
 
 

@@ -137,6 +137,7 @@
     bedBtn.onclick = () => bedTemplate(draw);
     card.append(h('div', { class: 'card-title' }, h('h3', { text: 'GPIO switches' }), h('div', { class: 'row' }, bedBtn, addBtn)), el(`<p class="muted small">Each switch drives one relay from a GPIO pin. Hold-to-run switches only stay on while the button is pressed and always time out for safety. Interlocked switches can never be on together.</p>`), list);
     body.append(card);
+    Automation.buttonsCard(body);
     async function draw() {
       list.innerHTML = '';
       let cfg;
@@ -722,5 +723,5 @@
     draw();
   }
 
-  window.Settings = { render, discoverDialog, bedTemplate, sceneDialog, sceneSummary, SECTIONS };
+  window.Settings = { render, discoverDialog, bedTemplate, sceneDialog, sceneSummary, pinSelect, SECTIONS };
 })();

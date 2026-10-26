@@ -335,6 +335,7 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     gpio["interlock_dead_time_ms"] = int(_num(gpio.get("interlock_dead_time_ms", 250), 0, 5000, "interlock_dead_time_ms"))
     gpio["hold_timeout_s"] = _num(gpio.get("hold_timeout_s", 1.5), 0.5, 10.0, "hold_timeout_s")
     gpio["estop"] = _validated_estop(gpio.get("estop"), switches)
+    gpio["buttons"] = _validated_buttons(gpio.get("buttons"), switches, gpio["estop"].get("inputs", []))
     data["gpio"] = gpio
     wled = data.get("wled") if isinstance(data.get("wled"), dict) else {}
     for key, lo, hi, default in (("poll_interval_s", 1, 120, 3.0), ("offline_poll_interval_s", 3, 600, 15.0), ("request_timeout_s", 1, 30, 4.0)):
@@ -384,6 +385,31 @@ def _validated_location(raw: Any) -> Dict[str, Any]:
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return empty
     return {"lat": round(lat, 4), "lon": round(lon, 4), "label": str(raw.get("label") or "")[:60]}
+
+
+def _validated_buttons(raw: Any, switches, inputs) -> List[Dict[str, Any]]:
+    """Buttons from a backup; one that clashes or doesn't validate is dropped."""
+    from ..gpio.buttons import MAX_BUTTONS, ButtonInput
+    from ..scheduler import normalise_action
+    from .dashboard import clean_lights_action
+
+    taken = {s.pin: s.name for s in switches}
+    taken.update({i["pin"]: i.get("name", "emergency stop") for i in inputs if isinstance(i, dict)})
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in raw if isinstance(raw, list) else []:
+        try:
+            btn = ButtonInput.from_dict(item, lambda a: normalise_action(a, clean_action=clean_lights_action))
+        except Exception as exc:
+            log.warning("dropping a button from the backup: %s", exc)
+            continue
+        if btn.pin in taken or btn.id in seen or len(out) >= MAX_BUTTONS:
+            log.warning("dropping button '%s' from the backup: its pin is taken", btn.name)
+            continue
+        taken[btn.pin] = btn.name
+        seen.add(btn.id)
+        out.append(btn.to_dict())
+    return out
 
 
 def _keep_valid(items: Any, clean) -> List[Dict[str, Any]]:

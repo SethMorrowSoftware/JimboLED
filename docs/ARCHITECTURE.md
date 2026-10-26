@@ -140,6 +140,10 @@ lives in `gpio/estop.py`.
   active-low output is claimed *with* its safe level (no LOW blip).
 * Without GPIO hardware/libraries the app uses gpiozero's mock factory and the
   UI shows a clear "simulated" badge.
+* Physical action buttons (`gpio/buttons.py`) are read by the same 100 ms
+  watchdog, after the emergency-stop inputs; their actions are dispatched
+  outside the GPIO lock onto a single worker, through the same code as
+  scenes and schedules.
 * Hold-to-run switches only ever run while a person holds the button: they
   refuse `on`, `toggle` and `pulse` from anywhere (scenes, schedules, API
   tokens), so nothing can run a bed motor unattended.

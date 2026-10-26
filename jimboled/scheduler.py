@@ -102,26 +102,7 @@ def normalise_schedule(raw: Any, *, clean_action: Callable[[Dict[str, Any]], Dic
         jitter = int(round(float(raw.get("random") or 0)))
     except (TypeError, ValueError):
         raise ScheduleError("random must be a number of minutes")
-    action = raw.get("action")
-    if not isinstance(action, dict):
-        raise ScheduleError("say what it should do")
-    akind = action.get("type")
-    if akind == "scene":
-        if not action.get("ref"):
-            raise ScheduleError("choose a scene")
-        clean_act: Dict[str, Any] = {"type": "scene", "ref": str(action["ref"])[:64]}
-    elif akind == "switch":
-        if not action.get("ref"):
-            raise ScheduleError("choose a switch")
-        if action.get("action") not in SWITCH_ACTIONS:
-            raise ScheduleError("switch action must be off, on, toggle or pulse")
-        clean_act = {"type": "switch", "ref": str(action["ref"])[:64], "action": action["action"]}
-    elif akind == "all_off":
-        clean_act = {"type": "all_off"}
-    elif akind == "lights":
-        clean_act = clean_action(action)
-    else:
-        raise ScheduleError("action.type must be scene, lights, switch or all_off")
+    clean_act = normalise_action(raw.get("action"), clean_action=clean_action)
     return {
         "id": str(raw.get("id") or "")[:64],
         "name": name,
@@ -133,6 +114,28 @@ def normalise_schedule(raw: Any, *, clean_action: Callable[[Dict[str, Any]], Dic
         "delete_after": bool(raw.get("delete_after", False)) if kind == "once" else False,
         "updated_at": float(raw.get("updated_at") or time.time()),
     }
+
+
+def normalise_action(action: Any, *, clean_action: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+    """Validate what a schedule (or a physical button) should do."""
+    if not isinstance(action, dict):
+        raise ScheduleError("say what it should do")
+    akind = action.get("type")
+    if akind == "scene":
+        if not action.get("ref"):
+            raise ScheduleError("choose a scene")
+        return {"type": "scene", "ref": str(action["ref"])[:64]}
+    if akind == "switch":
+        if not action.get("ref"):
+            raise ScheduleError("choose a switch")
+        if action.get("action") not in SWITCH_ACTIONS:
+            raise ScheduleError("switch action must be off, on, toggle or pulse")
+        return {"type": "switch", "ref": str(action["ref"])[:64], "action": action["action"]}
+    if akind == "all_off":
+        return {"type": "all_off"}
+    if akind == "lights":
+        return clean_action(action)
+    raise ScheduleError("action.type must be scene, lights, switch or all_off")
 
 
 # ----------------------------------------------------------------- timing

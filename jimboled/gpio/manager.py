@@ -29,7 +29,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from .backend import pi_model, select_pin_factory
 from .common import (  # noqa: F401  (re-exported: importers use jimboled.gpio.manager)
@@ -43,6 +43,7 @@ from .common import (  # noqa: F401  (re-exported: importers use jimboled.gpio.m
     as_bool,
     check_pin,
 )
+from .buttons import ButtonInputs
 from .estop import MASTER_ZONE_ID, EStopController
 
 log = logging.getLogger(__name__)
@@ -222,6 +223,13 @@ class _Runtime:
     activations: int = 0
 
 
+def _plain_action(action: Any) -> Dict[str, Any]:
+    """Fallback validator for button actions when no app is attached (tests)."""
+    if not isinstance(action, dict) or action.get("type") not in ("scene", "switch", "all_off", "lights"):
+        raise GPIOError("unknown action")
+    return dict(action)
+
+
 class GPIOManager:
     """Owns all output pins.  One instance per process."""
 
@@ -236,6 +244,14 @@ class GPIOManager:
         self.factory_name = "unavailable"
         self.simulated = True
         self.estop = EStopController(Path(config_store.data_dir) / "estop.json")
+        # Bedside/wall buttons.  ``action_cleaner`` validates their actions
+        # (set by the app, which knows about lights and scenes) and
+        # ``on_button(button, "press"|"hold")`` carries them out – always
+        # outside this manager's lock.
+        self.buttons = ButtonInputs()
+        self.action_cleaner: Callable[[Any], Dict[str, Any]] = _plain_action
+        self.on_button: Optional[Callable[[Any, str], None]] = None
+        self._pending_buttons: List[Any] = []
         self._stop = threading.Event()
         self._watchdog: Optional[threading.Thread] = None
         self._on_event = on_event
@@ -251,6 +267,8 @@ class GPIOManager:
         self.estop.load()
         self.estop.configure(cfg.get("estop") or {}, self._factory, self.simulated)
         self._apply_config(cfg.get("switches", []))
+        with self._lock:
+            self._configure_buttons(cfg)
         self._stop.clear()
         self._watchdog = threading.Thread(target=self._watchdog_loop, name="gpio-watchdog", daemon=True)
         self._watchdog.start()
@@ -273,7 +291,19 @@ class GPIOManager:
                 self._close_device(rt)
             self._switches.clear()
             self.estop.close()
+            self.buttons.close()
         log.info("GPIO manager stopped; all relays released")
+
+    def _configure_buttons(self, cfg: Dict[str, Any]) -> None:
+        """(Re)open the button inputs.  Caller holds the lock."""
+        taken = {}
+        for s in cfg.get("switches", []) or []:
+            if isinstance(s, dict) and isinstance(s.get("pin"), int):
+                taken[s["pin"]] = str(s.get("name") or s.get("id"))
+        for i in ((cfg.get("estop") or {}).get("inputs") or []):
+            if isinstance(i, dict) and isinstance(i.get("pin"), int):
+                taken[i["pin"]] = f"{i.get('name') or 'emergency stop'} (emergency stop input)"
+        self.buttons.configure(cfg.get("buttons", []), self._factory, clean_action=self.action_cleaner, taken_pins=taken)
 
     def _on_config_change(self, before: Dict[str, Any], after: Dict[str, Any]) -> None:
         g_before, g_after = before.get("gpio", {}), after.get("gpio", {})
@@ -290,6 +320,7 @@ class GPIOManager:
                     self._set_off(rt, "reconfigure")
                     self._close_device(rt)
                 self._switches.clear()
+                self.buttons.close()
                 old = self._factory
                 self._factory = None
             if old is not None:
@@ -304,6 +335,9 @@ class GPIOManager:
             with self._lock:
                 self.estop.configure(g_after.get("estop") or {}, self._factory, self.simulated)
         self._apply_config(g_after.get("switches", []))
+        if any(g_before.get(k) != g_after.get(k) for k in ("buttons", "switches", "estop", "backend")):
+            with self._lock:
+                self._configure_buttons(g_after)
 
     def _read_timings(self, cfg: Dict[str, Any]) -> None:
         """Pick up the safety timings, falling back rather than refusing to start.
@@ -736,6 +770,38 @@ class GPIOManager:
 
     def _watchdog_tick(self) -> None:
         now = time.monotonic()
+        try:
+            self._tick_locked(now)
+        finally:
+            # Buttons are read under the lock but acted on outside it: their
+            # actions switch relays and lights, which take the lock themselves.
+            self._dispatch_buttons(self._pending_buttons)
+            self._pending_buttons = []
+
+    def _dispatch_buttons(self, events: List[Any]) -> None:
+        for item, kind in events:
+            evt = {"ts": time.time(), "switch": "", "name": item.name, "action": f"button-{kind}",
+                   "source": "button", "reason": "tap" if kind == "press" else "hold"}
+            with self._lock:
+                self._events.append(evt)
+            if self._on_event:
+                try:
+                    self._on_event(evt)
+                except Exception:
+                    log.exception("gpio event callback failed")
+            if self.on_button:
+                try:
+                    self.on_button(item, kind)
+                except Exception:
+                    log.exception("button '%s' action failed", item.name)
+
+    def press_button(self, button_id: str, kind: str = "press") -> None:
+        """Do what a tap (or hold) of this button does – the dashboard's "Try it"."""
+        with self._lock:
+            event = self.buttons.simulate(button_id, kind)
+        self._dispatch_buttons([event])
+
+    def _tick_locked(self, now: float) -> None:
         with self._lock:
             # A physical emergency stop outranks everything else, so it is read
             # first and latched before any other rule gets a chance to run.
@@ -751,6 +817,11 @@ class GPIOManager:
                             log.exception("gpio event callback failed")
                     self._enforce_estop(force=True, reason="estop-hardware")
             self._enforce_estop()
+            try:
+                self._pending_buttons = self.buttons.poll(now)
+            except Exception:  # pragma: no cover - a bad button must never stop the watchdog
+                log.exception("reading buttons failed")
+                self._pending_buttons = []
             # A pin test whose request thread died (a dropped connection, a
             # worker killed mid-pulse) must not leave the pin driving a relay.
             for pin, entry in list(self._test_pins.items()):
@@ -824,6 +895,7 @@ class GPIOManager:
                 "hold_timeout_s": self._hold_timeout if self.started else None,
                 "switches": [self._snapshot_one(rt) for rt in self._switches.values()],
                 "estop": self.estop.snapshot([rt.cfg for rt in self._switches.values()]),
+                "buttons": self.buttons.snapshot(),
             }
 
     def events(self, limit: int = 50) -> List[Dict[str, Any]]:
@@ -834,6 +906,7 @@ class GPIOManager:
         with self._lock:
             in_use = {rt.cfg.pin: rt.cfg.name for rt in self._switches.values()}
             in_use.update({i.pin: f"{i.name} (emergency stop input)" for i in self.estop.inputs})
+            in_use.update({b.pin: f"{b.name} (button)" for b in self.buttons.buttons})
         out = []
         for bcm, note in sorted(PIN_NOTES.items()):
             out.append({

@@ -15,7 +15,7 @@ bp = Blueprint("gpio", __name__)
 
 
 def _check_estop_pin(cfg: Dict[str, Any], pin: int) -> None:
-    """Refuse a relay pin that an emergency-stop *input* already owns.
+    """Refuse a relay pin that an emergency-stop *input* or a button already owns.
 
     Driving that pin as an output would fight the button's pull resistor and
     silently disarm the stop, so the clash is rejected rather than resolved.
@@ -23,6 +23,25 @@ def _check_estop_pin(cfg: Dict[str, Any], pin: int) -> None:
     for item in (cfg.get("gpio", {}).get("estop", {}) or {}).get("inputs", []):
         if item.get("pin") == pin:
             raise APIError(f"GPIO{pin} is used by the emergency stop button '{item.get('name') or item.get('id')}'")
+    for item in cfg.get("gpio", {}).get("buttons", []) or []:
+        if isinstance(item, dict) and item.get("pin") == pin:
+            raise APIError(f"GPIO{pin} is used by the button '{item.get('name') or item.get('id')}'")
+
+
+def taken_pins(cfg: Dict[str, Any], skip_button: str = "") -> Dict[int, str]:
+    """Pins used by relays and emergency-stop inputs (and other buttons)."""
+    out: Dict[int, str] = {}
+    g = cfg.get("gpio", {}) or {}
+    for s in g.get("switches", []) or []:
+        if isinstance(s, dict) and isinstance(s.get("pin"), int):
+            out[s["pin"]] = str(s.get("name") or s.get("id"))
+    for i in (g.get("estop") or {}).get("inputs", []) or []:
+        if isinstance(i, dict) and isinstance(i.get("pin"), int):
+            out[i["pin"]] = f"{i.get('name') or 'emergency stop'} (emergency stop input)"
+    for b in g.get("buttons", []) or []:
+        if isinstance(b, dict) and isinstance(b.get("pin"), int) and b.get("id") != skip_button:
+            out[b["pin"]] = f"{b.get('name') or 'button'} (button)"
+    return out
 
 
 @bp.get("/gpio")
@@ -133,6 +152,88 @@ def switch_action(switch_id):
     else:
         raise APIError("action must be on, off, toggle, pulse, press, heartbeat or release")
     return ok({"switch": result})
+
+
+# ------------------------------------------------------------------ buttons
+def _clean_button(cfg: Dict[str, Any], raw: Dict[str, Any], skip: str = ""):
+    from ..gpio.buttons import ButtonInput
+    from ..gpio.common import GPIOError
+
+    try:
+        item = ButtonInput.from_dict(raw, get_ctx().gpio.action_cleaner)
+    except GPIOError as exc:
+        raise APIError(str(exc))
+    others = taken_pins(cfg, skip_button=skip)
+    if item.pin in others:
+        raise APIError(f"GPIO{item.pin} is already used by '{others[item.pin]}'")
+    return item
+
+
+@bp.get("/gpio/buttons")
+def list_buttons():
+    return ok({"buttons": get_ctx().gpio.snapshot().get("buttons", [])})
+
+
+@bp.post("/gpio/buttons")
+def add_button():
+    from ..gpio.buttons import MAX_BUTTONS
+
+    ctx = get_ctx()
+    data = dict(body())
+    data["id"] = new_id("btn")
+    created: Dict[str, Any] = {}
+
+    def mutate(c):
+        buttons = c["gpio"].setdefault("buttons", [])
+        if len(buttons) >= MAX_BUTTONS:
+            raise APIError(f"You can have at most {MAX_BUTTONS} buttons")
+        item = _clean_button(c, data)
+        buttons.append(item.to_dict())
+        created.update(item.to_dict())
+
+    ctx.store.update(mutate, backup_reason="add-button")
+    return ok({"button": created, "buttons": ctx.gpio.snapshot().get("buttons", [])}, 201)
+
+
+@bp.put("/gpio/buttons/<button_id>")
+@bp.patch("/gpio/buttons/<button_id>")
+def update_button(button_id):
+    ctx = get_ctx()
+    data = body()
+
+    def mutate(c):
+        buttons = c["gpio"].setdefault("buttons", [])
+        for i, b in enumerate(buttons):
+            if b.get("id") == button_id:
+                merged = {**b, **{k: v for k, v in data.items() if k != "id"}, "id": button_id}
+                buttons[i] = _clean_button(c, merged, skip=button_id).to_dict()
+                return
+        raise APIError("unknown button", 404)
+
+    ctx.store.update(mutate, backup_reason="edit-button")
+    return ok({"buttons": ctx.gpio.snapshot().get("buttons", [])})
+
+
+@bp.delete("/gpio/buttons/<button_id>")
+def delete_button(button_id):
+    ctx = get_ctx()
+
+    def mutate(c):
+        buttons = c["gpio"].get("buttons", []) or []
+        if not any(b.get("id") == button_id for b in buttons):
+            raise APIError("unknown button", 404)
+        c["gpio"]["buttons"] = [b for b in buttons if b.get("id") != button_id]
+
+    ctx.store.update(mutate, backup_reason="remove-button")
+    return ok({"buttons": ctx.gpio.snapshot().get("buttons", [])})
+
+
+@bp.post("/gpio/buttons/<button_id>/try")
+def try_button(button_id):
+    """Do what a tap (or a hold) of this button does, from the dashboard."""
+    kind = str(body().get("kind") or "press")
+    get_ctx().gpio.press_button(button_id, kind)
+    return ok({"message": "Done – the action is running"})
 
 
 @bp.post("/gpio/all-off")

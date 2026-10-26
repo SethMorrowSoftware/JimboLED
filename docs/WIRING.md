@@ -183,7 +183,23 @@ each its own stop (Settings → Emergency stop → **Add a stop**) so stopping t
 awning does not also lock out the bed. A zone can cover an interlock group
 (both bed directions at once) or individual switches.
 
-## 7. Good to know
+## 7. Bedside or wall buttons (optional)
+
+Any ordinary push button (the "normally open" kind, like a doorbell button)
+can run an action: a **tap** does one thing and a **hold** of about a second
+another – for example "Goodnight" on a tap and everything off on a hold.
+
+1. Wire the button between a free GPIO pin (17, 27, 22, 23, 24, 25, 5, 6 …)
+   and any **GND** pin. No resistor is needed: the Pi's own pull-up is used.
+2. In **Settings → Switches → Buttons**, tap **Add a button**, pick the pin,
+   and choose what a tap and a hold should do (lights, a scene, a switch, or
+   everything off). **Try** runs the action without pressing the button.
+
+Buttons are a convenience, not a safety device. They never run a hold-to-run
+motor – that only moves while somebody holds the button on the dashboard – and
+they are not emergency stops; use section 6 for that.
+
+## 8. Good to know
 
 * JimboLED releases every relay when it starts, stops, restarts or crashes,
   when a held button loses contact with the phone for 1.5 s, and when you press
