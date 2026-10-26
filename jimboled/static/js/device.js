@@ -529,7 +529,7 @@
       // when the person saw the warning above and kept the address.
       const payload = { name: name.value.trim(), icon: iconName, color };
       if (host.value.trim() !== d.host) payload.host = host.value.trim();
-      else if (d.wrong_device && !d.wrong_owner) payload.replace = true;
+      else if (d.wrong_device) payload.replace = true;  // refused, with the reason, if it is another light's
       let r;
       try { r = await api.put(`/api/devices/${d.id}`, payload); } catch (e) {
         // A different controller answers at the new address: only on purpose.
@@ -565,25 +565,32 @@
     try { const r = await api.post(`/api/devices/${d.id}/identify`); UI.toast(`${d.name}: ${r.message}`, 'info'); } catch (e) { UI.notifyError(e); }
   }
 
-  /** Add a controller.  Where it answers at the address of a light that sees
-   *  it instead of its own, ask whether it replaces that light's controller or
-   *  is a separate new light.  Resolves to the reply, or null if cancelled. */
+  /** Add a controller, first asking whether it replaces one of the lights'
+   *  controllers (the server names the candidates).  Resolves to the reply,
+   *  or null if cancelled. */
   async function addController(payload) {
     try { return await api.post('/api/devices', payload); } catch (e) {
       if (!(e.data && e.data.code === 'replacement')) throw e;
-      const who = e.data.light_name || 'that light';
+      const candidates = e.data.candidates || [{ id: e.data.device_id, name: e.data.light_name, how: 'replace' }];
       const choice = await new Promise((resolve) => {
         let done = false;
-        const pick = (v) => () => { done = true; resolve(v); m.close(); };
-        const replace = h('button', { class: 'btn primary', text: `It replaces ${who}'s` });
+        const body = h('div', { class: 'stack' }, h('p', { text: e.message }));
+        const pickLight = h('select', { class: 'select' });
+        candidates.forEach((c, i) => pickLight.append(h('option', { value: String(i), text: c.name })));
+        if (candidates.length > 1) body.append(UI.field('Which light?', pickLight));
+        const finish = (v) => { done = true; resolve(v); m.close(); };
+        const replace = h('button', { class: 'btn primary', text: candidates.length > 1 ? 'It replaces that light\'s' : `It replaces ${candidates[0].name}'s` });
         const separate = h('button', { class: 'btn', text: 'Add as a new light' });
-        const m = UI.modal({ title: 'Replacement or a new light?', icon: 'bulb', body: h('p', { text: e.message }), footer: [separate, replace], onClose: () => { if (!done) resolve(null); } });
-        replace.onclick = pick('replace');
-        separate.onclick = pick('separate');
+        const m = UI.modal({ title: 'Replacement or a new light?', icon: 'bulb', body, footer: [separate, replace], onClose: () => { if (!done) resolve(null); } });
+        replace.onclick = () => finish({ light: candidates[+pickLight.value || 0] });
+        separate.onclick = () => finish('separate');
       });
-      if (choice === 'replace') {
-        const r = await api.put(`/api/devices/${e.data.device_id}`, { replace: true });
-        return { ...r, followed: true, message: r.warning || `${who} now uses this controller` };
+      if (choice && choice.light) {
+        const c = choice.light;
+        // At that light's own address it is taken on there; elsewhere the
+        // light moves to the new controller's address.
+        const r = await api.put(`/api/devices/${c.id}`, c.how === 'move' ? { host: payload.host, new_controller: true } : { replace: true });
+        return { ...r, followed: true, message: r.warning || `${c.name} now uses this controller` };
       }
       if (choice === 'separate') return api.post('/api/devices', { ...payload, separate: true });
       return null;

@@ -397,24 +397,37 @@ def test_adding_a_disabled_lights_controller_enables_that_light(app, client, fak
 
 
 
-def test_an_old_light_never_adopts_a_stranger_at_its_address(app, client, fake_wled):
+def test_old_lights_keep_the_controllers_they_were_pointed_at(app, client, fake_wled):
+    """In the release before MACs were remembered, a light's id named the board
+    it was first added with, and its address could be pointed at another
+    board (boards swapped between rooms).  Upgrading must leave both alone."""
     ctx = app.extensions["jimboled"]
-    stranger = fake_wled("New strip", 30, "112233a1b2c3")
-    _legacy(ctx, ("wled-dd0f40", "Christmas", stranger.host))
-    ctx.devices.refresh("wled-dd0f40")
-    assert ctx.devices.wrong_device("wled-dd0f40")
-    assert ctx.store.get()["devices"][0].get("mac", "") == ""
-    # Adding the stranger asks whether it replaces Christmas's controller …
-    r = client.post("/api/devices", json={"host": stranger.host})
-    assert r.status_code == 409 and r.json["code"] == "replacement" and r.json["device_id"] == "wled-dd0f40"
-    # … or is a separate light, which it then is.
-    assert client.post("/api/devices", json={"host": stranger.host, "separate": True}).status_code == 201
-    # Its own controller is recognised and learned.
-    own = fake_wled("Christmas", 30, "aabbccdd0f40")
-    ctx.store.update(lambda c: [d.update({"host": own.host}) for d in c["devices"] if d["id"] == "wled-dd0f40"])
-    ctx.devices.refresh("wled-dd0f40")
-    assert ctx.devices.summary("wled-dd0f40")["online"]
-    assert next(d for d in ctx.store.get()["devices"] if d["id"] == "wled-dd0f40")["mac"] == "aabbccdd0f40"
+    board_a, board_b = fake_wled("A", 30, "aabbccdd0a0a"), fake_wled("B", 30, "aabbccdd0b0b")
+    _legacy(ctx, ("wled-dd0a0a", "Desk", board_b.host))
+    _legacy(ctx, ("wled-dd0b0b", "Garage", board_a.host))
+    for did in ("wled-dd0a0a", "wled-dd0b0b"):
+        ctx.devices.refresh(did)
+        assert ctx.devices.summary(did)["online"] and not ctx.devices.wrong_device(did)
+    macs = {d["id"]: d["mac"] for d in ctx.store.get()["devices"]}
+    assert macs == {"wled-dd0a0a": "aabbccdd0b0b", "wled-dd0b0b": "aabbccdd0a0a"}
+    ctx.discovery._started_at = time.time() - 120
+    assert ctx.discovery.follow_moved([{"host": board_a.host, "mac": "aabbccdd0a0a"},
+                                       {"host": board_b.host, "mac": "aabbccdd0b0b"}]) == []
+
+
+def test_an_old_lights_id_never_moves_it_onto_another_lights_address(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Board", 30, "aabbccdd0f41")
+    other = client.post("/api/devices", json={"host": board.host, "name": "Tree"}).json["device"]["id"]
+    # Tree remembers another board, so its address doesn't count as taken …
+    ctx.store.update(lambda c: [d.update({"mac": "aabbccdd9999"}) for d in c["devices"] if d["id"] == other])
+    ctx.devices.refresh(other)
+    assert ctx.devices.wrong_device(other)
+    _legacy(ctx, ("wled-dd0f41", "Christmas", "127.0.0.1:9"))  # … and Christmas's id names the board there
+    for _ in range(2):
+        ctx.devices.refresh("wled-dd0f41")
+    ctx.discovery._started_at = time.time() - 120
+    assert ctx.discovery.follow_moved([{"host": board.host, "mac": "aabbccdd0f41"}]) == []
 
 
 def test_moves_within_a_wider_home_network_are_followed():
@@ -459,3 +472,60 @@ def test_nothing_answering_only_promises_what_following_can_do(app, client, fake
     assert "still finds the light" in r.json["warning"]
     r = client.put(f"/api/devices/{did}", json={"host": "wled-proch.invalid"})
     assert "Check the address" in r.json["warning"]
+
+
+
+def test_a_disabled_light_is_sent_nothing(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Porch", 30, "aabbccdd0f52")
+    did = client.post("/api/devices", json={"host": board.host}).json["device"]["id"]
+    client.put(f"/api/devices/{did}", json={"enabled": False})
+    board.fake["state"]["bri"] = 128
+    assert client.post(f"/api/devices/{did}/state", json={"bri": 11}).status_code == 400
+    assert board.fake["state"]["bri"] == 128
+
+
+def test_a_replacement_behind_a_host_name_is_recognised(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Porch", 30, "aabbccdd0f53")
+    port = board.host.rsplit(":", 1)[1]
+    did = client.post("/api/devices", json={"host": f"localhost:{port}"}).json["device"]["id"]
+    board.fake["info"]["mac"] = "aabbccdd5578"  # the replacement board, same name
+    ctx.devices.refresh(did)
+    r = client.post("/api/devices", json={"host": board.host})
+    assert r.status_code == 409 and r.json["code"] == "replacement" and r.json["candidates"][0] == {"id": did, "name": "Porch", "how": "replace"}
+
+
+def test_taking_over_checks_what_answers_now(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Kitchen", 30, "aabbccdd0f54")
+    did = client.post("/api/devices", json={"host": board.host}).json["device"]["id"]
+    board.fake["info"]["mac"] = "112233445599"
+    ctx.devices.refresh(did)
+    board.fake["fail"] = True  # that controller has gone again
+    r = client.put(f"/api/devices/{did}", json={"name": "Kitchen", "replace": True})
+    assert r.status_code == 200 and "not switched" in r.json["warning"]
+    assert ctx.store.get()["devices"][0]["mac"] == "aabbccdd0f54"
+
+
+def test_a_replacement_board_at_a_new_address_can_take_the_lights_place(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    old = fake_wled("Kitchen", 30, "aabbccdd0f55")
+    did = client.post("/api/devices", json={"host": old.host}).json["device"]["id"]
+    old.stop()
+    for _ in range(2):
+        ctx.devices.refresh(did)
+    new = fake_wled("WLED", 30, "aabbccdd7788")
+    r = client.post("/api/devices", json={"host": new.host})
+    assert r.status_code == 409 and r.json["candidates"] == [{"id": did, "name": "Kitchen", "how": "move"}]
+    r = client.put(f"/api/devices/{did}", json={"host": new.host, "new_controller": True})
+    assert r.status_code == 200 and r.json["device"]["online"]
+    assert ctx.store.get()["devices"][0]["mac"] == "aabbccdd7788" and len(ctx.store.get()["devices"]) == 1
+    # A separate light is still possible.
+    another = fake_wled("Spare", 30, "aabbccdd7799")
+    old2 = fake_wled("Gone", 30, "aabbccdd0f56")
+    gone = client.post("/api/devices", json={"host": old2.host}).json["device"]["id"]
+    old2.stop()
+    for _ in range(2):
+        ctx.devices.refresh(gone)
+    assert client.post("/api/devices", json={"host": another.host, "separate": True}).status_code == 201

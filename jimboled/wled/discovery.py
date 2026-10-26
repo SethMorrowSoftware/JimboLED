@@ -488,7 +488,13 @@ class DiscoveryService:
             mac = normalise_mac(entry.get("mac"))
             host = entry.get("host")
             if mac and mac not in lost and "~" + mac[-6:] in lost:
-                mac = "~" + mac[-6:]  # a light from before MACs were remembered
+                # A light from before MACs were remembered: its id only names
+                # the board it was first added with, so it is never moved onto
+                # an address another light is configured with.
+                if any(isinstance(d, dict) and d.get("host") == host and d.get("enabled", True)
+                       for d in self.store.section("devices") or []):
+                    continue
+                mac = "~" + mac[-6:]
             if not mac or mac not in lost or not host or host in known_hosts:
                 continue
             did, old_host = lost[mac]

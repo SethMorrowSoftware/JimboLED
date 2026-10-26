@@ -392,17 +392,24 @@ class DeviceManager:
                 doc = rec.client.get_state_info()
                 rec.latency_ms = round((time.monotonic() - t0) * 1000, 1)
                 mine, theirs = normalise_mac(rec.cfg.get("mac")), normalise_mac(_as_doc(doc["info"]).get("mac"))
-                owner = next((str(o.get("name") or o.get("host")) for o in others if is_controller(o, theirs)), "")
-                # A light from before MACs were remembered is checked against
-                # the MAC its id was made from.
-                legacy = not mine and bool(_LEGACY_ID.match(str(rec.cfg.get("id") or "")))
+                # Only *remembered* MACs count here.  A light from before MACs
+                # were remembered takes the controller at the address it is
+                # configured with, as it always did: its id names the board it
+                # was first added with, which people have since re-pointed.
+                owner = next((str(o.get("name") or o.get("host")) for o in others
+                              if theirs and normalise_mac(o.get("mac")) == theirs), "")
                 problem = ""
-                if theirs and (mine or legacy) and not is_controller(rec.cfg, theirs):
+                if mine and theirs and mine != theirs:
                     # Another controller got this one's old address.  Its
                     # state is not this light's, and commands must not reach it.
-                    problem = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
-                               f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
-                               "again; if you replaced its controller, edit the light and save to use the new one")
+                    if owner:
+                        problem = (f"the controller answering at {rec.cfg.get('host')} is your light “{owner}”, which "
+                                   "has moved there; this light is found again once it answers at its new address, "
+                                   "or edit it and enter that address")
+                    else:
+                        problem = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
+                                   f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
+                                   "again; if you replaced its controller, edit the light and save to use the new one")
                 elif owner and not mine:
                     # Not learned yet, and what answers is another light's
                     # controller (it moved here): never adopt it.
@@ -566,6 +573,9 @@ class DeviceManager:
 
     @staticmethod
     def _check_identity(rec: DeviceRecord) -> None:
+        if not rec.cfg.get("enabled", True):
+            # Not polled, and its address may have gone to another light since.
+            raise DeviceError(f"{rec.cfg.get('name')} is disabled")
         if rec.wrong_device:
             raise DeviceError(f"{rec.cfg.get('name')}: {rec.wrong_device}")
 

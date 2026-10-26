@@ -100,15 +100,8 @@ def add_device():
         for d in devices:
             if d.get("host") == new["host"] and _holds_address(ctx, d):
                 raise APIError(f"{new['host']} is already added as '{d.get('name')}'", 409)
-            if (d.get("host") == new["host"] and d.get("enabled", True) and new["mac"] and not data.get("separate")
-                    and _wrong_mac(ctx, d) == new["mac"]):
-                # Exactly the controller that light sees instead of its own:
-                # its replacement (taken on by that light), or a separate new
-                # light (added with "separate": true)?  The person says which.
-                raise APIError(f"{new['host']} is where your light '{d.get('name')}' was. If this controller replaced "
-                               f"its old one, '{d.get('name')}' can use it, keeping its scenes, groups and schedules. "
-                               "Or add it as a separate new light.", 409,
-                               code="replacement", device_id=d.get("id"), light_name=d.get("name"))
+        if new["mac"] and not data.get("separate"):
+            _ask_if_replacement(ctx, devices, new)
         for d in devices:
             if d.get("id") == new["id"]:
                 new["id"] = new_id("wled")
@@ -152,11 +145,18 @@ def update_device(device_id):
     # A new address is asked first what answers there.
     current_cfg = next((d for d in ctx.store.section("devices") or [] if isinstance(d, dict) and d.get("id") == device_id), None)
     probed: Optional[str] = None
+    same_host = True
     if current_cfg is not None and "host" in data:
         target = normalise_device({**current_cfg, "host": data.get("host")}, existing_id=device_id)["host"]
         if target != current_cfg.get("host"):
+            same_host = False
             probed = _probe_mac(target)
     outcome = {"replaced": False, "moved": False, "warning": ""}
+    if replace and same_host and current_cfg is not None and _probe_mac(str(current_cfg.get("host") or "")) != theirs:
+        # The other controller isn't (or no longer) what answers there.
+        replace, theirs = False, ""
+        outcome["warning"] = ("Saved. The light was not switched to another controller: nothing, or yet another "
+                              "one, answers at its address right now.")
 
     def mutate(cfg):
         current = _device_cfg(cfg, device_id)
@@ -167,12 +167,15 @@ def update_device(device_id):
         mine = normalise_mac(current.get("mac"))
         known = bool(mine) or bool(_LEGACY_ID.match(str(device_id)))  # can be recognised by its MAC
         if moved:
+            hint = ("If that controller replaced this light's, remove '{0}' first, then save this address again: "
+                    "this light then uses it and keeps its scenes, groups and schedules.")
             other = next((d for d in devices if d.get("host") == cleaned["host"] and _holds_address(ctx, d)), None)
             if other:
-                raise APIError(f"{cleaned['host']} is already added as '{other.get('name')}'", 409)
+                raise APIError(f"{cleaned['host']} is already added as '{other.get('name')}'. " + hint.format(other.get("name")), 409)
             owner = next((d for d in devices if probed and is_controller(d, probed)), None)
             if owner:
-                raise APIError(f"the controller at {cleaned['host']} is your light '{owner.get('name')}', not this one", 409)
+                raise APIError(f"the controller at {cleaned['host']} is your light '{owner.get('name')}', not this one. "
+                               + hint.format(owner.get("name")), 409)
             if probed is None:
                 # Nothing answers there (yet): keep the MAC, so the light is
                 # still recognised – and followed – wherever it turns up.
@@ -249,6 +252,42 @@ def _holds_address(ctx, d: Dict[str, Any]) -> bool:
         return not ctx.devices.wrong_device(d.get("id"))
     except DeviceError:
         return True
+
+
+def _ask_if_replacement(ctx, devices, new: Dict[str, Any]) -> None:
+    """Before a new controller is added as a light of its own: is it the
+    replacement for one of the lights?  The person says which (409 with
+    ``code: "replacement"`` and the ``candidates``; ``"separate": true``
+    adds it anyway).
+
+    * a light that sees exactly this controller instead of its own (at its
+      address, or behind its host name): it is taken on there ("replace");
+    * otherwise lights that are offline and have a known controller – a new
+      board usually gets a new address ("move").
+    """
+    here = [d for d in devices if d.get("enabled", True) and _wrong_mac(ctx, d) == new["mac"]
+            and (d.get("host") == new["host"] or not _ipv4_part(str(d.get("host") or "")))]
+    if here:
+        d = here[0]
+        raise APIError(f"{d.get('host')} is where your light '{d.get('name')}' was. If this controller replaced "
+                       f"its old one, '{d.get('name')}' can use it, keeping its scenes, groups and schedules. "
+                       "Or add it as a separate new light.", 409, code="replacement", device_id=d.get("id"),
+                       light_name=d.get("name"), candidates=[{"id": d.get("id"), "name": d.get("name"), "how": "replace"}])
+    offline = []
+    for d in devices:
+        if not d.get("enabled", True) or not (normalise_mac(d.get("mac")) or _LEGACY_ID.match(str(d.get("id") or ""))):
+            continue
+        try:
+            summary = ctx.devices.summary(d.get("id"))
+        except DeviceError:
+            continue
+        if not summary.get("online") and not summary.get("wrong_device"):
+            offline.append({"id": d.get("id"), "name": d.get("name"), "how": "move"})
+    if offline:
+        names = ", ".join(f"'{c['name']}'" for c in offline[:5]) + (" …" if len(offline) > 5 else "")
+        raise APIError(f"Is this controller the replacement for a light that is offline ({names})? That light can "
+                       "use it, keeping its scenes, groups and schedules. Or add it as a separate new light.", 409,
+                       code="replacement", device_id=offline[0]["id"], light_name=offline[0]["name"], candidates=offline)
 
 
 def _wrong_mac(ctx, d: Dict[str, Any]) -> str:
