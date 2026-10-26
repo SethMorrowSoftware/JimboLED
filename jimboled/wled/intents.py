@@ -282,6 +282,21 @@ class DeviceView:
             return []
         return [s for s in segs if isinstance(s, dict) and isinstance(s.get("id"), int)]
 
+    def segment_caps(self) -> List[int]:
+        """Light capabilities of each segment, in the order of :meth:`segments`.
+
+        ``info.leds.lc`` is the OR of every segment's capabilities, so a board
+        with an RGB strip on one output and a white strip on another reports
+        "RGB + white" for both.  ``info.leds.seglc`` has them per active
+        segment; it is used when it lines up with the segment list.
+        """
+        segs = self.segments()
+        leds = self.info.get("leds") if isinstance(self.info.get("leds"), dict) else {}
+        seglc = leds.get("seglc")
+        if isinstance(seglc, list) and len(seglc) == len(segs) and all(isinstance(x, int) for x in seglc):
+            return list(seglc)
+        return [self.light_caps] * len(segs)
+
     # name lookups ---------------------------------------------------------
     def effect_id(self, name: str) -> Optional[int]:
         if name.strip().lower() == "solid":
@@ -383,43 +398,56 @@ def plan(view: DeviceView, intent: Dict[str, Any]) -> Tuple[Optional[Dict[str, A
     # A copied look carries white/CCT whenever the source had them; on a
     # target without them that is expected, not worth a warning.
     quiet = bool(intent.get("best_effort"))
-    if "cct" in intent:
-        if view.has_cct:
-            seg_fields["cct"] = intent["cct"]
-        elif not quiet:
-            notes.append("has no adjustable white temperature")
-    wants_white = "white" in intent and view.has_white
+    if "cct" in intent and not view.has_cct and not quiet:
+        notes.append("has no adjustable white temperature")
     if "white" in intent and not view.has_white and not quiet:
         notes.append("has no separate white LEDs")
 
     segs = view.segments()
+    caps = view.segment_caps()
     if intent.get("segments") == "main":
         main_id = view.state.get("mainseg", 0)
-        segs = [s for s in segs if s.get("id") == main_id] or segs[:1]
+        keep = [i for i, s in enumerate(segs) if s.get("id") == main_id] or [0][:len(segs)]
+        segs, caps = [segs[i] for i in keep], [caps[i] for i in keep]
 
-    colors = intent.get("colors")
-    white = intent.get("white") if wants_white else None
-    if intent.get("kelvin") and not colors:
-        kelvin = intent["kelvin"]
-        if view.has_white and view.has_cct:
-            # Tunable white strip: real white LEDs at the right temperature.
-            colors, white = [[0, 0, 0]], 255 if white is None else white
-            seg_fields.setdefault("cct", kelvin_to_cct(kelvin))
-        elif view.has_white:
-            # One kind of white LED: let the colour LEDs tint it.
-            colors, white = [kelvin_to_rgb(kelvin)], 255 if white is None else white
-        else:
-            colors = [kelvin_to_rgb(kelvin)]
-        wants_white = white is not None and view.has_white
-    if seg_fields or colors or wants_white:
-        if segs:
-            payload["seg"] = [_segment_payload(s, seg_fields, colors, white if wants_white else None, view.has_white)
-                              for s in segs]
-        else:
-            # Nothing known about the segments yet (first poll pending): the
-            # bare object reaches every *selected* segment, which is the best
-            # WLED offers without ids.
-            payload["seg"] = _segment_payload({}, seg_fields, colors, white if wants_white else None, view.has_white)
+    def for_caps(lc: int) -> Optional[Dict[str, Any]]:
+        """The segment payload for a segment with light capabilities ``lc``."""
+        has_white, has_cct = bool(lc & 2), bool(lc & 4)
+        fields = dict(seg_fields)
+        colors = intent.get("colors")
+        white = intent.get("white") if has_white and "white" in intent else None
+        if "cct" in intent and has_cct:
+            fields["cct"] = intent["cct"]
+        if intent.get("kelvin") and not colors:
+            kelvin = intent["kelvin"]
+            if has_white and has_cct:
+                # Tunable white: real white LEDs at the right temperature.
+                colors, white = [[0, 0, 0]], 255 if white is None else white
+                fields.setdefault("cct", kelvin_to_cct(kelvin))
+            elif has_white:
+                # One kind of white LED: let the colour LEDs tint it.
+                colors, white = [kelvin_to_rgb(kelvin)], 255 if white is None else white
+            else:
+                colors = [kelvin_to_rgb(kelvin)]
+        if not (fields or colors or white is not None):
+            return None
+        return {"fields": fields, "colors": colors, "white": white, "has_white": has_white}
+
+    if segs:
+        seg_payloads = []
+        for seg, lc in zip(segs, caps):
+            part = for_caps(lc)
+            if part is not None:
+                seg_payloads.append(_segment_payload(seg, part["fields"], part["colors"], part["white"], part["has_white"]))
+        if seg_payloads:
+            payload["seg"] = seg_payloads
+    else:
+        # Nothing known about the segments yet (first poll pending): the bare
+        # object reaches every *selected* segment, which is the best WLED
+        # offers without ids.
+        part = for_caps(view.light_caps)
+        if part is not None:
+            payload["seg"] = _segment_payload({}, part["fields"], part["colors"], part["white"], part["has_white"])
 
     if "on" in intent:
         payload["on"] = intent["on"]
@@ -436,7 +464,7 @@ def plan(view: DeviceView, intent: Dict[str, Any]) -> Tuple[Optional[Dict[str, A
     if intent.get("sync"):
         payload["tb"] = 0
 
-    if not payload or set(payload) <= {"tt", "tb"}:
+    if not payload or set(payload) <= {"tt"}:
         return None, notes or ["nothing to change"]
     return payload, notes
 
@@ -476,8 +504,12 @@ def _segment_payload(seg: Dict[str, Any], fields: Dict[str, Any], colors: Option
 
 
 # ------------------------------------------------------------ snapshots
-def snapshot(view: DeviceView) -> Optional[Dict[str, Any]]:
-    """The controller's full current look, as a payload that restores it."""
+def snapshot(view: DeviceView, *, nightlight: bool = False) -> Optional[Dict[str, Any]]:
+    """The controller's full current look, as a payload that restores it.
+
+    ``nightlight`` also records the sleep timer (for undo; a scene captured
+    while a fade happened to be running should not start one every time).
+    """
     st = view.state
     if not st:
         return None
@@ -485,6 +517,8 @@ def snapshot(view: DeviceView) -> Optional[Dict[str, Any]]:
     for key in ("on", "bri", "mainseg"):
         if key in st:
             out[key] = st[key]
+    if nightlight and isinstance(st.get("nl"), dict):
+        out["nl"] = {k: st["nl"][k] for k in ("on", "dur", "mode", "tbri") if k in st["nl"]}
     segs = []
     for seg in view.segments():
         clean = {k: seg[k] for k in SNAPSHOT_SEG_KEYS if k in seg}

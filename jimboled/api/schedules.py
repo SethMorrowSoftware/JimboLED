@@ -55,6 +55,10 @@ def _ref_problem(cfg: Dict[str, Any], sched: Dict[str, Any]) -> Optional[str]:
         if isinstance(target, dict) and target.get("group"):
             if not any(isinstance(g, dict) and g.get("id") == target["group"] for g in cfg.get("groups", [])):
                 return "Its group has been deleted."
+        if isinstance(target, dict) and isinstance(target.get("devices"), list):
+            known = {d.get("id") for d in cfg.get("devices", []) if isinstance(d, dict)}
+            if not any(did in known for did in target["devices"]):
+                return "Its lights have been removed."
     return None
 
 

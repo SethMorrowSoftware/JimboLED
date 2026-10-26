@@ -290,12 +290,45 @@ def test_controller_that_moved_is_followed(app, client, fake_wled):
     for _ in range(2):
         ctx.devices.refresh(did)
     rec.last_seen = time.time() - 120
+    ctx.discovery._started_at = time.time() - 120
     new = fake_wled("Porch", 30, "aabbccdd0d01")  # same MAC, new address
+    # Not on another network, even with the right MAC.
+    assert ctx.discovery.follow_moved([{"host": "10.9.9.9", "mac": "aabbccdd0d01"}]) == []
     moved = ctx.discovery.follow_moved([{"host": new.host, "mac": "aabbccdd0d01"}])
     assert moved == [did]
     assert ctx.store.get()["devices"][0]["host"] == new.host
     # Somebody else's controller (another MAC) is never adopted.
-    assert ctx.discovery.follow_moved([{"host": "10.9.9.9", "mac": "ffffffffffff"}]) == []
+    assert ctx.discovery.follow_moved([{"host": "127.0.0.1:9", "mac": "ffffffffffff"}]) == []
+
+
+def test_moved_controller_is_followed_after_a_restart(data_dir, fake_wled):
+    """The power-cut case: JimboLED restarts and has never seen the controller since."""
+    from jimboled import create_app
+
+    def stop(app):
+        ctx = app.extensions["jimboled"]
+        for part in (ctx.scheduler, ctx.notifier, ctx.gpio, ctx.devices, ctx.discovery):
+            part.stop()
+
+    old = fake_wled("Porch", 30, "aabbccdd0d03")
+    app1 = create_app(str(data_dir), testing=True)
+    try:
+        c1 = app1.test_client()
+        c1.environ_base["HTTP_X_REQUESTED_WITH"] = "JimboLED"
+        did = c1.post("/api/devices", json={"host": old.host}).json["device"]["id"]
+        assert app1.extensions["jimboled"].store.get()["devices"][0]["mac"] == "aabbccdd0d03"
+    finally:
+        stop(app1)
+    old.stop()
+    app2 = create_app(str(data_dir), testing=True)  # "after the power cut"
+    ctx = app2.extensions["jimboled"]
+    try:
+        ctx.discovery._started_at = time.time() - 120
+        new = fake_wled("Porch", 30, "aabbccdd0d03")
+        assert ctx.discovery.follow_moved([{"host": new.host, "mac": "AA:BB:CC:DD:0D:03"}]) == [did]
+        assert ctx.store.get()["devices"][0]["host"] == new.host
+    finally:
+        stop(app2)
 
 
 def test_try_a_scene_before_saving(client, fake_wled):

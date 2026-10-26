@@ -49,8 +49,18 @@ def login():
         return redirect(url_for("ui.index"))
     error = ""
     if request.method == "POST":
+        # Same throttle as /api/login: without it this form was a way round
+        # the lock-out, at full speed.
+        from .system import _login_blocked, _login_failed, _login_ok
+
+        addr = request.remote_addr or "?"
+        dash = ctx.store.section("dashboard") or {}
+        if _login_blocked(addr):
+            return render_template("login.html", error="Too many attempts. Wait 30 seconds and try again.",
+                                   **_appearance(dash)), 429
         password = request.form.get("password", "")
         if check_password_hash(server_cfg["password_hash"], password):
+            _login_ok(addr)
             session.permanent = True
             session["auth"] = "ok"
             session["sv"] = int(server_cfg.get("session_version") or 0)
@@ -58,6 +68,7 @@ def login():
             if not nxt.startswith("/") or nxt.startswith("//") or "\\" in nxt or ":" in nxt.split("?")[0]:
                 nxt = url_for("ui.index")
             return redirect(nxt)
+        _login_failed(addr)
         error = "Wrong password, try again."
     dash = ctx.store.section("dashboard") or {}
     return render_template("login.html", error=error, **_appearance(dash)), (401 if error else 200)

@@ -102,10 +102,21 @@ def create_fake_wled(name: str = "Fake WLED", leds: int = 60, mac: str = "aabbcc
                 saved["ql"] = payload["ql"]
             if payload.get("o"):
                 saved.update({k: v for k, v in payload.items() if k in ("on", "bri", "seg", "playlist", "mainseg", "transition")})
+                # Like the firmware: the document is *applied* to the lights
+                # (and a playlist in it started) before it is stored.
+                live = {k: copy.deepcopy(v) for k, v in payload.items()
+                        if k not in ("psave", "n", "ql", "ib", "sb", "o", "v", "playlist")}
+                if live:
+                    apply(live)
+                if isinstance(payload.get("playlist"), dict) and payload["playlist"].get("ps"):
+                    st["pl"] = int(slot)
             else:
                 saved.update({"on": st["on"], "bri": st["bri"], "mainseg": st["mainseg"], "seg": copy.deepcopy(st["seg"])})
             f["presets"][slot] = saved
             return
+        if isinstance(payload.get("playlist"), dict):
+            # {"playlist": {}} stops whatever playlist is running.
+            st["pl"] = -1 if not payload["playlist"].get("ps") else st.get("pl", -1)
         if "pdel" in payload:
             f["presets"].pop(str(int(payload["pdel"])), None)
             return

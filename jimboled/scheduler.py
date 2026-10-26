@@ -140,8 +140,22 @@ def normalise_action(action: Any, *, clean_action: Callable[[Dict[str, Any]], Di
 
 # ----------------------------------------------------------------- timing
 def _local(day: date, hh: int, mm: int) -> datetime:
-    # A naive local wall-clock time made aware in the Pi's own timezone.
-    return datetime(day.year, day.month, day.day, hh, mm).astimezone()
+    """A local wall-clock time made aware in the Pi's own timezone.
+
+    On the day the clocks go forward, 02:30 does not exist; Python would map
+    it an hour *early*.  Such a time runs at the first minute that does exist
+    after the jump instead (03:00), the way people expect an alarm to.
+    """
+    wanted = datetime(day.year, day.month, day.day, hh, mm)
+    aware = wanted.astimezone()
+    if aware.replace(tzinfo=None) == wanted:
+        return aware
+    for minutes in range(1, 181):
+        later = wanted + timedelta(minutes=minutes)
+        candidate = later.astimezone()
+        if candidate.replace(tzinfo=None) == later:
+            return candidate
+    return aware
 
 
 def _jitter_s(sched: Dict[str, Any], day: date) -> float:
@@ -270,45 +284,61 @@ class Scheduler:
         location = cfg.get("location") if isinstance(cfg.get("location"), dict) else {}
         paused = bool(cfg.get("schedules_paused"))
         fired = []
+        self._prune(cfg)
         for sched in cfg.get("schedules", []):
-            if not isinstance(sched, dict) or not sched.get("enabled", True) or not sched.get("id"):
-                continue
-            if paused and (sched.get("when") or {}).get("type") != "once":
-                continue
             try:
-                due = last_due(sched, now, location)
-            except Exception as exc:  # a bad entry must not stop the others
-                log.warning("schedule %s: %s", sched.get("name") or sched.get("id"), exc)
-                continue
-            if due is None:
-                continue
-            sid = sched["id"]
-            with self._lock:
-                last = float((self._state.get(sid) or {}).get("fired_for") or 0)
-                if sid in self._running:
-                    continue
-                if due.timestamp() <= max(last, float(sched.get("updated_at") or 0)):
-                    continue
-                late = (now - due).total_seconds()
-                if late > GRACE_S:
-                    # Missed (the Pi was off): remember it so it is not
-                    # reconsidered, and say so in the history.
-                    self._state[sid] = {**(self._state.get(sid) or {}), "fired_for": due.timestamp(),
-                                        "missed_at": due.timestamp()}
-                    self._save_state()
-                    if (sched.get("when") or {}).get("type") == "once":
-                        self._finish_once(sched)
-                    continue
-                self._running.add(sid)
-                self._state[sid] = {**(self._state.get(sid) or {}), "fired_for": due.timestamp()}
-                self._save_state()
-            fired.append(sid)
-            try:
-                self._pool.submit(self._fire, sched)
-            except RuntimeError:  # shutting down
-                with self._lock:
-                    self._running.discard(sid)
+                if self._consider(sched, now, location, paused):
+                    fired.append(sched["id"])
+            except Exception as exc:  # one bad entry must never stop the others
+                log.warning("schedule %s skipped: %s", sched.get("name") or sched.get("id") if isinstance(sched, dict) else sched, exc)
         return fired
+
+    def _prune(self, cfg: Dict[str, Any]) -> None:
+        """Forget run history of schedules that no longer exist (used-up timers)."""
+        ids = {str(s.get("id")) for s in cfg.get("schedules", []) if isinstance(s, dict)}
+        with self._lock:
+            gone = [sid for sid in self._state if sid not in ids and sid not in self._running]
+            for sid in gone:
+                self._state.pop(sid, None)
+            if gone:
+                self._save_state()
+
+    def _consider(self, sched: Any, now: datetime, location: Dict[str, Any], paused: bool) -> bool:
+        """Fire ``sched`` if it is due; returns whether it fired."""
+        if not isinstance(sched, dict) or not sched.get("enabled", True) or not sched.get("id"):
+            return False
+        if paused and (sched.get("when") or {}).get("type") != "once":
+            return False
+        due = last_due(sched, now, location)
+        if due is None:
+            return False
+        sid = str(sched["id"])
+        with self._lock:
+            last = float((self._state.get(sid) or {}).get("fired_for") or 0)
+            if sid in self._running:
+                return False
+            if due.timestamp() <= max(last, float(sched.get("updated_at") or 0)):
+                return False
+            late = (now - due).total_seconds()
+            if late > GRACE_S:
+                # Missed (the Pi was off): remember it so it is not
+                # reconsidered, and say so in the history.
+                self._state[sid] = {**(self._state.get(sid) or {}), "fired_for": due.timestamp(),
+                                    "missed_at": due.timestamp()}
+                self._save_state()
+                if (sched.get("when") or {}).get("type") == "once":
+                    self._finish_once(sched)
+                return False
+            self._running.add(sid)
+            self._state[sid] = {**(self._state.get(sid) or {}), "fired_for": due.timestamp()}
+            self._save_state()
+        try:
+            self._pool.submit(self._fire, sched)
+        except RuntimeError:  # shutting down
+            with self._lock:
+                self._running.discard(sid)
+            return False
+        return True
 
     def _fire(self, sched: Dict[str, Any]) -> None:
         sid = sched["id"]

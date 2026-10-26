@@ -8,7 +8,7 @@ from flask import Blueprint
 from .. import get_ctx
 from ..config import new_id
 from ..wled.client import WLEDClient, WLEDError
-from ..wled.manager import DeviceError, normalise_device, sanitise_state
+from ..wled.manager import DeviceError, normalise_device, normalise_mac, sanitise_state
 from . import APIError, body, ok
 from .dashboard import ensure_tile, remove_tile
 
@@ -74,6 +74,7 @@ def add_device():
     # The MAC is whatever the device said it was, so it is coerced, not indexed.
     mac_suffix = "".join(ch for ch in str(mac or "") if ch.isalnum())[-6:].lower()
     new["id"] = f"wled-{mac_suffix}" if len(mac_suffix) == 6 else new_id("wled")
+    new["mac"] = normalise_mac(mac) or new.get("mac", "")
 
     def mutate(cfg):
         for d in cfg["devices"]:

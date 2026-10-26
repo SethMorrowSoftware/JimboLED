@@ -233,6 +233,9 @@ TOKEN_ALLOWED_WRITES = tuple(re.compile(p) for p in (
 ))
 # Hold-to-run needs a person on the button; a script is not one.
 TOKEN_SWITCH_ACTIONS = ("on", "off", "toggle", "pulse")
+# WLED state keys that store or delete presets, or touch the controller's
+# clock: configuration, not operation, even though they travel through /state.
+TOKEN_STATE_DENIED = ("psave", "pdel", "o", "ib", "sb", "ql", "time", "rb")
 
 
 def _token_allowed(method: str, path: str) -> bool:
@@ -243,6 +246,13 @@ def _token_allowed(method: str, path: str) -> bool:
     if path.startswith("/api/gpio/switches/"):
         data = request.get_json(silent=True)
         return isinstance(data, dict) and str(data.get("action") or "").lower() in TOKEN_SWITCH_ACTIONS
+    if path.endswith("/state"):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return False
+        for doc in (data, data.get("state")):
+            if isinstance(doc, dict) and any(k in doc for k in TOKEN_STATE_DENIED):
+                return False
     return True
 
 

@@ -112,10 +112,15 @@ def lights_apply():
     except I.IntentError as exc:
         raise APIError(str(exc))
     label, ids = resolve_target(ctx.store.get(), data.get("target"))
-    # Remember how the lights looked, so the change can be undone.
-    before = ctx.devices.capture(ids)
-    out = summarise(ctx.devices.apply_intent(ids, intent))
+    # Remember how the lights looked, so the change can be undone – but only
+    # for the lights it actually went to: undoing must not touch a light this
+    # change skipped (and that somebody may have changed since).
+    before = ctx.devices.capture(ids, for_undo=True)
+    rows = ctx.devices.apply_intent(ids, intent)
+    out = summarise(rows)
     out.update({"label": label, "devices": ctx.devices.snapshot()})
+    touched = {r["id"] for r in rows if r["status"] in ("ok", "partial", "error")}
+    before = [snap for snap in before if snap["id"] in touched]
     if before and out["changed"]:
         out["undo"] = _remember_undo(before)
     return ok(out)
@@ -151,8 +156,7 @@ def lights_undo(key):
         entry = _undo.pop(key, None)
     if entry is None:
         raise APIError("that change can no longer be undone", 404)
-    plans = {s["id"]: s["state"] for s in entry[1] if ctx.devices.has(s["id"])}
-    results = ctx.devices.apply_plans(plans)
+    results = ctx.devices.restore([s for s in entry[1] if ctx.devices.has(s["id"])])
     names = {s["id"]: s["name"] for s in entry[1]}
     rows = [{"id": did, "name": names.get(did, did), "status": "ok" if res == "ok" else "error",
              "message": "" if res == "ok" else res, "notes": []} for did, res in results.items()]

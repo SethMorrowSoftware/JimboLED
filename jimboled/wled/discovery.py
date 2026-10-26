@@ -25,7 +25,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .client import WLEDClient, WLEDError
 
@@ -283,8 +283,13 @@ def parse_node_packet(data: bytes, src_ip: str = "") -> Optional[Dict[str, Any]]
     name = data[6:38].split(b"\0", 1)[0].decode("utf-8", "replace").strip()
     t = data[38]
     vid = struct.unpack("<I", data[40:44])[0] if len(data) >= 44 else 0
-    return {"host": ip if ip != "0.0.0.0" else src_ip, "name": name or "WLED", "chip": NODE_TYPES.get(t & 0x7F, str(t & 0x7F)),
+    # The address inside the packet is whatever the sender wrote there; the
+    # packet's own source address is what actually answered.
+    return {"host": src_ip or ip, "name": name or "WLED", "chip": NODE_TYPES.get(t & 0x7F, str(t & 0x7F)),
             "on": bool(t & 0x80), "vid": vid, "seen": time.time()}
+
+
+MAX_NODES = 256
 
 
 class NodeListener:
@@ -330,12 +335,36 @@ class NodeListener:
             if node:
                 with self._lock:
                     self.nodes[node["host"]] = node
+                    if len(self.nodes) > MAX_NODES:
+                        # A flood of packets must not grow this without bound.
+                        oldest = min(self.nodes, key=lambda h: self.nodes[h]["seen"])
+                        self.nodes.pop(oldest, None)
         sock.close()
 
     def snapshot(self, max_age_s: float = 600.0) -> List[Dict[str, Any]]:
         now = time.time()
         with self._lock:
             return [dict(n) for n in self.nodes.values() if now - n["seen"] <= max_age_s]
+
+
+MAX_FOLLOW_PROBES = 8
+
+
+def _ipv4_part(host: str) -> str:
+    """``"192.168.1.5"`` or ``"192.168.1.5:8080"`` → ``"192.168.1.5"``; a name → ``""``."""
+    ip = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    try:
+        return str(ipaddress.IPv4Address(ip))
+    except ValueError:
+        return ""
+
+
+def _same_subnet(host: str, others: List[str], prefix: int = 24) -> bool:
+    ip = _ipv4_part(host)
+    if not ip:
+        return False
+    net = ipaddress.ip_network(f"{ip}/{prefix}", strict=False)
+    return any(_ipv4_part(o) and ipaddress.ip_address(_ipv4_part(o)) in net for o in others)
 
 
 # ------------------------------------------------------------------ service
@@ -349,6 +378,7 @@ class DiscoveryService:
                                         "found": [], "errors": [], "progress": "", "methods": []}
         self.listener = NodeListener()
         self._moved_stop = threading.Event()
+        self._started_at = time.time()
         if passive:
             self.listener.start()
             threading.Thread(target=self._follow_loop, name="wled-follow", daemon=True).start()
@@ -368,19 +398,30 @@ class DiscoveryService:
             except Exception:  # pragma: no cover - must never stop
                 log.exception("following moved controllers failed")
 
-    def _lost_controllers(self) -> Dict[str, str]:
-        """MAC → device id for enabled controllers that have been offline a while."""
-        lost: Dict[str, str] = {}
+    def _lost_controllers(self) -> Dict[str, Tuple[str, str]]:
+        """MAC → (device id, old address) for controllers offline a while.
+
+        Only controllers configured by IPv4 address: one added by name
+        (``wled-porch.local``) follows its own address changes anyway.
+        """
+        from .manager import normalise_mac
+
+        lost: Dict[str, Tuple[str, str]] = {}
         for d in self.store.section("devices") or []:
             if not isinstance(d, dict) or not d.get("enabled", True) or not d.get("id"):
+                continue
+            if not _ipv4_part(str(d.get("host") or "")):
                 continue
             try:
                 s = self.devices.summary(d["id"])
             except Exception:
                 continue
-            mac = (s.get("info") or {}).get("mac")
-            if mac and not s.get("online") and time.time() - (s.get("last_seen") or 0) > self.LOST_AFTER_S:
-                lost[str(mac).lower()] = d["id"]
+            # The MAC from config works even before the first successful poll
+            # after a restart, which is exactly when a power cut moves things.
+            mac = normalise_mac((s.get("info") or {}).get("mac")) or normalise_mac(d.get("mac"))
+            gone_since = max(float(s.get("last_seen") or 0), self._started_at)
+            if mac and not s.get("online") and time.time() - gone_since > self.LOST_AFTER_S:
+                lost[mac] = (d["id"], str(d["host"]))
         return lost
 
     def follow_moved(self, found: Optional[List[Dict[str, Any]]] = None) -> List[str]:
@@ -391,24 +432,33 @@ class DiscoveryService:
         somewhere else is the same controller, so its address is updated
         rather than leaving a non-technical owner with a dead tile.
         """
+        from .manager import normalise_mac
+
         lost = self._lost_controllers()
         if not lost:
             return []
         known_hosts = {d.get("host") for d in (self.store.section("devices") or []) if isinstance(d, dict)}
         entries = list(found or [])
         if found is None:
-            for node in self.listener.snapshot(max_age_s=300):
-                if node["host"] not in known_hosts:
-                    entry = self.probe(node["host"])
-                    if entry:
-                        entries.append(entry)
+            candidates = [n["host"] for n in self.listener.snapshot(max_age_s=300)
+                          if n["host"] not in known_hosts and _same_subnet(n["host"], [old for _, old in lost.values()])]
+            for host in candidates[:MAX_FOLLOW_PROBES]:
+                entry = self.probe(host)
+                if entry:
+                    entries.append(entry)
         moved = []
         for entry in entries:
-            mac = str(entry.get("mac") or "").lower()
+            mac = normalise_mac(entry.get("mac"))
             host = entry.get("host")
             if not mac or mac not in lost or not host or host in known_hosts:
                 continue
-            did = lost.pop(mac)
+            did, old_host = lost[mac]
+            # A WLED reports its own MAC, so this is a hint, not proof: only
+            # follow it within the same /24 the controller lived in.
+            if not _same_subnet(host, [old_host]):
+                log.warning("not following %s to %s: a different network", did, host)
+                continue
+            lost.pop(mac)
 
             def mutate(cfg, did=did, host=host):
                 for d in cfg.get("devices", []):
@@ -585,6 +635,8 @@ class DiscoveryService:
         }
 
     def _annotate(self, snap: Dict[str, Any]) -> Dict[str, Any]:
+        from .manager import normalise_mac
+
         devices = self.store.section("devices") or []
         known_hosts = {d.get("host") for d in devices}
         known_macs = {}
@@ -593,11 +645,15 @@ class DiscoveryService:
                 summary = self.devices.summary(did)
             except Exception:
                 continue
-            mac = (summary.get("info") or {}).get("mac")
+            mac = normalise_mac((summary.get("info") or {}).get("mac"))
             if mac:
                 known_macs[mac] = did
+        for d in devices:
+            if isinstance(d, dict) and normalise_mac(d.get("mac")):
+                known_macs.setdefault(normalise_mac(d.get("mac")), d.get("id"))
         for entry in snap["found"]:
-            entry["known"] = entry.get("host") in known_hosts or entry.get("mac") in known_macs
-            entry["device_id"] = known_macs.get(entry.get("mac"))
+            emac = normalise_mac(entry.get("mac"))
+            entry["known"] = entry.get("host") in known_hosts or (bool(emac) and emac in known_macs)
+            entry["device_id"] = known_macs.get(emac)
         snap["found"].sort(key=lambda e: (e.get("known", False), str(e.get("name", ""))))
         return snap
