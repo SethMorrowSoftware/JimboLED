@@ -138,11 +138,48 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
 else
   ok "exists"
 fi
-say "  installing Python packages ${DIM}(quick if nothing changed)${RESET}"
 export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_NO_INPUT=1
-"$VENV_DIR/bin/python" -m pip install -q --upgrade --prefer-binary -r "$APP_DIR/requirements.txt" \
-  || die "pip could not install the Python packages. Check the internet connection and run again."
-"$VENV_DIR/bin/python" -c "import flask, waitress, requests, gpiozero" || die "Python packages did not install correctly."
+# Is everything in requirements.txt already installed, at a good version?
+# Checked locally, so an update that needs no new packages needs no internet
+# (and a flaky Wi-Fi or DNS hiccup can't stop it).
+reqs_satisfied() {
+  ( cd / && "$VENV_DIR/bin/python" -I - "$APP_DIR/requirements.txt" <<'PY'
+import sys
+from importlib import metadata
+try:
+    from packaging.requirements import Requirement
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.split("#", 1)[0].strip()
+    if not line:
+        continue
+    req = Requirement(line)
+    want = req.name.lower().replace("_", "-")
+    version = next((d.version for d in metadata.distributions()
+                    if (d.metadata["Name"] or "").lower().replace("_", "-") == want), None)
+    if version is None:
+        sys.exit(1)
+    if req.specifier and not req.specifier.contains(version, prereleases=True):
+        sys.exit(1)
+PY
+  )
+}
+imports_ok() { ( cd / && "$VENV_DIR/bin/python" -I -c "import flask, waitress, requests, gpiozero" ) 2>/dev/null; }
+if reqs_satisfied 2>/dev/null; then
+  ok "packages already installed"
+else
+  say "  installing Python packages ${DIM}(needs the internet; a few minutes on a Pi Zero)${RESET}"
+  if ! "$VENV_DIR/bin/python" -m pip install -q --prefer-binary --timeout 30 --retries 3 -r "$APP_DIR/requirements.txt"; then
+    if imports_ok; then
+      warn "Could not download newer Python packages (is the internet down, or DNS?)."
+      warn "Keeping the ones already installed – JimboLED works with them. Run the update again later."
+    else
+      die "pip could not install the Python packages. Check the Pi's internet connection (try: ping -c3 pypi.org) and run this again."
+    fi
+  fi
+fi
+imports_ok || die "Python packages did not install correctly."
 if [ "$IS_PI" = 1 ]; then
   # lgpio creates a notification pipe in its working directory on import: keep that out of the clone.
   if (cd / && LG_WD=/tmp "$VENV_DIR/bin/python" -c "import lgpio" 2>/dev/null); then ok "gpiozero + lgpio ready"; else warn "lgpio is not importable – GPIO will be simulated. Try: sudo apt install python3-lgpio"; fi
