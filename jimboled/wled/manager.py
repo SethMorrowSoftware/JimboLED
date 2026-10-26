@@ -84,12 +84,32 @@ class DeviceRecord:
     # address (DHCP gave it the old one).  Nothing is sent to it then.
     wrong_device: str = ""
     wrong_mac: str = ""  # the MAC of the controller that answers instead
+    wrong_owner: str = ""  # …and the name of the light it belongs to, if any
 
 
 def normalise_mac(value: Any) -> str:
     """``"AA:BB:cc-dd.ee ff"`` → ``"aabbccddeeff"``; anything else → ``""``."""
     text = re.sub(r"[^0-9a-fA-F]", "", str(value or "")).lower()
     return text if len(text) == 12 else ""
+
+
+# Lights added before MAC addresses were remembered have ids made from the
+# MAC's last six hex digits ("wled-dd0301") and no "mac" in their config.
+_LEGACY_ID = re.compile(r"^wled-([0-9a-f]{6})$")
+
+
+def is_controller(cfg: Any, mac: Any) -> bool:
+    """Whether the light configured as ``cfg`` is the controller with ``mac``:
+    by its remembered MAC, or – for a light from before MACs were remembered –
+    by the MAC suffix in its id."""
+    mac = normalise_mac(mac)
+    if not mac or not isinstance(cfg, dict):
+        return False
+    mine = normalise_mac(cfg.get("mac"))
+    if mine:
+        return mine == mac
+    legacy = _LEGACY_ID.match(str(cfg.get("id") or ""))
+    return bool(legacy) and mac.endswith(legacy.group(1))
 
 
 def normalise_device(raw: Dict[str, Any], existing_id: Optional[str] = None) -> Dict[str, Any]:
@@ -364,16 +384,15 @@ class DeviceManager:
         rec = self._get(device_id)
         polled = False
         with self._lock:
-            # Controllers that are other lights' (by their remembered MAC).
-            others = {normalise_mac(r.cfg.get("mac")): str(r.cfg.get("name") or r.cfg.get("host"))
-                      for r in self._devices.values() if r is not rec and normalise_mac(r.cfg.get("mac"))}
+            # Other lights' configs, to recognise their controllers.
+            others = [r.cfg for r in self._devices.values() if r is not rec]
         with rec.lock:
             t0 = time.monotonic()
             try:
                 doc = rec.client.get_state_info()
                 rec.latency_ms = round((time.monotonic() - t0) * 1000, 1)
                 mine, theirs = normalise_mac(rec.cfg.get("mac")), normalise_mac(_as_doc(doc["info"]).get("mac"))
-                owner = others.get(theirs) if theirs and not mine else None
+                owner = next((str(o.get("name") or o.get("host")) for o in others if is_controller(o, theirs)), "")
                 problem = ""
                 if mine and theirs and mine != theirs:
                     # Another controller got this one's old address.  Its
@@ -381,18 +400,18 @@ class DeviceManager:
                     problem = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
                                f"answers at {rec.cfg.get('host')}. If the light moved it will be found "
                                "again; if you replaced its controller, edit the light and save to use the new one")
-                elif owner:
+                elif owner and not mine:
                     # Not learned yet, and what answers is another light's
                     # controller (it moved here): never adopt it.
                     problem = (f"the controller answering at {rec.cfg.get('host')} is your light “{owner}”, "
                                "which has moved there; this light's own controller is elsewhere now – "
                                "edit the light and enter its new address")
                 if problem:
-                    rec.wrong_device, rec.wrong_mac = problem, theirs
+                    rec.wrong_device, rec.wrong_mac, rec.wrong_owner = problem, theirs, owner
                     rec.failures = max(rec.failures, 1)
                     self._mark_offline(rec, problem)
                 else:
-                    rec.wrong_device = rec.wrong_mac = ""
+                    rec.wrong_device = rec.wrong_mac = rec.wrong_owner = ""
                     self._absorb(rec, doc["state"], doc["info"])
                     polled = True
             except WLEDUnreachable as exc:
@@ -508,6 +527,8 @@ class DeviceManager:
                 raise
             except WLEDError:
                 palette_data = rec.palette_data  # previews only; keep what we had
+            if rec.wrong_device:
+                return  # found out meanwhile: these lists are another controller's
             rec.effects, rec.palettes, rec.fxdata = effects, palettes, fxdata
             rec.catalog = build_effect_catalog(effects, fxdata)
             rec.palette_data = palette_data or {}
@@ -583,6 +604,8 @@ class DeviceManager:
             "online": rec.online and rec.cfg.get("enabled", True),
             "last_error": rec.last_error if rec.cfg.get("enabled", True) else "disabled",
             "wrong_device": bool(rec.wrong_device),
+            # Set when what answers instead is another of these lights.
+            "wrong_owner": rec.wrong_owner if rec.wrong_device else "",
             "last_seen": rec.last_seen,
             "latency_ms": rec.latency_ms,
             "changed_at": rec.changed_at,
@@ -1132,6 +1155,7 @@ class DeviceManager:
 
     def reload_catalog(self, device_id: str) -> Dict[str, Any]:
         rec = self._get(device_id)
+        self._check_identity(rec)  # the other controller's effects aren't this light's
         try:
             self._load_catalog(rec, force=True)
         except WLEDError as exc:

@@ -279,3 +279,113 @@ def test_entering_a_new_address_after_the_warning_is_not_a_takeover(app, client,
     assert r.status_code == 200 and "warning" not in r.json
     assert {d["id"]: d["host"] for d in ctx.store.get()["devices"]} == {dx: elsewhere.host, dy: y.host}
     assert r.json["device"]["online"] and not r.json["device"]["wrong_device"]
+
+
+def _legacy(ctx, entry):
+    """A light as configs from before MACs were remembered stored it."""
+    ctx.store.update(lambda c: c["devices"].append({"id": entry[0], "name": entry[1], "host": entry[2], "enabled": True,
+                                                     "icon": "bulb", "color": "", "notes": "", "poll_interval_s": None}))
+
+
+def test_a_light_from_before_macs_were_remembered_is_recognised(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    _legacy(ctx, ("wled-dd0f30", "Xmas", "127.0.0.1:9"))
+    _legacy(ctx, ("wled-dd0f31", "Tree", "127.0.0.1:8"))
+    for did in ("wled-dd0f30", "wled-dd0f31"):
+        for _ in range(2):
+            ctx.devices.refresh(did)
+    xmas, tree = fake_wled("Xmas", 30, "aabbccdd0f30"), fake_wled("Tree", 30, "aabbccdd0f31")
+    # Added again by hand: the old light is updated, not duplicated.
+    r = client.post("/api/devices", json={"host": xmas.host})
+    assert r.status_code == 200 and r.json["followed"] and r.json["device"]["id"] == "wled-dd0f30"
+    # Or found by itself.
+    ctx.discovery._started_at = time.time() - 120
+    assert ctx.discovery.follow_moved([{"host": tree.host, "mac": "aabbccdd0f31"}]) == ["wled-dd0f31"]
+    assert {d["id"]: d["host"] for d in ctx.store.get()["devices"]} == {"wled-dd0f30": xmas.host, "wled-dd0f31": tree.host}
+
+
+def test_a_disabled_lights_address_is_not_taken(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    kitchen_board, xmas_board = fake_wled("Kitchen", 30, "aabbccdd0f32"), fake_wled("Xmas", 30, "aabbccdd0f33")
+    kitchen = client.post("/api/devices", json={"host": kitchen_board.host}).json["device"]["id"]
+    xmas = client.post("/api/devices", json={"host": xmas_board.host}).json["device"]["id"]
+    client.put(f"/api/devices/{xmas}", json={"enabled": False})
+    xmas_board.stop()
+    moved_board = fake_wled("Kitchen", 30, "aabbccdd0f32")
+    hosts = {kitchen: "127.0.0.1:9", xmas: moved_board.host}  # Kitchen's board got Xmas's old address
+    ctx.store.update(lambda c: [d.update({"host": hosts[d["id"]]}) for d in c["devices"]])
+    for _ in range(2):
+        ctx.devices.refresh(kitchen)
+    ctx.discovery._started_at = time.time() - 120
+    assert ctx.discovery.follow_moved([{"host": moved_board.host, "mac": "aabbccdd0f32"}]) == [kitchen]
+    # Re-enabling Xmas later never lets it drive Kitchen's strip.
+    client.put(f"/api/devices/{xmas}", json={"enabled": True})
+    ctx.devices.refresh(xmas)
+    assert ctx.devices.wrong_device(xmas) and ctx.devices.summary(xmas)["wrong_owner"] == "Kitchen"
+
+
+def test_reloading_effects_is_refused_while_another_controller_answers(two):
+    m, a, _, _ = two
+    m._get("a").cfg["mac"] = "001122334455"
+    m.refresh("a")
+    with pytest.raises(DeviceError):
+        m.reload_catalog("a")
+
+
+def test_a_wrong_address_keeps_the_light_recognisable(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Porch", 30, "aabbccdd0f34")
+    did = client.post("/api/devices", json={"host": board.host}).json["device"]["id"]
+    r = client.put(f"/api/devices/{did}", json={"host": "127.0.0.1:9"})  # nothing answers there
+    assert r.status_code == 200 and "nothing answers" in r.json["warning"]
+    assert ctx.store.get()["devices"][0]["mac"] == "aabbccdd0f34"
+    for _ in range(2):
+        ctx.devices.refresh(did)
+    ctx.discovery._started_at = time.time() - 120
+    assert ctx.discovery.follow_moved([{"host": board.host, "mac": "aabbccdd0f34"}]) == [did]
+
+
+def test_swapped_addresses_can_be_fixed_by_hand(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    x, y = fake_wled("X", 30, "aabbccdd0f35"), fake_wled("Y", 30, "aabbccdd0f36")
+    dx = client.post("/api/devices", json={"host": x.host}).json["device"]["id"]
+    dy = client.post("/api/devices", json={"host": y.host}).json["device"]["id"]
+    hosts = {dx: y.host, dy: x.host}
+    ctx.store.update(lambda c: [d.update({"host": hosts[d["id"]]}) for d in c["devices"]])
+    for did in (dx, dy):
+        ctx.devices.refresh(did)
+    # Typing an address where another light's controller answers is refused …
+    z = fake_wled("Z", 30, "aabbccdd0f39")
+    client.post("/api/devices", json={"host": z.host})
+    z_moved = fake_wled("Z", 30, "aabbccdd0f39")
+    r = client.put(f"/api/devices/{dx}", json={"host": z_moved.host})
+    assert r.status_code == 409 and "your light 'Z'" in r.json["error"]
+    # … and the right one is accepted, though the other light is configured there.
+    r = client.put(f"/api/devices/{dx}", json={"host": x.host})
+    assert r.status_code == 200 and r.json["device"]["online"], r.json
+    r = client.put(f"/api/devices/{dy}", json={"host": y.host})
+    assert r.status_code == 200 and r.json["device"]["online"], r.json
+
+
+def test_a_light_that_never_answered_is_told_it_cannot_be_found(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    porch_board = fake_wled("Porch", 30, "aabbccdd0f37")
+    client.post("/api/devices", json={"host": porch_board.host})
+    garage = client.post("/api/devices", json={"host": "127.0.0.1:9", "name": "Garage", "skip_probe": True}).json["device"]["id"]
+    ctx.store.update(lambda c: [d.update({"host": porch_board.host}) for d in c["devices"] if d["id"] == garage])
+    ctx.devices.refresh(garage)
+    assert ctx.devices.summary(garage)["wrong_owner"] == "Porch"
+    r = client.put(f"/api/devices/{garage}", json={"name": "Garage", "replace": True})
+    assert "never answered" in r.json["warning"]
+
+
+def test_adding_a_disabled_lights_controller_enables_that_light(app, client, fake_wled):
+    ctx = app.extensions["jimboled"]
+    board = fake_wled("Xmas", 30, "aabbccdd0f38")
+    did = client.post("/api/devices", json={"host": board.host}).json["device"]["id"]
+    client.put(f"/api/devices/{did}", json={"enabled": False})
+    board.stop()
+    back = fake_wled("Xmas", 30, "aabbccdd0f38")
+    r = client.post("/api/devices", json={"host": back.host})
+    assert r.status_code == 200 and "enabled again" in r.json["message"]
+    assert ctx.store.get()["devices"][0]["enabled"] is True and len(ctx.store.get()["devices"]) == 1

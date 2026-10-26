@@ -515,7 +515,11 @@
     const body = h('div', { class: 'stack' }, UI.field('Name', name), UI.field('Address', host, 'IP address or hostname of the controller'), h('h4', { text: 'Icon' }), UI.iconPicker(iconName, (n) => { iconName = n; }), h('h4', { text: 'Colour' }), UI.colorPicker(color, (c) => { color = c; }));
     if (d.wrong_device) {
       const why = d.last_error ? d.last_error.charAt(0).toUpperCase() + d.last_error.slice(1) + '.' : 'A different WLED controller answers at this address.';
-      body.prepend(h('div', { class: 'alert warn', text: `${why} Saving without changing the address makes the controller there this light (its scenes, groups and schedules stay); if the light moved, enter its new address instead.` }));
+      // The controller there is another of these lights: it can't become
+      // this one, so only a new address is offered.
+      const what = d.wrong_owner ? `Enter this light's own address (Settings → Find controllers lists every controller on the network).`
+        : `Saving without changing the address makes the controller there this light (its scenes, groups and schedules stay); if the light moved, enter its new address instead.`;
+      body.prepend(h('div', { class: 'alert warn', text: `${why} ${what}` }));
     }
     const save = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
     const m = UI.modal({ title: 'Edit controller', icon: 'edit', body, footer: [save] });
@@ -525,7 +529,7 @@
       // when the person saw the warning above and kept the address.
       const payload = { name: name.value.trim(), icon: iconName, color };
       if (host.value.trim() !== d.host) payload.host = host.value.trim();
-      else if (d.wrong_device) payload.replace = true;
+      else if (d.wrong_device && !d.wrong_owner) payload.replace = true;
       const r = await api.put(`/api/devices/${d.id}`, payload);
       if (r && r.warning) UI.toast(r.warning, 'warning', 9000); else UI.toast('Saved', 'success');
       m.close(); onSaved && onSaved(); if (window.App) App.refresh();

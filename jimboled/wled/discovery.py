@@ -402,9 +402,11 @@ class DiscoveryService:
         """MAC → (device id, old address) for controllers offline a while.
 
         Only controllers configured by IPv4 address: one added by name
-        (``wled-porch.local``) follows its own address changes anyway.
+        (``wled-porch.local``) follows its own address changes anyway.  A
+        light from before MACs were remembered is keyed ``"~" + the last six
+        hex digits`` its id was made from.
         """
-        from .manager import normalise_mac
+        from .manager import _LEGACY_ID, normalise_mac
 
         lost: Dict[str, Tuple[str, str]] = {}
         for d in self.store.section("devices") or []:
@@ -419,6 +421,9 @@ class DiscoveryService:
             # The MAC from config works even before the first successful poll
             # after a restart, which is exactly when a power cut moves things.
             mac = normalise_mac((s.get("info") or {}).get("mac")) or normalise_mac(d.get("mac"))
+            if not mac:
+                legacy = _LEGACY_ID.match(str(d.get("id") or ""))
+                mac = "~" + legacy.group(1) if legacy else ""
             gone_since = max(float(s.get("last_seen") or 0), self._started_at)
             if mac and not s.get("online") and time.time() - gone_since > self.LOST_AFTER_S:
                 lost[mac] = (d["id"], str(d["host"]))
@@ -447,9 +452,11 @@ class DiscoveryService:
         # two controllers that swapped addresses are each found at the other's.
         # The same goes for the address of a light that some *other*
         # controller answers at (it is not that light's any more).
+        # A disabled light isn't polled, so nothing shows its address is still its own either.
         lost_ids = {did for did, _ in lost.values()}
         known_hosts = {d.get("host") for d in (self.store.section("devices") or [])
-                       if isinstance(d, dict) and d.get("id") not in lost_ids and not self._answered_by_another(d.get("id"))}
+                       if isinstance(d, dict) and d.get("enabled", True) and d.get("id") not in lost_ids
+                       and not self._answered_by_another(d.get("id"))}
         entries = list(found or [])
         if found is None:
             candidates = [n["host"] for n in self.listener.snapshot(max_age_s=300)
@@ -462,6 +469,8 @@ class DiscoveryService:
         for entry in entries:
             mac = normalise_mac(entry.get("mac"))
             host = entry.get("host")
+            if mac and mac not in lost and "~" + mac[-6:] in lost:
+                mac = "~" + mac[-6:]  # a light from before MACs were remembered
             if not mac or mac not in lost or not host or host in known_hosts:
                 continue
             did, old_host = lost[mac]
@@ -647,10 +656,10 @@ class DiscoveryService:
         }
 
     def _annotate(self, snap: Dict[str, Any]) -> Dict[str, Any]:
-        from .manager import normalise_mac
+        from .manager import is_controller, normalise_mac
 
-        devices = self.store.section("devices") or []
-        known_hosts = {d.get("host") for d in devices}
+        devices = [d for d in (self.store.section("devices") or []) if isinstance(d, dict)]
+        by_host = {d.get("host"): d for d in devices}
         known_macs = {}
         for did in self.devices.ids():
             try:
@@ -665,7 +674,15 @@ class DiscoveryService:
                 known_macs.setdefault(normalise_mac(d.get("mac")), d.get("id"))
         for entry in snap["found"]:
             emac = normalise_mac(entry.get("mac"))
-            entry["known"] = entry.get("host") in known_hosts or (bool(emac) and emac in known_macs)
-            entry["device_id"] = known_macs.get(emac)
+            did = known_macs.get(emac) if emac else None
+            if not did and emac:
+                did = next((d.get("id") for d in devices if is_controller(d, emac)), None)
+            # By address only when that light's controller can't be told
+            # apart: an unrelated WLED that took a light's old address is not
+            # "added" (it may be a light that moved, or a new one).
+            holder = by_host.get(entry.get("host"))
+            held = holder is not None and (not emac or not normalise_mac(holder.get("mac")) or is_controller(holder, emac))
+            entry["known"] = bool(did) or held
+            entry["device_id"] = did or (holder.get("id") if held else None)
         snap["found"].sort(key=lambda e: (e.get("known", False), str(e.get("name", ""))))
         return snap

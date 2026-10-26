@@ -1,14 +1,14 @@
 """WLED device endpoints."""
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from flask import Blueprint
 
 from .. import get_ctx
 from ..config import new_id
 from ..wled.client import WLEDClient, WLEDError
-from ..wled.manager import DeviceError, PutBackError, normalise_device, normalise_mac, sanitise_state
+from ..wled.manager import DeviceError, PutBackError, is_controller, normalise_device, normalise_mac, sanitise_state
 from . import APIError, body, ok
 from .dashboard import ensure_tile, remove_tile
 
@@ -79,21 +79,27 @@ def add_device():
     followed: Dict[str, Any] = {}
 
     def mutate(cfg):
-        for d in cfg["devices"]:
-            if d.get("host") == new["host"]:
-                raise APIError(f"{new['host']} is already added as '{d.get('name')}'", 409)
-        same = next((d for d in cfg["devices"] if isinstance(d, dict) and new["mac"]
-                     and normalise_mac(d.get("mac")) == new["mac"]), None)
+        devices = [d for d in cfg["devices"] if isinstance(d, dict)]
+        # The same controller as a light already added (by its MAC, or the
+        # MAC in an older light's id) – looked for first: after addresses
+        # were reshuffled, the address may still be another light's.
+        same = next((d for d in devices if new["mac"] and is_controller(d, new["mac"])), None)
         if same is not None:
-            # The same controller (same MAC) as a light already added.
-            if ctx.devices.has(same["id"]) and ctx.devices.summary(same["id"]).get("online"):
+            if same.get("host") == new["host"] or (ctx.devices.has(same["id"]) and ctx.devices.summary(same["id"]).get("online")):
                 raise APIError(f"that controller is already added as '{same.get('name')}' (at {same.get('host')})", 409)
+            holder = next((d for d in devices if d is not same and d.get("host") == new["host"] and _holds_address(ctx, d)), None)
+            if holder is not None:
+                raise APIError(f"{new['host']} is already added as '{holder.get('name')}'", 409)
             # It moved: point that light at the new address, keeping its
             # groups, scenes and schedules, rather than adding it twice.
             same["host"] = new["host"]
-            followed.update(id=same["id"], name=same.get("name"))
+            followed.update(id=same["id"], name=same.get("name"), enabled=same.get("enabled", True))
+            same["enabled"] = True
             return
-        for d in cfg["devices"]:
+        for d in devices:
+            if d.get("host") == new["host"] and _holds_address(ctx, d):
+                raise APIError(f"{new['host']} is already added as '{d.get('name')}'", 409)
+        for d in devices:
             if d.get("id") == new["id"]:
                 new["id"] = new_id("wled")
         cfg["devices"].append(new)
@@ -106,8 +112,9 @@ def add_device():
     except DeviceError:
         pass
     if followed:
+        extra = "" if followed["enabled"] else " and it is enabled again"
         return ok({"device": ctx.devices.summary(did), "followed": True,
-                   "message": f"That is “{followed['name']}”, which had moved: its address is updated"})
+                   "message": f"That is “{followed['name']}”, which had moved: its address is updated{extra}"})
     return ok({"device": ctx.devices.summary(new["id"])}, 201)
 
 
@@ -128,31 +135,48 @@ def update_device(device_id):
     # this address and saved anyway – its controller was replaced, so the new
     # one is this light now (its MAC is learned afresh).  Never a controller
     # that is another configured light's, though: that one has moved, and
-    # both are found again by their MAC.
+    # is found again by its MAC.
     replace = (bool(data.get("replace")) and ctx.devices.has(device_id)
                and ctx.devices.wrong_device(device_id))
     theirs = ctx.devices.wrong_mac(device_id) if replace else ""
-    outcome = {"replaced": False, "warning": ""}
+    # A new address is asked first what answers there.
+    current_cfg = next((d for d in ctx.store.section("devices") or [] if isinstance(d, dict) and d.get("id") == device_id), None)
+    probed: Optional[str] = None
+    if current_cfg is not None and "host" in data:
+        target = normalise_device({**current_cfg, "host": data.get("host")}, existing_id=device_id)["host"]
+        if target != current_cfg.get("host"):
+            probed = _probe_mac(target)
+    outcome = {"replaced": False, "moved": False, "warning": ""}
 
     def mutate(cfg):
         current = _device_cfg(cfg, device_id)
         merged = {**current, **{k: v for k, v in data.items() if k in ("name", "host", "enabled", "icon", "color", "notes", "poll_interval_s")}}
         cleaned = normalise_device(merged, existing_id=device_id)
+        devices = [d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id]
         moved = cleaned["host"] != current.get("host")
+        mine = normalise_mac(current.get("mac"))
         if moved:
-            other = next((d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id
-                          and d.get("host") == cleaned["host"]), None)
+            other = next((d for d in devices if d.get("host") == cleaned["host"] and _holds_address(ctx, d)), None)
             if other:
                 raise APIError(f"{cleaned['host']} is already added as '{other.get('name')}'", 409)
-        takeover = replace and not moved  # a new address is simply learned afresh
-        owner = next((d for d in cfg.get("devices", []) if isinstance(d, dict) and d.get("id") != device_id
-                      and theirs and normalise_mac(d.get("mac")) == theirs), None)
+            owner = next((d for d in devices if probed and is_controller(d, probed)), None)
+            if owner:
+                raise APIError(f"the controller at {cleaned['host']} is your light '{owner.get('name')}', not this one", 409)
+            if probed is None:
+                # Nothing answers there (yet): keep the MAC, so the light is
+                # still recognised – and followed – wherever it turns up.
+                outcome["warning"] = (f"Saved, but nothing answers at {cleaned['host']} right now. "
+                                      "If that address is wrong, JimboLED still finds the light once it is back on the network.")
+            elif probed != mine:
+                cleaned["mac"] = ""  # another (or a new) controller: learn its MAC afresh
+        takeover = replace and not moved
+        owner = next((d for d in devices if theirs and is_controller(d, theirs)), None)
         if takeover and owner:
             takeover = False
-            outcome["warning"] = (f"The controller at this address is “{owner.get('name')}”, so this light was "
-                                  "not switched to it. Both lights are found again once they answer at their new addresses.")
-        if moved or takeover:
-            # A new address may be a different controller: learn its MAC afresh.
+            tail = ("Both lights are found again once they answer at their new addresses." if mine else
+                    "This light has never answered, so it can't be recognised elsewhere: enter its controller's address.")
+            outcome["warning"] = f"The controller at this address is “{owner.get('name')}”, so this light was not switched to it. {tail}"
+        if takeover:
             cleaned["mac"] = ""
         outcome["replaced"], outcome["moved"] = takeover, moved
         current.update(cleaned)
@@ -193,6 +217,34 @@ def delete_device(device_id):
 
     ctx.store.update(mutate, backup_reason="remove-device")
     return ok()
+
+
+def _holds_address(ctx, d: Dict[str, Any]) -> bool:
+    """Whether light ``d`` still has its address: it is enabled (a disabled
+    light isn't polled, so nothing says the address is still its) and no
+    other controller answers there."""
+    if not d.get("enabled", True):
+        return False
+    try:
+        return not ctx.devices.wrong_device(d.get("id"))
+    except DeviceError:
+        return True
+
+
+def _probe_mac(host: str) -> Optional[str]:
+    """The MAC of the WLED answering at ``host``: ``""`` if it gives none,
+    ``None`` if nothing answers."""
+    try:
+        client = WLEDClient(host, timeout=4.0)
+    except Exception:  # not a usable address
+        return None
+    try:
+        info = client.get_info()
+    except WLEDError:
+        return None
+    finally:
+        client.close()
+    return normalise_mac(info.get("mac")) if isinstance(info, dict) else None
 
 
 def _forget_in_target(action, device_id: str) -> None:
