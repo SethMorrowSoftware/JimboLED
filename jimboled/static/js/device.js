@@ -359,7 +359,7 @@
     UI.menu(anchor, [
       { label: 'Apply', icon: 'play', onClick: () => send(d, { ps: p.id }).then(() => refreshPanel(d.id, 'presets')) },
       { label: 'Overwrite with current look', icon: 'save', onClick: async () => { if (await UI.confirm({ title: 'Overwrite preset', message: `Replace "${p.name}" with the current look?`, okText: 'Overwrite' })) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name: p.name, quick_label: p.quick_label }); UI.toast('Preset updated', 'success'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
-      { label: 'Rename', icon: 'edit', onClick: async () => { const name = await UI.prompt({ title: 'Rename preset', label: 'Name', value: p.name, maxlength: 32 }); if (name && name !== p.name) { try { await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name, quick_label: p.quick_label, rename: true }); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
+      { label: 'Rename', icon: 'edit', onClick: async () => { const name = await UI.prompt({ title: 'Rename preset', label: 'Name', value: p.name, maxlength: 32 }); if (name && name !== p.name) { try { const r = await api.post(`/api/devices/${d.id}/presets`, { slot: p.id, name, quick_label: p.quick_label, rename: true }); if (r && r.warning) UI.toast(r.warning, 'warning'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
       { label: 'Copy to other lights…', icon: 'layers', onClick: () => (p.is_playlist ? UI.toast('Playlists point at other presets by number, so they can\'t be copied. Copy the presets in it instead.', 'error', 8000) : Lights.copyPresetDialog(d, p)) },
       '-',
       { label: 'Delete', icon: 'trash', danger: true, onClick: async () => { if (await UI.confirm({ title: 'Delete preset', message: `Delete "${p.name}" from ${d.name}?`, okText: 'Delete', danger: true })) { try { await api.del(`/api/devices/${d.id}/presets/${p.id}`); UI.toast('Preset deleted', 'success'); refreshPanel(d.id, 'presets'); } catch (e) { UI.notifyError(e); } } } },
@@ -405,7 +405,7 @@
       if (!name.value.trim()) throw new Error('Give the playlist a name');
       if (!entries.length) throw new Error('Add at least one step');
       const playlist = { ps: entries.map((e) => e.ps), dur: entries.map((e) => Math.round(e.dur * 10)), transition: entries.map(() => 7), repeat: +repeat.value, end: 0, r: shuffle.checked };
-      await api.post(`/api/devices/${d.id}/presets`, { name: name.value.trim(), state: { on: true, playlist } });
+      await api.post(`/api/devices/${d.id}/presets`, { name: name.value.trim(), state: { on: true, playlist } });  // started straight after, so a put-back warning doesn't matter
       await send(d, { playlist });
       UI.toast('Playlist saved and started', 'success'); m.close(); refreshPanel(d.id, 'presets');
     })().catch(UI.notifyError));

@@ -8,7 +8,7 @@ from flask import Blueprint
 from .. import get_ctx
 from ..config import new_id
 from ..wled.client import WLEDClient, WLEDError
-from ..wled.manager import DeviceError, normalise_device, normalise_mac, sanitise_state
+from ..wled.manager import DeviceError, PutBackError, normalise_device, normalise_mac, sanitise_state
 from . import APIError, body, ok
 from .dashboard import ensure_tile, remove_tile
 
@@ -111,6 +111,9 @@ def update_device(device_id):
         current = _device_cfg(cfg, device_id)
         merged = {**current, **{k: v for k, v in data.items() if k in ("name", "host", "enabled", "icon", "color", "notes", "poll_interval_s")}}
         cleaned = normalise_device(merged, existing_id=device_id)
+        if cleaned["host"] != current.get("host"):
+            # A new address may be a different controller: learn its MAC afresh.
+            cleaned["mac"] = ""
         current.update(cleaned)
         for tile in cfg["dashboard"].get("tiles", []):
             if tile.get("type") == "device" and tile.get("ref") == device_id and not tile.get("name"):
@@ -222,7 +225,10 @@ def save_preset(device_id):
     if data.get("rename"):
         # Rename only: keep what the preset does.  (A plain save would store
         # whatever the lights show right now in it, and wipe a playlist.)
-        presets = ctx.devices.rename_preset(device_id, slot, name, quick_label=str(data.get("quick_label") or "")[:2])
+        try:
+            presets = ctx.devices.rename_preset(device_id, slot, name, quick_label=str(data.get("quick_label") or "")[:2])
+        except PutBackError as exc:
+            return ok({"presets": exc.presets, "slot": slot, "warning": str(exc)})
         return ok({"presets": presets, "slot": slot})
     state = None
     if isinstance(data.get("state"), dict) and data["state"]:
@@ -231,13 +237,16 @@ def save_preset(device_id):
             state.pop(key, None)
         if not state:
             raise APIError("state contains nothing that can be saved in a preset")
-    presets = ctx.devices.save_preset(
-        device_id, slot, name,
-        include_brightness=bool(data.get("include_brightness", True)),
-        save_segment_bounds=bool(data.get("save_segment_bounds", True)),
-        quick_label=str(data.get("quick_label") or "")[:2],
-        state=state,
-    )
+    try:
+        presets = ctx.devices.save_preset(
+            device_id, slot, name,
+            include_brightness=bool(data.get("include_brightness", True)),
+            save_segment_bounds=bool(data.get("save_segment_bounds", True)),
+            quick_label=str(data.get("quick_label") or "")[:2],
+            state=state,
+        )
+    except PutBackError as exc:
+        return ok({"presets": exc.presets, "slot": slot, "warning": str(exc)})
     return ok({"presets": presets, "slot": slot})
 
 

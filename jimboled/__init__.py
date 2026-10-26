@@ -222,7 +222,6 @@ TOKEN_ALLOWED_WRITES = tuple(re.compile(p) for p in (
     r"^/api/lights/undo/[^/]+$",
     r"^/api/devices/[^/]+/identify$",
     r"^/api/devices/[^/]+/(state|refresh|copy)$",
-    r"^/api/devices/[^/]+/presets/\d+/copy$",
     r"^/api/scenes/[^/]+/run$",
     r"^/api/schedules/[^/]+/run$",
     r"^/api/timers$",

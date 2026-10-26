@@ -13,15 +13,16 @@ JimboLED from Home Assistant, Node-RED, cron jobs or a Stream Deck.
 * **Or use an API token** (Settings → Integrations): send
   `Authorization: Bearer jl_…`. A token replaces both the login and the
   `X-Requested-With` header, and is for *operating* things: it may read
-  everything except `/api/tokens`, `/api/settings` and backups, and may POST to
-  `/api/lights/apply|capture|undo/…`, `/api/devices/<id>/state|refresh|copy|identify`,
-  `/api/devices/<id>/presets/<slot>/copy`, `/api/scenes/<id>/run`,
+  everything except `/api/tokens`, `/api/settings`, `/api/notify` and backups,
+  and may POST to `/api/lights/apply|capture|undo/…`,
+  `/api/devices/<id>/state|refresh|copy|identify`, `/api/scenes/<id>/run`,
   `/api/schedules/<id>/run`, `/api/timers`, `/api/gpio/all-off`,
   `/api/system/shutdown-all`, `/api/estop/engage`, and
-  `/api/gpio/switches/<id>/action` with `on`/`off`/`toggle`/`pulse`. Everything
-  else – changing settings, switches, schedules or stops, resetting an
-  emergency stop, holding a hold-to-run switch – gets **403**. A wrong token
-  gets **401**.
+  `/api/gpio/switches/<id>/action` with `on`/`off`/`toggle`/`pulse`. A state
+  change sent with a token can't save, delete or rename presets either.
+  Everything else – changing settings, switches, schedules or stops, storing
+  presets on controllers, resetting an emergency stop, holding a hold-to-run
+  switch – gets **403**. A wrong token gets **401**.
 * Errors are `{"error": "message"}` with a 4xx/5xx status.
 * Requests must use an IP address, a plain host name, or a private-style name (`*.local`, `*.lan`, `*.home`, …) in the `Host` header; other names get **421** unless listed in `server.allowed_hosts`. This blocks DNS-rebinding attacks from the internet.
 * Hold-to-run switches must receive a heartbeat at least every second (the dashboard sends one every 0.4 s); the relay releases automatically otherwise. They can't be pulsed, toggled or turned on by a scene, a schedule or a script – only held by a person (the 2 s *Test this pin* blip while setting up is the one exception).
@@ -56,12 +57,12 @@ also switches the light on unless `on` says otherwise.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/api/lights/apply` | `{"target":"all","intent":{"preset":"Movie"}}` or flat: `{"target":"group:grp-…","color":"#ff0000","brightness":60}`. Returns `ok`, `changed`, `total`, a plain-English `message` and per-light `results[]` (`status` ok/partial/skipped/offline/error, `notes`) |
+| POST | `/api/lights/apply` | `{"target":"all","intent":{"preset":"Movie"}}` or flat: `{"target":"group:grp-…","color":"#ff0000","brightness":60}`. Returns `ok`, `changed`, `total`, a plain-English `message` and per-light `results[]` (`status` ok/partial/skipped/offline/error, `notes`). Add `"no_undo": true` when there is nothing to undo to (the in-between steps of a slider drag) |
 | GET | `/api/lights/catalog?target=…` (or `?devices=a,b`) | effects, palettes and presets by name with `count` (how many of the online lights have each), `caps` {white, cct}, `led_count`, `power_ma` |
 | POST | `/api/lights/capture` | `{"target":…}` → the exact current look as scene `actions[]` |
-| POST | `/api/lights/undo/<undo>` | every `/lights/apply` that changed something returns an `undo` key; this puts those lights back as they were (kept 10 minutes, last 20 changes) |
+| POST | `/api/lights/undo/<undo>` | every `/lights/apply` that changed something returns an `undo` key; this puts those lights back as they were (kept 10 minutes, last 50 changes). Undoing a preset also removes segments the preset added |
 | POST | `/api/devices/<id>/copy` | `{"target":…, "include_brightness":true}` – make other lights look like this one |
-| POST | `/api/devices/<id>/presets/<slot>/copy` | `{"target":…, "overwrite":true}` – store this preset on other controllers under the same name (same-name slot, else the same number if free, else the first free slot). Playlists can't be copied |
+| POST | `/api/devices/<id>/presets/<slot>/copy` | `{"target":…, "overwrite":true}` – store this preset on other controllers under the same name (same-name slot, else the same number if free, else the first free slot). Playlists can't be copied. API tokens can't use this (it changes what is stored on the controllers) |
 | GET / POST | `/api/groups` | `{"name":"Bedroom","icon":"bed","color":"#…","devices":["wled-…"]}`; names are unique; each group gets a dashboard tile |
 | PUT / DELETE | `/api/groups/<id>` | |
 
@@ -128,7 +129,7 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 | POST | `/api/devices/<id>/refresh` | poll now |
 | POST | `/api/devices/<id>/catalog` | reload effects/palettes |
 | GET | `/api/devices/<id>/presets` | |
-| POST | `/api/devices/<id>/presets` | `{"name":"Movie","slot":5,"quick_label":"MV","include_brightness":true,"save_segment_bounds":true}` (slot optional = next free) saves the current look. Add `"state":{…}` to save that instead, or `"rename":true` to rename the preset in `slot` while keeping what it does (playlists included) |
+| POST | `/api/devices/<id>/presets` | `{"name":"Movie","slot":5,"quick_label":"MV","include_brightness":true,"save_segment_bounds":true}` (slot optional = next free) saves the current look. Add `"state":{…}` to save that instead, or `"rename":true` to rename the preset in `slot` while keeping what it does (playlists included). WLED shows a given look while it stores it, so the lights are put back afterwards; if that fails the save still counts and the reply carries a `warning` |
 | DELETE | `/api/devices/<id>/presets/<slot>` | |
 | POST | `/api/devices/<id>/reboot` | |
 | POST | `/api/devices/<id>/identify` | blink it white for 3 s, then put it back – to see which light is which |

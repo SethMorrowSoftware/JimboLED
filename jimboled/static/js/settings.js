@@ -235,7 +235,10 @@
     /** Pull what is typed into "lights" rows back into the actions (before a redraw or save). */
     function collect(strict) {
       for (const [a, ed] of editors) {
-        try { a.target = ed.target.getValue(); a.intent = ed.intent.getValue(); } catch (e) { if (strict) throw e; }
+        // Separately: an unchosen target must not throw away the edits
+        // made to the light settings beside it (and the other way round).
+        try { a.target = ed.target.getValue(); } catch (e) { if (strict) throw e; }
+        try { a.intent = ed.intent.getValue(); } catch (e) { if (strict) throw e; }
       }
     }
     function actionRow(a, i) {

@@ -341,7 +341,7 @@ class Scheduler:
         return True
 
     def _fire(self, sched: Dict[str, Any]) -> None:
-        sid = sched["id"]
+        sid = str(sched["id"])  # the same key _consider used
         started = time.time()
         try:
             result = self.runner(sched["action"]) or {}
@@ -364,13 +364,13 @@ class Scheduler:
             self._finish_once(sched)
 
     def _finish_once(self, sched: Dict[str, Any]) -> None:
-        sid = sched["id"]
+        sid = str(sched["id"])
 
         def mutate(cfg):
             for s in cfg.get("schedules", []):
-                if s.get("id") == sid:
+                if isinstance(s, dict) and str(s.get("id")) == sid:
                     if s.get("delete_after"):
-                        cfg["schedules"] = [x for x in cfg["schedules"] if x.get("id") != sid]
+                        cfg["schedules"] = [x for x in cfg["schedules"] if not (isinstance(x, dict) and str(x.get("id")) == sid)]
                     else:
                         s["enabled"] = False
                     return
@@ -386,7 +386,7 @@ class Scheduler:
         A one-off timer that is run by hand is used up: it must not go off a
         second time later, after somebody has switched things back on.
         """
-        sid = sched["id"]
+        sid = str(sched["id"])
         with self._lock:
             if sid in self._running:
                 return {"error": "it is already running"}
@@ -418,7 +418,7 @@ class Scheduler:
         except Exception:
             nxt = None
         with self._lock:
-            st = dict(self._state.get(sched.get("id")) or {})
+            st = dict(self._state.get(str(sched.get("id"))) or {})
         needs_location = (sched.get("when") or {}).get("type") == "sun" and (location.get("lat") is None or location.get("lon") is None)
         return {**sched, "next_run": nxt.timestamp() if nxt else None, "last_run": st.get("last_run"),
                 "last_ok": st.get("ok"), "last_message": st.get("message"), "missed_at": st.get("missed_at"),

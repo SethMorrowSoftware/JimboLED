@@ -60,7 +60,9 @@
   async function apply(target, intent, opts) {
     opts = opts || {};
     try {
-      const r = await api.post('/api/lights/apply', { target: targetValue(targetKey(target)), intent });
+      // Only the lights panel offers Undo; elsewhere the server needn't
+      // remember how the lights looked.
+      const r = await api.post('/api/lights/apply', { target: targetValue(targetKey(target)), intent, ...(opts.undo ? {} : { no_undo: true }) });
       if (r.devices && window.App && App.setDevices) App.setDevices(r.devices);
       if (opts.status) opts.status(r);
       if (!r.ok && !opts.quiet) UI.toast(r.message, 'error', 9000);
@@ -144,9 +146,14 @@
     const offBtn = el(`<button class="btn">${icon('moon')}<span>Off</span></button>`);
     onBtn.onclick = () => send({ on: true });
     offBtn.onclick = () => send({ on: false });
-    const sendBri = UI.throttle((v) => send({ bri: v, on: true }, true), 450);
-    const bri = UI.slider({ label: 'Brightness', min: 1, max: 255, value: 128, format: (v) => Math.round(v / 2.55) + '%', onInput: sendBri, onChange: (v) => send({ bri: v, on: true }) });
-
+    // One drag of the slider is one undo step: it starts with the first
+    // move and ends when the slider is let go.
+    let briGesture = null;
+    const sendBri = UI.throttle((v, g) => send({ bri: v, on: true }, g, true), 450);
+    const bri = UI.slider({ label: 'Brightness', min: 1, max: 255, value: 128, format: (v) => Math.round(v / 2.55) + '%',
+      onInput: (v) => { if (!briGesture) briGesture = newGesture(); sendBri(v, briGesture); },
+      onChange: (v) => send({ bri: v, on: true }, briGesture) });
+    bri.input.addEventListener('change', () => { briGesture = null; });  // runs after onChange
     const body = h('div', { class: 'stack lights-panel' }, targetBar, status,
       h('div', { class: 'row wrap' }, h('div', { class: 'btn-group' }, onBtn, offBtn), h('div', { class: 'grow', style: { minWidth: '200px' } }, bri)),
       result, tabsEl, content);
@@ -164,25 +171,20 @@
       if (opts.sync && (intent.effect || intent.preset)) out.sync = true;
       return out;
     }
-    // Undo goes back one step.  A brightness drag sends several changes
-    // (the in-between ones "quiet"), and those count as one step.
-    let undo = null, lastChange = 0, dragging = false, lastSig = '', gesture = 0, owner = null;
-    async function send(intent, quiet) {
-      // Which request starts a new undo step is decided *before* waiting: the
-      // replies of a drag can come back in any order, and the step must go
-      // back to before the drag's first request.
-      const sig = Object.keys(intent).sort().join();
-      // Part of the same drag: more of its in-between ("quiet") updates, its
-      // final value, or the throttle's last in-between update arriving just
-      // *after* that final value.
-      const continuing = sig === lastSig && Date.now() - lastChange < 1500 && (dragging || quiet);
-      if (!continuing) { gesture += 1; owner = null; }
-      const mine = gesture, first = !continuing;
-      dragging = !!quiet || (continuing && dragging); lastSig = sig; lastChange = Date.now();
-      const r = await apply(targetValue(key), withOpts(intent), { quiet: true, status: showResult });
-      if (r && r.undo && mine === gesture) {
-        if (first) { undo = r.undo; owner = 'first'; } else if (!owner) { undo = r.undo; owner = 'later'; }
-      }
+    // Undo goes back one step.  A step ("gesture") is one tap, one slider
+    // drag or one colour-picker session; only its first request asks the
+    // server to remember the lights, and Undo puts them back to before it.
+    let undo = null, gestures = 0, latest = null;
+    const newGesture = () => ({ n: ++gestures, started: false, undo: null });
+    async function send(intent, gesture, quiet) {
+      const g = gesture || newGesture();
+      const first = !g.started;
+      g.started = true;
+      if (first) latest = g;  // the most recently *started* step
+      const r = await apply(targetValue(key), withOpts(intent), { quiet: true, status: showResult, undo: first });
+      if (r && r.undo && first) g.undo = r.undo;
+      // Replies can come back out of order: only the newest step's undo counts.
+      if (latest === g && g.undo) undo = g.undo;
       if (r) drawUndo();
       if (r && !quiet) refreshState();
       return r;
@@ -277,13 +279,14 @@
     }
     function customColourDialog() {
       let last = null;
-      const sendLive = UI.throttle((rgbw, cct) => send({ color: Color.rgbToHex(rgbw), ...(cat.caps.white ? { white: rgbw[3] } : {}), ...(cat.caps.cct ? { cct } : {}), best_effort: true }, true), 450);
+      const g = newGesture();  // everything picked in this dialog is one undo step
+      const sendLive = UI.throttle((rgbw, cct) => send({ color: Color.rgbToHex(rgbw), ...(cat.caps.white ? { white: rgbw[3] } : {}), ...(cat.caps.cct ? { cct } : {}), best_effort: true }, g, true), 450);
       const picker = Color.picker({ rgb: [255, 140, 0], hasWhite: cat.caps.white, hasCct: cat.caps.cct, onChange: (rgbw, cct) => { last = [rgbw, cct]; sendLive(rgbw, cct); } });
       const fav = el(`<button class="btn">${icon('star')}<span>Add to favourites</span></button>`);
       fav.onclick = async () => { const hx = Color.rgbToHex((last && last[0]) || picker.getValue().rgbw); try { await addFavourite(hx); UI.toast(`${hx} added to favourites`, 'success'); } catch (e) { UI.notifyError(e); } };
       const done = el(`<button class="btn primary">Done</button>`);
       const dm = UI.modal({ title: 'Pick a colour', icon: 'palette', body: picker, footer: [fav, done] });
-      done.onclick = async () => { if (last) await send({ color: Color.rgbToHex(last[0]), ...(cat.caps.white ? { white: last[0][3] } : {}), ...(cat.caps.cct ? { cct: last[1] } : {}), best_effort: true }); dm.close(); draw(); };
+      done.onclick = async () => { if (last) await send({ color: Color.rgbToHex(last[0]), ...(cat.caps.white ? { white: last[0][3] } : {}), ...(cat.caps.cct ? { cct: last[1] } : {}), best_effort: true }, g); dm.close(); draw(); };
     }
     function presetsTab() {
       const root = h('div', { class: 'stack' });
@@ -568,7 +571,7 @@
     const touched = new Set();
     const watch = (key, ...els) => els.forEach((e) => ['input', 'change'].forEach((ev) => e.addEventListener(ev, () => touched.add(key))));
     watch('on', power); watch('bri', bri); watch('color', useCol, col); watch('preset', preset); watch('effect', effect);
-    watch('palette', palette); watch('transition', trans); watch('fade', fade, fadeMin);
+    watch('palette', palette); watch('transition', trans); watch('fade', fade); watch('fadeMin', fadeMin);
     const isWake = (n) => !!(n && n.on && ((n.tbri ?? n.target) || 0) > 0);
     root.getValue = () => {
       const out = JSON.parse(JSON.stringify(intent));
@@ -587,8 +590,17 @@
       if (touched.has('transition')) { delete out.transition; if (trans.value !== '') out.transition = +trans.value; }
       const minutes = Math.max(1, Math.min(255, +fadeMin.value || 30));
       const wakeTo = () => (bri.value ? Math.round(Math.max(1, Math.min(100, +bri.value)) * 2.55) : 255);
-      if (touched.has('fade')) {
+      // Picking the same kind of fade again changes nothing (a stored
+      // sunrise-mode fade stays one).
+      const fadeChanged = touched.has('fade') && fade.value !== curFade;
+      if (fadeChanged) {
         delete out.nightlight;
+        if (isWake(intent.nightlight) && fade.value !== 'in') {
+          // No longer a wake-up: its "start dim" goes, and the brightness
+          // box (which showed where the wake-up ended) is the brightness.
+          delete out.bri; delete out.brightness;
+          if (bri.value) out.brightness = Math.max(1, Math.min(100, +bri.value));
+        }
         if (fade.value === 'out') out.nightlight = { on: true, minutes, mode: 'fade', target: 0 };
         else if (fade.value === 'stop') out.nightlight = { on: false };
         else if (fade.value === 'in') {
@@ -596,10 +608,17 @@
           out.nightlight = { on: true, minutes, mode: 'fade', target: wakeTo() };
           out.on = true; delete out.brightness; out.bri = 1;
         }
-      } else if (touched.has('bri') && isWake(out.nightlight)) {
-        // The brightness box shows where a wake-up fade ends.
-        out.nightlight = { ...out.nightlight, tbri: wakeTo() };
-        delete out.nightlight.target; delete out.brightness; out.bri = 1;
+      } else {
+        if (touched.has('fadeMin') && out.nightlight && out.nightlight.on) {
+          // Only the length changed: keep the fade's mode and end point.
+          out.nightlight = { ...out.nightlight, dur: minutes };
+          delete out.nightlight.minutes;
+        }
+        if (touched.has('bri') && isWake(out.nightlight)) {
+          // The brightness box shows where a wake-up fade ends.
+          out.nightlight = { ...out.nightlight, tbri: wakeTo() };
+          delete out.nightlight.target; delete out.brightness; out.bri = 1;
+        }
       }
       if (!Object.keys(out).some((k) => k !== 'transition' && k !== 'best_effort')) throw new Error('Say what the lights should do: power, brightness, a colour, a preset or an effect');
       return out;
@@ -620,6 +639,7 @@
     if (intent.bri && !(intent.nightlight && intent.nightlight.on && intent.nightlight.tbri)) parts.push(Math.round(intent.bri / 2.55) + '%');
     if (intent.kelvin) parts.push(`white ${intent.kelvin} K`);
     if (intent.nightlight && intent.nightlight.on) parts.push(`${(intent.nightlight.tbri || 0) > 0 ? 'fade in' : 'fade out'} over ${intent.nightlight.dur || 60} min`);
+    else if (intent.nightlight && intent.nightlight.on === false) parts.push('stop fading');
     return parts.join(', ') || 'change';
   }
 

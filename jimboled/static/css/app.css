@@ -561,7 +561,6 @@ pre.code { margin: 0; padding: var(--sp-4) var(--sp-5); background: var(--surfac
   .topbar { gap: var(--sp-3); padding-left: max(var(--sp-4), env(safe-area-inset-left)); padding-right: max(var(--sp-4), env(safe-area-inset-right)); }
   .brand-title { font-size: var(--fs-base); max-width: 34vw; }
   .brand-sub { display: none; }
-  .topbar-status { justify-content: flex-end; }
   .main { padding-left: var(--sp-4); padding-right: var(--sp-4); }
   /* Small screens keep the labels that matter and drop the rest. */
   .hide-sm { display: none; }
@@ -569,9 +568,21 @@ pre.code { margin: 0; padding: var(--sp-4) var(--sp-5); background: var(--surfac
   /* The two pills that stay are short on phones ("3/3", "stopped") and must
      stay readable: the title gives way first. */
   .topbar-status #pill-devices, .topbar-status #pill-estop { flex-shrink: 0; }
+  .topbar-status { justify-content: safe flex-end; }
+  /* The header's buttons leave a phone almost no room: a latched emergency
+     stop gets a row of its own rather than being squeezed out of sight. */
+  .topbar:has(#pill-estop) { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .topbar:has(#pill-estop) .topbar-status { order: 3; flex: 1 0 100%; justify-content: center; }
   .brand { min-width: 0; flex-shrink: 1; }
   .brand-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .estop-btn { padding: var(--sp-3) var(--sp-4); }
+}
+@media (max-width: 430px) {
+  /* The logo alone is enough here; the online count gets the room. */
+  .brand-text { display: none; }
+}
+@media (max-width: 340px) {
+  .topbar:not(:has(#pill-estop)) #pill-devices { display: none; }
 }
 
 /* Coarse pointers (phones, tablets) get full-size touch targets. */

@@ -437,7 +437,11 @@ class DiscoveryService:
         lost = self._lost_controllers()
         if not lost:
             return []
-        known_hosts = {d.get("host") for d in (self.store.section("devices") or []) if isinstance(d, dict)}
+        # Addresses of lights that are themselves lost don't count as taken:
+        # two controllers that swapped addresses are each found at the other's.
+        lost_ids = {did for did, _ in lost.values()}
+        known_hosts = {d.get("host") for d in (self.store.section("devices") or [])
+                       if isinstance(d, dict) and d.get("id") not in lost_ids}
         entries = list(found or [])
         if found is None:
             candidates = [n["host"] for n in self.listener.snapshot(max_age_s=300)

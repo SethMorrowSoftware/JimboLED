@@ -162,7 +162,11 @@
       const key = t.id;
       let ent = App.tiles.get(key);
       const sig = tileSignature(t);
-      if (!ent || ent.sig !== sig) { if (ent && ent.destroy) ent.destroy(); ent = buildTile(t, devById, swById, sceneById); if (!ent) continue; ent.sig = sig; App.tiles.set(key, ent); }
+      if (!ent || ent.sig !== sig) {
+        // The old tile's element goes too, or a rebuilt tile shows twice.
+        if (ent) { if (ent.destroy) ent.destroy(); ent.el.remove(); App.tiles.delete(key); }
+        ent = buildTile(t, devById, swById, sceneById); if (!ent) continue; ent.sig = sig; App.tiles.set(key, ent);
+      }
       ent.tile = t;
       wanted.push(ent);
     }

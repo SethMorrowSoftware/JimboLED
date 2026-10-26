@@ -43,6 +43,14 @@ class DeviceError(Exception):
     pass
 
 
+class PutBackError(DeviceError):
+    """A preset was saved, but the lights could not be put back as they were."""
+
+    def __init__(self, message: str, *, presets: Optional[List[Dict[str, Any]]] = None):
+        super().__init__(message)
+        self.presets = presets or []
+
+
 @dataclass
 class DeviceRecord:
     cfg: Dict[str, Any]
@@ -72,6 +80,9 @@ class DeviceRecord:
     in_flight: bool = False
     changed_at: float = 0.0
     latency_ms: float = 0.0
+    # Set when a controller with a different MAC address answers at this
+    # address (DHCP gave it the old one).  Nothing is sent to it then.
+    wrong_device: str = ""
 
 
 def normalise_mac(value: Any) -> str:
@@ -356,8 +367,18 @@ class DeviceManager:
             try:
                 doc = rec.client.get_state_info()
                 rec.latency_ms = round((time.monotonic() - t0) * 1000, 1)
-                self._absorb(rec, doc["state"], doc["info"])
-                polled = True
+                mine, theirs = normalise_mac(rec.cfg.get("mac")), normalise_mac(_as_doc(doc["info"]).get("mac"))
+                if mine and theirs and mine != theirs:
+                    # Another controller got this one's old address.  Its
+                    # state is not this light's, and commands must not reach it.
+                    rec.wrong_device = (f"a different WLED ({_as_doc(doc['info']).get('name') or theirs}) "
+                                        f"answers at {rec.cfg.get('host')}; this light has probably moved")
+                    rec.failures = max(rec.failures, 1)
+                    self._mark_offline(rec, rec.wrong_device)
+                else:
+                    rec.wrong_device = ""
+                    self._absorb(rec, doc["state"], doc["info"])
+                    polled = True
             except WLEDUnreachable as exc:
                 self._mark_offline(rec, str(exc))
             except WLEDError as exc:
@@ -377,13 +398,19 @@ class DeviceManager:
         """Keep each controller's MAC address in its config entry, so it can be
         recognised at a new IP address even right after JimboLED restarts."""
         mac = normalise_mac(_as_doc(rec.info).get("mac"))
-        if not mac or rec.cfg.get("mac") == mac:
+        # Learned once.  Never overwritten: a *different* MAC at this address
+        # means another controller answers here (see refresh()).
+        if not mac or rec.cfg.get("mac"):
             return
         did = rec.cfg["id"]
 
+        host = rec.cfg.get("host")
+
         def mutate(cfg):
             for d in cfg.get("devices", []):
-                if isinstance(d, dict) and d.get("id") == did:
+                # Only the entry this poll was for: its address may have been
+                # edited (or a MAC set) since.
+                if isinstance(d, dict) and d.get("id") == did and d.get("host") == host and not d.get("mac"):
                     d["mac"] = mac
 
         try:
@@ -489,6 +516,11 @@ class DeviceManager:
                 log.exception("device change callback failed")
 
     # --------------------------------------------------------------- access
+    @staticmethod
+    def _check_identity(rec: DeviceRecord) -> None:
+        if rec.wrong_device:
+            raise DeviceError(f"{rec.cfg.get('name')}: {rec.wrong_device}")
+
     def _get(self, device_id: str) -> DeviceRecord:
         with self._lock:
             rec = self._devices.get(device_id)
@@ -597,6 +629,7 @@ class DeviceManager:
         controller that is marked offline without holding everybody up."""
         rec = self._get(device_id)
         clean = sanitise_state(payload)
+        self._check_identity(rec)
         with rec.lock:
             clean = self._prepare(rec, clean)
             try:
@@ -802,35 +835,66 @@ class DeviceManager:
                 row.update(status="partial", message="; ".join(row["notes"]))
         return [rows[did] for did in device_ids if did in rows]
 
-    def capture(self, device_ids: List[str], *, for_undo: bool = False) -> List[Dict[str, Any]]:
-        """Snapshot what each online controller is showing right now."""
-        out = []
+    def capture(self, device_ids: List[str], *, for_undo: bool = False, fresh: bool = False) -> List[Dict[str, Any]]:
+        """Snapshot what each online controller is showing right now.
+
+        ``fresh`` reads each controller first instead of trusting the last
+        poll (which can be seconds old), in parallel.
+        """
+        recs = []
         for did in device_ids:
             try:
                 rec = self._get(did)
             except DeviceError:
                 continue
-            if not rec.online:
-                continue
-            snap = _intents.snapshot(self._view(rec), nightlight=for_undo)
-            if snap:
-                out.append({"id": did, "name": rec.cfg.get("name"), "state": snap})
-        return out
+            if rec.online:
+                recs.append(rec)
 
-    def restore(self, snapshots: List[Dict[str, Any]]) -> Dict[str, str]:
+        def one(rec: DeviceRecord):
+            view = self._view(rec)
+            if fresh:
+                try:
+                    view.state = _as_doc(rec.client.get_state()) or view.state
+                except WLEDError:
+                    pass
+            snap = _intents.snapshot(view, nightlight=for_undo)
+            return {"id": rec.cfg["id"], "name": rec.cfg.get("name"), "state": snap} if snap else None
+
+        if fresh and len(recs) > 1:
+            try:
+                rows = [f.result() for f in [self._cmd_pool.submit(one, r) for r in recs]]
+            except RuntimeError:  # shutting down
+                rows = []
+        else:
+            rows = [one(r) for r in recs]
+        return [r for r in rows if r]
+
+    def restore(self, snapshots: List[Dict[str, Any]], *, remove_new_segments: bool = False) -> Dict[str, str]:
         """Put controllers back to snapshots taken by :meth:`capture` (undo).
 
-        Segments that appeared since (a preset with its own layout) are
-        removed, so "put back" really is the same look.
+        ``remove_new_segments``: also delete segments that are there now but
+        weren't in the snapshot.  Only a preset can add segments, and only a
+        snapshot read fresh from the controller (``capture(fresh=True)``) can
+        tell "added since" from "the poll had not seen it yet".
         """
-        plans = {}
+        plans, wanted_main = {}, {}
         for snap in snapshots:
             try:
                 rec = self._get(snap["id"])
             except DeviceError:
                 continue
-            plans[snap["id"]] = restore_payload(snap["state"], _as_doc(rec.state))
-        return self.apply_plans(plans)
+            plans[snap["id"]] = restore_payload(snap["state"], _as_doc(rec.state) if remove_new_segments else None)
+            wanted_main[snap["id"]] = snap["state"].get("mainseg")
+        if len(plans) > 1:
+            for payload in plans.values():
+                payload["udpn"] = {"nn": True}  # no sync echo between the lights being put back
+        results = self.apply_plans(plans)
+        for did, outcome in results.items():
+            if outcome == "ok":
+                rec = self._get(did)
+                with rec.lock:
+                    self._fix_mainseg(rec, {"mainseg": wanted_main.get(did)}, _as_doc(rec.state))
+        return results
 
     def copy_preset(self, source_id: str, slot: int, target_ids: List[str], *, overwrite: bool = True) -> List[Dict[str, Any]]:
         """Store one controller's preset on others, under the same name.
@@ -885,6 +949,8 @@ class DeviceManager:
             try:
                 self.save_preset(did, target_slot, portable["name"], quick_label=portable.get("quick_label", ""),
                                  state=state)
+            except PutBackError as exc:
+                notes = [*notes, str(exc)]  # copied all the same
             except DeviceError as exc:
                 row.update(status="error", message=str(exc))
                 continue
@@ -893,52 +959,128 @@ class DeviceManager:
                 row.update(status="partial", message="; ".join(notes))
         return rows
 
-    def save_preset(self, device_id: str, slot: int, name: str, **kwargs) -> Dict[str, Any]:
-        """Save a preset.  With ``state=`` (a given look rather than the live
-        one) the lights are put back afterwards: WLED *applies* such a document
-        to the strip – and starts a playlist in it – before it stores it, so
-        renaming or copying a preset would otherwise change the lights."""
+    def save_preset(self, device_id: str, slot: int, name: str, **kwargs) -> List[Dict[str, Any]]:
+        """Save a preset and wait until the controller has really stored it.
+
+        With ``state=`` (a given look rather than the live one) the lights are
+        put back afterwards: WLED *applies* such a document to the strip – and
+        starts a playlist in it – before it stores it, so renaming or copying a
+        preset would otherwise change the lights.  If they can't be put back,
+        :class:`PutBackError` says so (the preset itself was saved).
+        """
         rec = self._get(device_id)
         content = kwargs.get("state")
+        self._check_identity(rec)
         with rec.lock:
-            before = None
-            if content:
+            if not content:
                 try:
-                    before = rec.client.get_state()
+                    rec.client.save_preset(slot, name, **kwargs)
                 except WLEDError as exc:
-                    raise DeviceError(f"{rec.cfg.get('name')}: could not read how it looks first ({exc})")
+                    raise DeviceError(str(exc))
+                self._wait_for_preset(rec, slot, name)
+                return _presets_list(rec.presets)
+            playlist = "playlist" in content
+            if playlist and _as_doc(rec.info).get("live") and not _as_doc(rec.state).get("lor"):
+                # WLED writes a playlist from the one it is playing, and it
+                # doesn't do that while another app streams to the strip.
+                raise DeviceError(f"{rec.cfg.get('name')} is showing another app's stream; "
+                                  "stop that (or tap Take over) and try again")
+            try:
+                before = rec.client.get_state()
+            except WLEDError as exc:
+                raise DeviceError(f"{rec.cfg.get('name')}: could not read how it looks first ({exc})")
+            failure: Optional[WLEDError] = None
             try:
                 rec.client.save_preset(slot, name, **kwargs)
             except WLEDError as exc:
-                raise DeviceError(str(exc))
-            if isinstance(before, dict) and before:
-                self._put_back(rec, before, playlist_started="playlist" in content)
-            time.sleep(0.8)  # WLED writes presets.json asynchronously
-            self._safe_reload_presets(rec)
+                # A timeout or a lost reply can come *after* WLED applied the
+                # look (and even stored it), so the lights are put back anyway.
+                failure = exc
+            stored = self._wait_for_preset(rec, slot, name, playlist=playlist)
+            if playlist and not stored:
+                # Putting the lights back now would make WLED store an empty
+                # playlist; leave it playing rather than lose it.
+                raise DeviceError(f"{rec.cfg.get('name')} hasn't stored the playlist yet, so it was left playing; "
+                                  "check its presets in a moment")
+            problem = self._put_back(rec, before, content, playlist=playlist)
+            if failure is not None and not stored:
+                raise DeviceError(f"{rec.cfg.get('name')} did not confirm the save ({failure})"
+                                  + ("" if problem else "; its lights were put back as they were"))
+            if problem:
+                raise PutBackError(f"saved, but {rec.cfg.get('name')}'s lights could not be put back as they were "
+                                   f"({problem})", presets=_presets_list(rec.presets))
         return _presets_list(rec.presets)
 
-    def _put_back(self, rec: DeviceRecord, before: Dict[str, Any], *, playlist_started: bool = False) -> None:
-        """Restore ``before`` on a controller (caller holds ``rec.lock``)."""
-        try:
-            now = rec.client.get_state()
-        except WLEDError:
-            now = {}
-        restore = restore_payload(before, now)
-        if playlist_started:
-            was = before.get("pl")
-            if isinstance(was, int) and was > 0:
-                restore["ps"] = was          # it was running another playlist: back to that one
-            else:
-                restore["playlist"] = {}     # stop the one the save started
-        if not restore:
-            return
-        try:
-            self._absorb(rec, rec.client.set_state(restore), None)
-        except WLEDError as exc:
-            log.warning("%s: could not put the lights back after saving a preset: %s", rec.cfg.get("name"), exc)
+    def _wait_for_preset(self, rec: DeviceRecord, slot: int, name: str, *, playlist: bool = False,
+                         timeout: float = 4.0) -> bool:
+        """Poll presets.json until ``slot`` holds ``name``.  Caller holds the lock."""
+        want = fit_name(name)
+        deadline = time.monotonic() + timeout
+        time.sleep(0.25)
+        while True:
+            try:
+                presets = rec.client.get_presets()
+                rec.presets, rec.presets_loaded_at = presets, time.monotonic()
+                entry = presets.get(str(int(slot))) or {}
+                if entry.get("n") == want and (not playlist or entry.get("playlist")):
+                    return True
+            except WLEDError:
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.4)
+
+    def _put_back(self, rec: DeviceRecord, before: Dict[str, Any], content: Dict[str, Any], *,
+                  playlist: bool = False) -> Optional[str]:
+        """Restore ``before`` (caller holds ``rec.lock``).  Returns a problem, or None."""
+        last: Optional[Exception] = None
+        for attempt in range(4):
+            try:
+                now: Optional[Dict[str, Any]] = rec.client.get_state()
+            except WLEDError as exc:
+                last, now = exc, None
+            if now is None:
+                # Can't see what the save left behind: assume every segment it
+                # named exists, so the ones before didn't have are removed.
+                ids = {sg.get("id") for sg in (before.get("seg") or []) if isinstance(sg, dict)}
+                segs = content.get("seg") if isinstance(content.get("seg"), list) else []
+                ids |= {sg.get("id", i) for i, sg in enumerate(segs) if isinstance(sg, dict)}
+                now = {"seg": [{"id": i} for i in ids if isinstance(i, int)]}
+            payload = restore_payload(before, now)
+            if isinstance(before.get("transition"), int):
+                payload["transition"] = before["transition"]
+            was_pl, was_ps = before.get("pl"), before.get("ps")
+            if isinstance(was_pl, int) and was_pl > 0:
+                payload["ps"] = was_pl                 # a playlist was running: start it again
+            elif playlist:
+                payload["playlist"] = {}               # stop the one the save started
+            elif isinstance(was_ps, int) and was_ps > 0:
+                payload["pd"] = was_ps                 # it was showing a preset: say so again
+            try:
+                result = rec.client.set_state(payload)
+                self._absorb(rec, result, None)
+                self._fix_mainseg(rec, before, result)
+                return None
+            except WLEDError as exc:
+                last = exc
+                time.sleep(0.3 * (attempt + 1))
+        log.warning("%s: could not put the lights back after saving a preset: %s", rec.cfg.get("name"), last)
+        return str(last)
+
+    def _fix_mainseg(self, rec: DeviceRecord, before: Dict[str, Any], result: Any) -> None:
+        """WLED resets the main segment when it purges or re-creates segments;
+        set it again if it came back different."""
+        want = before.get("mainseg")
+        got = result.get("mainseg") if isinstance(result, dict) else None
+        if isinstance(want, int) and isinstance(got, int) and want != got:
+            try:
+                self._absorb(rec, rec.client.set_state({"mainseg": want}), None)
+            except WLEDError:
+                pass
 
     def delete_preset(self, device_id: str, slot: int) -> List[Dict[str, Any]]:
         rec = self._get(device_id)
+        self._check_identity(rec)
         with rec.lock:
             try:
                 rec.client.delete_preset(slot)
@@ -966,6 +1108,7 @@ class DeviceManager:
     def identify(self, device_id: str, seconds: float = 3.0) -> None:
         """Blink a controller white for a few seconds, then put it back as it was."""
         rec = self._get(device_id)
+        self._check_identity(rec)
         view = self._view(rec)
         identify_client(rec.client, seconds, blink_fx=view.effect_id("Blink"), lock=rec.lock)
         rec.next_poll = time.monotonic() + seconds + 0.5
@@ -987,6 +1130,7 @@ class DeviceManager:
 
     def reboot(self, device_id: str) -> None:
         rec = self._get(device_id)
+        self._check_identity(rec)
         with rec.lock:
             rec.client.reboot()
             rec.next_poll = time.monotonic() + 5.0
@@ -1018,6 +1162,13 @@ def restore_payload(before: Dict[str, Any], now: Optional[Dict[str, Any]] = None
 
 _identifying: Dict[str, Dict[str, Any]] = {}
 _identifying_lock = threading.Lock()
+_identify_hosts: Dict[str, threading.Lock] = {}
+
+
+def _identify_lock(host: str) -> threading.Lock:
+    """One identify at a time per controller (and its put-back timer)."""
+    with _identifying_lock:
+        return _identify_hosts.setdefault(host, threading.Lock())
 
 
 def identify_client(client: WLEDClient, seconds: float = 3.0, *, blink_fx: Optional[int] = None,
@@ -1026,52 +1177,57 @@ def identify_client(client: WLEDClient, seconds: float = 3.0, *, blink_fx: Optio
 
     The current state is read first and restored afterwards (on a timer, so
     the request returns straight away).  Raises :class:`DeviceError` if the
-    controller does not answer.
+    controller does not answer.  Pressing it again while it blinks keeps it
+    blinking a little longer and still puts back the look from before.
     """
     guard = lock or threading.Lock()
     key = client.host
-    with _identifying_lock:
-        pending = _identifying.get(key)
-        if pending:
-            # Already blinking: keep blinking a little longer, and put back the
-            # look from *before* the first blink – never the blink itself.
-            pending["timer"].cancel()
-    with guard:
-        try:
-            if pending:
-                before, segs = pending["before"], pending["segs"]
-            else:
-                before = client.get_state()
-                segs = [s for s in (before.get("seg") or []) if isinstance(s, dict) and isinstance(s.get("id"), int)]
-            blink = {"id": 0, "fx": 1 if blink_fx is None else blink_fx, "sx": 230, "ix": 128, "col": [[255, 255, 255], [0, 0, 0]]}
-            client.set_state({"on": True, "bri": 255, "tt": 0,
-                              "seg": [{**blink, "id": s["id"]} for s in segs] or blink}, verbose=False)
-        except WLEDError as exc:
-            with _identifying_lock:
-                _identifying.pop(key, None)
-            raise DeviceError(f"could not reach it ({exc})")
-    restore: Dict[str, Any] = {k: before[k] for k in ("on", "bri") if k in before}
-    restore["tt"] = 0
-    restore["seg"] = [{k: s[k] for k in ("id", "fx", "sx", "ix", "col", "pal", "c1", "c2", "c3") if k in s} for s in segs]
-    if not restore["seg"]:
-        restore.pop("seg")
-
-    def _put_back():
+    with _identify_lock(key):
         with _identifying_lock:
-            if _identifying.get(key, {}).get("timer") is not timer:
-                return  # a later identify took over
-            _identifying.pop(key, None)
+            pending = _identifying.get(key)
         with guard:
             try:
-                client.set_state(restore, verbose=False)
-            except WLEDError:
-                log.info("could not restore %s after identifying it", client.host)
+                if pending:
+                    # Put back the look from *before* the first blink – never the blink.
+                    before, segs = pending["before"], pending["segs"]
+                else:
+                    before = client.get_state()
+                    segs = [s for s in (before.get("seg") or [])
+                            if isinstance(s, dict) and isinstance(s.get("id"), int)]
+                blink = {"id": 0, "fx": 1 if blink_fx is None else blink_fx, "sx": 230, "ix": 128,
+                         "col": [[255, 255, 255], [0, 0, 0]]}
+                client.set_state({"on": True, "bri": 255, "tt": 0,
+                                  "seg": [{**blink, "id": s["id"]} for s in segs] or blink}, verbose=False)
+            except WLEDError as exc:
+                # A blink already running keeps its own timer, which still
+                # puts the lights back.
+                raise DeviceError(f"could not reach it ({exc})")
+        restore: Dict[str, Any] = {k: before[k] for k in ("on", "bri") if k in before}
+        restore["tt"] = 0
+        restore["seg"] = [{k: s[k] for k in ("id", "fx", "sx", "ix", "col", "pal", "c1", "c2", "c3") if k in s}
+                          for s in segs]
+        if not restore["seg"]:
+            restore.pop("seg")
 
-    timer = threading.Timer(max(1.0, min(10.0, seconds)), _put_back)
-    timer.daemon = True
-    with _identifying_lock:
-        _identifying[key] = {"before": before, "segs": segs, "timer": timer}
-    timer.start()
+        def _put_back():
+            with _identify_lock(key):
+                with _identifying_lock:
+                    if _identifying.get(key, {}).get("timer") is not timer:
+                        return  # a later identify took over
+                    _identifying.pop(key, None)
+                with guard:
+                    try:
+                        client.set_state(restore, verbose=False)
+                    except WLEDError:
+                        log.info("could not restore %s after identifying it", client.host)
+
+        timer = threading.Timer(max(1.0, min(10.0, seconds)), _put_back)
+        timer.daemon = True
+        with _identifying_lock:
+            if pending:
+                pending["timer"].cancel()
+            _identifying[key] = {"before": before, "segs": segs, "timer": timer}
+        timer.start()
 
 
 # How often a controller marked offline is tried again by a command.

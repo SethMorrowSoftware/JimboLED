@@ -115,36 +115,41 @@ def lights_apply():
     # Remember how the lights looked, so the change can be undone – but only
     # for the lights it actually went to: undoing must not touch a light this
     # change skipped (and that somebody may have changed since).
-    before = ctx.devices.capture(ids, for_undo=True)
+    # ``no_undo``: the 2nd, 3rd … step of one slider drag, whose undo is
+    # the one taken at its first step.  A preset can add segments, which
+    # undo removes again – that needs each controller read fresh first.
+    no_undo = bool(data.get("no_undo"))
+    loads_preset = bool(intent.get("preset") or intent.get("preset_slot"))
+    before = [] if no_undo else ctx.devices.capture(ids, for_undo=True, fresh=loads_preset)
     rows = ctx.devices.apply_intent(ids, intent)
     out = summarise(rows)
     out.update({"label": label, "devices": ctx.devices.snapshot()})
     touched = {r["id"] for r in rows if r["status"] in ("ok", "partial", "error")}
     before = [snap for snap in before if snap["id"] in touched]
     if before and out["changed"]:
-        out["undo"] = _remember_undo(before)
+        out["undo"] = _remember_undo(before, remove_new_segments=loads_preset)
     return ok(out)
 
 
 # --------------------------------------------------------------------- undo
 UNDO_KEEP_S = 600
-UNDO_MAX = 20
-_undo: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
+UNDO_MAX = 50
+_undo: Dict[str, Tuple[float, List[Dict[str, Any]], bool]] = {}
 _undo_lock = threading.Lock()
 
 
-def _remember_undo(snapshots: List[Dict[str, Any]]) -> str:
+def _remember_undo(snapshots: List[Dict[str, Any]], *, remove_new_segments: bool = False) -> str:
     import secrets
     import time as _time
 
     key = secrets.token_urlsafe(9)
     now = _time.monotonic()
     with _undo_lock:
-        for k in [k for k, (t, _) in _undo.items() if now - t > UNDO_KEEP_S]:
+        for k in [k for k, entry in _undo.items() if now - entry[0] > UNDO_KEEP_S]:
             _undo.pop(k, None)
         while len(_undo) >= UNDO_MAX:
             _undo.pop(min(_undo, key=lambda k: _undo[k][0]), None)
-        _undo[key] = (now, snapshots)
+        _undo[key] = (now, snapshots, remove_new_segments)
     return key
 
 
@@ -156,7 +161,7 @@ def lights_undo(key):
         entry = _undo.pop(key, None)
     if entry is None:
         raise APIError("that change can no longer be undone", 404)
-    results = ctx.devices.restore([s for s in entry[1] if ctx.devices.has(s["id"])])
+    results = ctx.devices.restore([s for s in entry[1] if ctx.devices.has(s["id"])], remove_new_segments=entry[2])
     names = {s["id"]: s["name"] for s in entry[1]}
     rows = [{"id": did, "name": names.get(did, did), "status": "ok" if res == "ok" else "error",
              "message": "" if res == "ok" else res, "notes": []} for did, res in results.items()]

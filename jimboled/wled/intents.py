@@ -464,7 +464,10 @@ def plan(view: DeviceView, intent: Dict[str, Any]) -> Tuple[Optional[Dict[str, A
     if intent.get("sync"):
         payload["tb"] = 0
 
-    if not payload or set(payload) <= {"tt"}:
+    # "Sync effects" on its own is a change; riding along with a colour this
+    # light can't show, it is not – the light is skipped, not re-synced.
+    asked = [k for k in intent if k not in ("sync", "transition", "best_effort", "segments")]
+    if not payload or set(payload) <= {"tt"} or (asked and set(payload) <= {"tt", "tb"}):
         return None, notes or ["nothing to change"]
     return payload, notes
 
