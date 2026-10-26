@@ -86,6 +86,9 @@
   }
   const whenIcon = (s) => ({ time: 'clock', once: 'timer' }[s.when.type] || (s.when.event === 'sunrise' ? 'sun' : 'moon'));
 
+  const UTC_RE = /^(Etc\/)?(UTC|GMT|UCT|Zulu|Universal)$/;
+  const sameZone = (a, b) => a === b || (UTC_RE.test(a || '') && UTC_RE.test(b || ''));
+
   async function schedulesSection(body) {
     const locCard = h('div', { class: 'card' });
     const card = h('div', { class: 'card' });
@@ -174,7 +177,7 @@
         clockNote ? el(clockNote) : '',
         tzNote ? el(tzNote) : '',
         h('div', { class: 'form-grid' }, UI.field('Latitude', lat), UI.field('Longitude', lon), UI.field('Place name (optional)', label), UI.field('Timezone', tz, 'Changing it needs the installed service.')),
-        here && here !== listing.timezone ? h('div', { class: 'row end' }, useTz) : '',
+        here && !sameZone(here, listing.timezone) ? h('div', { class: 'row end' }, useTz) : '',
         h('div', { class: 'row wrap between' }, geo, save));
     }
     draw();
