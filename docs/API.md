@@ -92,6 +92,13 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 | POST | `/api/timers` | `{"minutes":30,"action":{…},"name":"Sleep timer"}` – a one-off that removes itself (default action: everything off) |
 | GET / PUT | `/api/location` | `{"lat":51.5,"lon":-0.12,"label":"Home","timezone":"Europe/London"}`; `?zones=1` lists timezones. Setting the timezone needs the installed helper |
 
+## Notifications
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET / PUT | `/api/notify` | `{"url":"https://ntfy.sh/<topic>","events":["estop","relay","schedule","offline"]}`. An ntfy URL gets a plain-text message with a title; any other URL gets JSON `{"title","message","event","ts"}`. The same message is not repeated within 10 minutes |
+| POST | `/api/notify/test` | send a test message now; **502** with the reason if it did not arrive |
+
 ## API tokens
 
 | Method | Path | Notes |

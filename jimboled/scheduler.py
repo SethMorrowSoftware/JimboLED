@@ -221,6 +221,8 @@ class Scheduler:
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule")
         self._running: set = set()
         self.started = False
+        # Told about every scheduled (not hand-run) result, e.g. to notify on failure.
+        self.on_result: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None
 
     # persistence ---------------------------------------------------------
     def _load_state(self) -> None:
@@ -323,6 +325,11 @@ class Scheduler:
             self._running.discard(sid)
             self._state[sid] = {**(self._state.get(sid) or {}), "last_run": started, "ok": ok, "message": str(message)[:300]}
             self._save_state()
+        if self.on_result:
+            try:
+                self.on_result(sched, result)
+            except Exception:  # pragma: no cover
+                log.exception("schedule result hook failed")
         if (sched.get("when") or {}).get("type") == "once":
             self._finish_once(sched)
 

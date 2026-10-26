@@ -201,6 +201,16 @@ is stable across restarts. Actions go through the same code as scenes, so the
 GPIO safety rules and emergency stops apply unchanged, and a hold-to-run switch
 can only be scheduled *off*.
 
+## Notifications
+
+`notify.py` queues messages (never blocking: the GPIO manager calls it under
+its lock) and a background thread posts them to an ntfy topic or a webhook.
+Sources are the GPIO event stream (emergency stop engaged/reset, a relay
+released by its time limit or a lost hold), the scheduler's result hook
+(failed schedules and timers), and a 30-second check for lights that have
+been unreachable for 10 minutes. Repeats of the same message are suppressed
+for 10 minutes.
+
 ## Front-end layers
 
 No build step: the browser loads the files in `static/js/` in order and each

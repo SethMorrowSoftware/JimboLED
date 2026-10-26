@@ -295,6 +295,42 @@ def delete_token(token_id):
     return ok({"tokens": public_tokens((ctx.store.section("server") or {}).get("api_tokens"))})
 
 
+# --------------------------------------------------------- notifications
+@bp.get("/notify")
+def get_notify():
+    from ..notify import EVENTS
+
+    ctx = get_ctx()
+    return ok({"notify": ctx.notifier.settings(), "events": list(EVENTS), "last": ctx.notifier.last_result})
+
+
+@bp.put("/notify")
+def set_notify():
+    from ..notify import clean_settings
+
+    ctx = get_ctx()
+    try:
+        clean = clean_settings(body())
+    except ValueError as exc:
+        raise APIError(str(exc))
+    ctx.store.update(lambda cfg: cfg.__setitem__("notify", clean), backup_reason="notify")
+    return ok({"notify": clean})
+
+
+@bp.post("/notify/test")
+def test_notify():
+    """Send a test message straight away and say whether it arrived."""
+    ctx = get_ctx()
+    cfg = ctx.notifier.settings()
+    if not cfg["url"]:
+        raise APIError("Enter the address to send notifications to first")
+    result = ctx.notifier.deliver({"event": "test", "title": "JimboLED test", "url": cfg["url"], "ts": time.time(),
+                                   "message": "Notifications from JimboLED arrive here."})
+    if not result.get("ok"):
+        raise APIError(f"That didn't work: {result.get('error') or 'HTTP ' + str(result.get('status'))}", 502)
+    return ok({"message": "Sent – check your phone"})
+
+
 # ---------------------------------------------------------------- backup
 @bp.get("/backup")
 def download_backup():
@@ -372,6 +408,12 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     data["location"] = _validated_location(data.get("location"))
     data["schedules"] = valid_schedules(data.get("schedules"), data)
     data["schedules_paused"] = bool(data.get("schedules_paused", False))
+    from ..notify import EVENTS, clean_settings
+
+    try:
+        data["notify"] = clean_settings(data.get("notify"))
+    except ValueError:
+        data["notify"] = {"url": "", "events": list(EVENTS)}
     return data
 
 

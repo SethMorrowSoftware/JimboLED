@@ -59,6 +59,7 @@ class AppContext:
         self.gpio = None
         self.discovery = None
         self.scheduler = None
+        self.notifier = None
         # API token id -> last time it was used (memory only: writing the
         # config on every scripted request would wear the SD card).
         self.token_last_used: Dict[str, float] = {}
@@ -120,14 +121,23 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
     from .gpio.manager import GPIOManager
     from .wled.discovery import DiscoveryService
 
+    from .notify import Notifier
+
     ctx.devices = DeviceManager(store, on_change=ctx.bump)
-    ctx.gpio = GPIOManager(store, on_event=ctx.bump)
+    ctx.notifier = Notifier(store, ctx.devices)
+
+    def _gpio_event(evt=None):
+        ctx.bump()
+        ctx.notifier.gpio_event(evt)  # only queues: this can run under the GPIO lock
+
+    ctx.gpio = GPIOManager(store, on_event=_gpio_event)
     ctx.discovery = DiscoveryService(store, ctx.devices)
     store.on_change(ctx.bump_config)
 
     from .scheduler import Scheduler
 
     ctx.scheduler = Scheduler(store, lambda action: run_scheduled_action(ctx, action))
+    ctx.scheduler.on_result = ctx.notifier.schedule_result
 
     from .api import register_blueprints
 
@@ -155,6 +165,7 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
         ctx.devices.start()
         ctx.gpio.start()
         ctx.scheduler.start()
+        ctx.notifier.start()
 
     @app.teardown_appcontext
     def _noop(_exc):  # pragma: no cover
@@ -205,7 +216,7 @@ def get_ctx() -> AppContext:
 # how the system is set up: no settings, switches, stops, schedules or tokens,
 # no resetting an emergency stop, no holding a hold-to-run switch, and no
 # reading backups (they contain the password hash).
-TOKEN_DENIED_READS = ("/api/tokens", "/api/settings", "/api/backup", "/api/backups")
+TOKEN_DENIED_READS = ("/api/tokens", "/api/settings", "/api/backup", "/api/backups", "/api/notify")
 TOKEN_ALLOWED_WRITES = tuple(re.compile(p) for p in (
     r"^/api/lights/(apply|capture)$",
     r"^/api/lights/undo/[^/]+$",

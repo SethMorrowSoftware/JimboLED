@@ -346,7 +346,9 @@
     card.append(h('div', { class: 'card-title' }, h('h3', { text: 'API tokens' }), addBtn),
       el(`<p class="muted small">A token lets another program control JimboLED – Home Assistant, an iPhone Shortcut, a script – even when the dashboard has a password. Make one per program, so you can switch one off without breaking the others. Tokens can control lights, scenes, switches and schedules, but can't change passwords, tokens or backups.</p>`), list);
     const examples = h('div', { class: 'card' });
-    body.append(card, examples);
+    const notifyCard = h('div', { class: 'card' });
+    body.append(notifyCard, card, examples);
+    drawNotify(notifyCard);
     addBtn.onclick = async () => {
       const name = await UI.prompt({ title: 'New API token', label: 'What is it for?', placeholder: 'e.g. Home Assistant', okText: 'Create token', maxlength: 40 });
       if (!name || !name.trim()) return;
@@ -389,6 +391,23 @@
     }
     draw();
     drawExamples();
+  }
+
+  async function drawNotify(card) {
+    let n;
+    try { n = await api.get('/api/notify'); } catch (e) { return UI.notifyError(e); }
+    const LABELS = { estop: 'An emergency stop is used', relay: 'A relay is switched off by its time limit', schedule: 'A schedule or timer fails', offline: 'A light is offline for 10 minutes (and when it is back)' };
+    const url = h('input', { class: 'input mono', value: n.notify.url, placeholder: 'https://ntfy.sh/your-own-secret-topic' });
+    const boxes = n.events.map((e) => { const cb = h('input', { type: 'checkbox', checked: n.notify.events.includes(e) }); cb.dataset.event = e; return cb; });
+    const save = el(`<button class="btn primary" data-busy="Saving…">Save</button>`);
+    const test = el(`<button class="btn" data-busy="Sending…">Send a test</button>`);
+    save.onclick = () => UI.busy(save, api.put('/api/notify', { url: url.value.trim(), events: boxes.filter((b) => b.checked).map((b) => b.dataset.event) }).then(() => UI.toast('Saved', 'success')).catch(UI.notifyError));
+    test.onclick = () => UI.busy(test, (async () => { await api.put('/api/notify', { url: url.value.trim(), events: boxes.filter((b) => b.checked).map((b) => b.dataset.event) }); const r = await api.post('/api/notify/test'); UI.toast(r.message, 'success'); })().catch(UI.notifyError));
+    card.innerHTML = '';
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Notifications' })),
+      el(`<p class="muted small">Get a message on your phone when something needs attention. The easiest way: install the free <b>ntfy</b> app, subscribe to a topic name only you know, and paste <code>https://ntfy.sh/&lt;that name&gt;</code> here. Any other address gets the message as JSON (Home Assistant, Node-RED…).</p>`),
+      UI.field('Send to', url), h('div', { class: 'stack', style: { gap: '4px' } }, ...boxes.map((b) => h('label', { class: 'check' }, b, h('span', { text: LABELS[b.dataset.event] || b.dataset.event })))),
+      h('div', { class: 'row end' }, test, save));
   }
 
   window.Automation = { groupsSection, groupDialog, schedulesSection, scheduleDialog, integrationsSection, whenLabel, actionEditor, buttonsCard, buttonDialog };

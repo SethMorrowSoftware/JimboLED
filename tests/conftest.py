@@ -46,6 +46,7 @@ def app(data_dir):
     ctx.store.update(lambda c: c["wled"].update({"poll_interval_s": 1, "offline_poll_interval_s": 3, "request_timeout_s": 2}))
     yield application
     ctx.scheduler.stop()
+    ctx.notifier.stop()
     ctx.gpio.stop()
     ctx.devices.stop()
     ctx.discovery.stop()

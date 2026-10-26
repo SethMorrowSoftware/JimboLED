@@ -24,6 +24,7 @@
 * **Bedside and wall buttons** – wire a cheap push button to the Pi: a tap runs one thing ("Goodnight"), a hold another (everything off).
 * **Latching emergency stops** – a red **E‑stop** in the header, and optionally a real mushroom button wired to the Pi. Unlike *All off*, a stop **latches**: the relays it covers stay locked out until somebody resets it. Give the bed and the awning separate stops so one does not lock out the other.
 * **Customisable dashboard** – drag tiles into any order, resize, hide, rename, add headings, notes, a clock, and one‑tap **scenes** ("Goodnight" = all lights off + bed flat). Four dark themes, two light ones, one that follows your phone, any accent colour, and text you can scale up to 150 %.
+* **Tells you when something needs attention** – a message on your phone (via the free ntfy app, or any webhook) when an emergency stop is used, a relay hits its time limit, a schedule fails or a light has been offline for 10 minutes.
 * **Works with Home Assistant, Shortcuts and scripts** – create an API token under Settings → Integrations and send simple JSON like `{"target": "all", "preset": "Movie"}`.
 * **Made for non‑technical users** – a setup wizard, plain‑language settings, confirmations where they matter, an **All off** button, automatic backups, one‑click updates.
 

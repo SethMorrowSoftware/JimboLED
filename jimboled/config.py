@@ -54,6 +54,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Pauses every schedule (guests staying, a holiday) without touching them.
     # One-off timers still run: somebody set those on purpose just now.
     "schedules_paused": False,
+    # Phone notifications (an ntfy topic or any webhook), see jimboled/notify.py.
+    "notify": {"url": "", "events": ["estop", "relay", "schedule", "offline"]},
     # Where the Pi is, for sunrise/sunset schedules.  Decimal degrees.
     "location": {"lat": None, "lon": None, "label": ""},
     "gpio": {
