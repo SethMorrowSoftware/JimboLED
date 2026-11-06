@@ -1,16 +1,19 @@
 <!doctype html>
 <html lang="en" data-theme="{{ theme }}" data-radius="{{ radius }}"
-      style="--accent: {{ accent }}; --text-scale: {{ text_scale }};">
+      data-font="{{ font }}" data-backdrop="{{ backdrop }}" data-surface="{{ surface }}"
+      data-brand="{{ brand_mode }}" data-logo-size="{{ logo_size }}"{% if logo_url %} data-has-logo{% endif %}
+      style="--accent: {{ accent }}; --text-scale: {{ text_scale }}; --backdrop-dim: {{ backdrop_dim }};{% if background_url %} --backdrop-image: url('{{ background_url }}');{% endif %}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in · {{ title }}</title>
-  <link rel="icon" href="/static/img/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="icon" href="{{ icon_url }}" type="{{ icon_type }}">
+  <link rel="stylesheet" href="/static/css/app.css?v={{ version }}">
+  <style id="custom-css">{{ custom_css }}</style>
 </head>
 <body class="login-body">
   <form class="login-card" method="post" action="/login{% if request.args.get('next') %}?next={{ request.args.get('next') | urlencode }}{% endif %}">
-    <div class="brand" style="justify-content:center;margin-bottom:12px"><span class="brand-mark"></span><span class="brand-title">{{ title }}</span></div>
+    <div class="brand login-brand">{% if logo_url %}<img class="brand-logo" src="{{ logo_url }}" alt="">{% else %}<span class="brand-mark"></span>{% endif %}<span class="brand-title">{{ title }}</span></div>
     <p class="muted" style="text-align:center;margin:0 0 18px">Enter the dashboard password to continue.</p>
     {% if error %}<div class="alert danger">{{ error }}</div>{% endif %}
     <label class="field"><span>Password</span><input class="input" type="password" name="password" autofocus autocomplete="current-password" required></label>

@@ -1,6 +1,8 @@
 <!doctype html>
 <html lang="en" data-theme="{{ theme }}" data-density="{{ density }}" data-radius="{{ radius }}"
-      style="--accent: {{ accent }}; --text-scale: {{ text_scale }};">
+      data-font="{{ font }}" data-backdrop="{{ backdrop }}" data-surface="{{ surface }}"
+      data-brand="{{ brand_mode }}" data-logo-size="{{ logo_size }}"{% if logo_url %} data-has-logo{% endif %}
+      style="--accent: {{ accent }}; --text-scale: {{ text_scale }}; --backdrop-dim: {{ backdrop_dim }};{% if background_url %} --backdrop-image: url('{{ background_url }}');{% endif %}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -9,17 +11,19 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="mobile-web-app-capable" content="yes">
   <title>{{ title }}</title>
-  <link rel="icon" href="/static/img/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="/static/img/icon.svg">
+  <link rel="icon" id="favicon" href="{{ icon_url }}" type="{{ icon_type }}">
+  <link rel="apple-touch-icon" id="touch-icon" href="{{ icon_url }}">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/static/css/app.css?v={{ version }}">
+  <style id="custom-css">{{ custom_css }}</style>
 </head>
 <body>
   <div id="app" class="app">
     <header class="topbar" id="topbar">
       <a class="brand" href="#/" id="brand">
         <span class="brand-mark" aria-hidden="true"></span>
-        <span class="brand-text"><span class="brand-title" id="brand-title">{{ title }}</span><span class="brand-sub" id="brand-sub"></span></span>
+        <img class="brand-logo" id="brand-logo" alt=""{% if logo_url %} src="{{ logo_url }}"{% else %} hidden{% endif %}>
+        <span class="brand-text"><span class="brand-title" id="brand-title">{{ title }}</span><span class="brand-sub" id="brand-sub">{{ subtitle }}</span></span>
       </a>
       <div class="topbar-status" id="topbar-status"></div>
       <nav class="topbar-actions" id="topbar-actions"></nav>

@@ -534,11 +534,78 @@
     return wrap;
   }
 
+  const FONTS = [['system', 'System'], ['rounded', 'Rounded'], ['humanist', 'Humanist'], ['condensed', 'Condensed'], ['serif', 'Serif'], ['mono', 'Mono']];
+  // Pictures bigger than this are shrunk in the browser before uploading:
+  // phone photos are often 5–10 MB, and a Pi Zero has better things to do.
+  const PICTURE_LIMITS = { logo: { px: 512, bytes: 1024 * 1024 }, background: { px: 1920, bytes: 1536 * 1024 } };
+
+  /** Shrink a raster picture to fit the limits; SVG and GIF go up untouched. */
+  async function preparePicture(file, kind) {
+    const lim = PICTURE_LIMITS[kind];
+    if (/svg|gif/i.test(file.type) || /\.(svg|gif)$/i.test(file.name)) return file;
+    let img;
+    const url = URL.createObjectURL(file);
+    try {
+      img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = () => reject(new Error('That file is not a picture this browser can open')); i.src = url; });
+    } finally { URL.revokeObjectURL(url); }
+    const scale = Math.min(1, lim.px / Math.max(img.naturalWidth, img.naturalHeight));
+    if (scale === 1 && file.size <= lim.bytes) return file;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    // Logos keep their transparency; a background photo compresses far better as JPEG.
+    const type = kind === 'logo' ? 'image/png' : 'image/jpeg';
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, type, 0.85));
+    if (!blob) return file;
+    return new File([blob], `${kind}.${type === 'image/png' ? 'png' : 'jpg'}`, { type });
+  }
+
+  /** Preview + Upload/Remove buttons for one branding picture. */
+  function picturePicker(kind, current, onChanged) {
+    const preview = h('div', { class: 'picture-preview' + (kind === 'background' ? ' cover' : '') });
+    const input = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml,.svg', class: 'hidden', 'aria-label': `Choose a ${kind} picture` });
+    const choose = el(`<button type="button" class="btn sm" data-busy="Uploading…">${icon('upload')} ${current ? 'Replace' : 'Upload'}</button>`);
+    const remove = el(`<button type="button" class="btn sm ghost" data-busy="Removing…">${icon('trash')} Remove</button>`);
+    const draw = (info) => {
+      preview.innerHTML = '';
+      preview.classList.toggle('has-image', !!info);
+      if (info && kind === 'logo') preview.append(h('img', { src: info.url, alt: 'Current logo' }));
+      else if (info) preview.style.backgroundImage = `url("${info.url}")`;
+      else { preview.style.backgroundImage = ''; preview.append(h('span', { text: kind === 'logo' ? 'No logo' : 'No picture' })); }
+      remove.hidden = !info;
+      choose.lastChild.textContent = info ? ' Replace' : ' Upload';
+    };
+    draw(current);
+    choose.onclick = () => input.click();
+    input.onchange = () => {
+      const file = input.files[0]; input.value = '';
+      if (!file) return;
+      UI.busy(choose, (async () => {
+        const ready = await preparePicture(file, kind);
+        const fd = new FormData(); fd.append('file', ready, ready.name || file.name);
+        const r = await api.upload(`/api/branding/${kind}`, fd, { timeout: 60000 });
+        draw(r.branding[kind]); onChanged(r);
+        UI.toast(kind === 'logo' ? 'Logo updated' : 'Background updated', 'success');
+      })().catch(UI.notifyError));
+    };
+    remove.onclick = async () => {
+      if (!await UI.confirm({ title: kind === 'logo' ? 'Remove the logo' : 'Remove the background picture', message: 'You can upload a new one any time.', okText: 'Remove', danger: true })) return;
+      UI.busy(remove, api.del(`/api/branding/${kind}`).then((r) => { draw(null); onChanged(r); UI.toast('Removed', 'success'); }).catch(UI.notifyError));
+    };
+    return h('div', { class: 'picture-row' }, preview, h('div', { class: 'row wrap' }, choose, remove), input);
+  }
+
   async function appearanceSection(body) {
-    const dash = (await api.get('/api/dashboard')).dashboard;
+    const res = await api.get('/api/dashboard');
+    const dash = res.dashboard;
+    let branding = res.branding || {};
     const root = document.documentElement;
     const live = { theme: dash.theme, accent: dash.accent, density: dash.density,
-                   radius: dash.radius || 'soft', text_scale: dash.text_scale || 100 };
+                   radius: dash.radius || 'soft', text_scale: dash.text_scale || 100,
+                   font: dash.font || 'system', brand_mode: dash.brand_mode || 'logo_title', logo_size: dash.logo_size || 'm',
+                   backdrop: dash.backdrop || 'glow', backdrop_dim: dash.backdrop_dim == null ? 45 : dash.backdrop_dim,
+                   surface: dash.surface || 'solid', custom_css: dash.custom_css || '' };
     // Everything previews on the real page as you pick it, and is put back if
     // you navigate away without saving.
     const original = { ...live };
@@ -546,12 +613,31 @@
       root.dataset.theme = live.theme;
       root.dataset.density = live.density;
       root.dataset.radius = live.radius;
+      root.dataset.font = live.font;
+      root.dataset.brand = live.brand_mode;
+      root.dataset.logoSize = live.logo_size;
+      root.dataset.surface = live.surface;
+      root.dataset.backdrop = live.backdrop === 'image' && !branding.background ? 'glow' : live.backdrop;
       root.style.setProperty('--accent', live.accent);
       root.style.setProperty('--text-scale', (live.text_scale / 100).toFixed(3));
+      root.style.setProperty('--backdrop-dim', (live.backdrop_dim / 100).toFixed(2));
+      if (window.App) App.setCustomCss(live.custom_css);
+    };
+    const pictureChanged = (r) => {
+      branding = r.branding || {};
+      if (window.App) { App.state.branding = branding; App.applyBranding(r.dashboard || dash, branding, { keepLook: true }); }
+      if (r.dashboard && r.dashboard.backdrop && r.dashboard.backdrop !== live.backdrop) {
+        live.backdrop = original.backdrop = r.dashboard.backdrop;
+        backdrop.querySelectorAll('.chip').forEach((c, i) => c.classList.toggle('active', BACKDROPS[i][0] === live.backdrop));
+      }
+      apply();
     };
 
     const title = h('input', { class: 'input', value: dash.title, maxlength: 40 });
     const subtitle = h('input', { class: 'input', value: dash.subtitle || '', maxlength: 80, placeholder: 'e.g. Jim\'s room' });
+    const footer = h('input', { class: 'input', value: dash.footer_text || '', maxlength: 120, placeholder: 'e.g. Questions? Ask Jim · ext. 204' });
+    title.oninput = () => { document.getElementById('brand-title').textContent = title.value || 'JimboLED'; };
+    subtitle.oninput = () => { document.getElementById('brand-sub').textContent = subtitle.value; };
 
     const themeWrap = h('div', { class: 'stack' });
     for (const [groupName, opts] of THEME_GROUPS) {
@@ -571,23 +657,39 @@
     for (const c of ACCENTS) {
       const b = h('button', { type: 'button', class: 'swatch lg', style: { background: c }, dataset: { color: c },
                               title: c, 'aria-label': `Accent colour ${c}` });
-      b.onclick = () => { live.accent = c; custom.value = c; custom.classList.remove('invalid'); apply(); markAccent(); };
+      b.onclick = () => { live.accent = c; custom.value = c; wheel.value = c; custom.classList.remove('invalid'); apply(); markAccent(); };
       accentRow.append(b);
     }
+    const wheel = h('input', { type: 'color', class: 'color-input', value: live.accent, 'aria-label': 'Pick any accent colour' });
+    wheel.oninput = () => { live.accent = wheel.value.toLowerCase(); custom.value = live.accent; custom.classList.remove('invalid'); apply(); markAccent(); };
     const custom = h('input', { class: 'input mono', value: live.accent, maxlength: 7, style: { width: '110px' },
                                 'aria-label': 'Custom accent colour, hex' });
     custom.onchange = () => {
-      const v = custom.value.trim().toLowerCase();
-      if (/^#[0-9a-f]{6}$/.test(v)) { custom.classList.remove('invalid'); live.accent = v; apply(); markAccent(); }
+      let v = custom.value.trim().toLowerCase();
+      if (/^[0-9a-f]{6}$/.test(v)) v = '#' + v;
+      if (/^#[0-9a-f]{6}$/.test(v)) { custom.value = v; wheel.value = v; custom.classList.remove('invalid'); live.accent = v; apply(); markAccent(); }
       else { custom.classList.add('invalid'); UI.toast('Use a 6-digit hex colour like #7c5cff', 'error'); }
     };
-    accentRow.append(custom);
+    accentRow.append(wheel, custom);
     markAccent();
 
+    const font = chipGroup(FONTS, live.font, (v) => { live.font = v; apply(); });
+    font.querySelectorAll('.chip').forEach((c, i) => { c.style.fontFamily = 'var(--font)'; c.dataset.font = FONTS[i][0]; });
     const density = chipGroup([['comfortable', 'Comfortable'], ['compact', 'Compact'], ['roomy', 'Roomy']],
       live.density, (v) => { live.density = v; apply(); });
     const radius = chipGroup([['sharp', 'Sharp'], ['soft', 'Soft'], ['round', 'Round']],
       live.radius, (v) => { live.radius = v; apply(); });
+    const brandMode = chipGroup([['logo_title', 'Logo and title'], ['logo', 'Logo only'], ['title', 'Title only']],
+      live.brand_mode, (v) => { live.brand_mode = v; apply(); });
+    const logoSize = chipGroup([['s', 'Small'], ['m', 'Medium'], ['l', 'Large']],
+      live.logo_size, (v) => { live.logo_size = v; apply(); });
+    const BACKDROPS = [['plain', 'Plain'], ['glow', 'Accent glow'], ['image', 'Picture']];
+    const backdrop = chipGroup(BACKDROPS, live.backdrop, (v) => {
+      live.backdrop = v; apply();
+      if (v === 'image' && !branding.background) UI.toast('Upload a background picture below to see it', 'info');
+    });
+    const surface = chipGroup([['solid', 'Solid'], ['glass', 'Glass (see-through)']],
+      live.surface, (v) => { live.surface = v; apply(); });
 
     const scale = UI.slider({
       icon: 'textSize', min: 85, max: 150, step: 5, value: live.text_scale,
@@ -595,38 +697,94 @@
       onInput: (v) => { live.text_scale = +v; apply(); },
       onChange: (v) => { live.text_scale = +v; apply(); },
     });
+    const dim = UI.slider({
+      icon: 'contrast', min: 0, max: 90, step: 5, value: live.backdrop_dim,
+      format: (v) => `${v}%`,
+      onInput: (v) => { live.backdrop_dim = +v; apply(); },
+      onChange: (v) => { live.backdrop_dim = +v; apply(); },
+    });
+
+    const css = h('textarea', { class: 'input code', spellcheck: 'false', maxlength: 20000, rows: 8,
+                                placeholder: '/* e.g. make every tile title bigger */\n.tile .title { font-size: 1.2rem; }' });
+    css.value = live.custom_css;
+    css.oninput = UI.debounce(() => { live.custom_css = css.value; apply(); }, 250);
 
     const showOffline = h('input', { type: 'checkbox', checked: dash.show_offline !== false });
     const showClock = h('input', { type: 'checkbox', checked: dash.show_clock !== false });
     const showEstop = h('input', { type: 'checkbox', checked: dash.show_estop !== false });
     const showLights = h('input', { type: 'checkbox', checked: dash.show_lights_button !== false });
 
-    const save = el(`<button class="btn primary" data-busy="Saving…">Save appearance</button>`);
-    save.onclick = () => UI.busy(save, api.put('/api/dashboard', {
-      title: title.value.trim(), subtitle: subtitle.value.trim(),
+    const save = el(`<button class="btn primary" data-busy="Saving…">${icon('save')} Save appearance</button>`);
+    save.onclick = () => { live.custom_css = css.value; UI.busy(save, api.put('/api/dashboard', {
+      title: title.value.trim(), subtitle: subtitle.value.trim(), footer_text: footer.value.trim(),
       theme: live.theme, accent: live.accent, density: live.density,
-      radius: live.radius, text_scale: live.text_scale,
+      radius: live.radius, text_scale: live.text_scale, font: live.font,
+      brand_mode: live.brand_mode, logo_size: live.logo_size, backdrop: live.backdrop,
+      backdrop_dim: live.backdrop_dim, surface: live.surface, custom_css: live.custom_css,
       show_offline: showOffline.checked, show_clock: showClock.checked, show_estop: showEstop.checked,
       show_lights_button: showLights.checked,
-    }).then(() => { Object.assign(original, live); UI.toast('Saved', 'success'); if (window.App) App.refresh(true); }).catch(UI.notifyError));
+    }).then((r) => {
+      Object.assign(original, live); UI.toast('Saved', 'success');
+      if (window.App) { App.state.dashboard = r.dashboard; App.applyTheme(r.dashboard); App.refresh(true); }
+    }).catch(UI.notifyError)); };
 
     const revert = el(`<button class="btn ghost">Undo changes</button>`);
-    revert.onclick = () => { Object.assign(live, original); apply(); render(document.getElementById('main'), 'appearance'); };
+    revert.onclick = () => { Object.assign(live, original); apply(); if (window.App && App.state.dashboard) App.applyTheme(App.state.dashboard); render(document.getElementById('main'), 'appearance'); };
+
+    const reset = el(`<button class="btn ghost" data-busy="Resetting…">${icon('rotate')} Reset to defaults</button>`);
+    reset.onclick = async () => {
+      const ok = await UI.confirm({ title: 'Reset the look', message: 'Theme, colours, fonts, background style, logo layout and custom CSS go back to how JimboLED ships. Your title, pictures, tiles, scenes and favourite colours stay.', okText: 'Reset', danger: true });
+      if (!ok) return;
+      UI.busy(reset, api.post('/api/dashboard/appearance/reset', {}).then((r) => {
+        UI.toast('Appearance reset', 'success');
+        if (window.App) { App.state.dashboard = r.dashboard; App.state.branding = r.branding; App.applyTheme(r.dashboard); App.refresh(true); }
+        render(document.getElementById('main'), 'appearance');
+      }).catch(UI.notifyError));
+    };
+
+    const saveBar = h('div', { class: 'row end wrap' }, reset, h('span', { class: 'grow' }), revert, save);
 
     body.append(h('div', { class: 'card' },
-      h('div', { class: 'card-title' }, h('h3', { text: 'Appearance' }),
-        h('span', { class: 'hint', text: 'Previewed live — nothing is kept until you save' })),
+      h('div', { class: 'card-title' }, h('h3', { text: 'Branding' }),
+        h('span', { class: 'hint', text: 'Your name and logo on every screen' })),
       h('div', { class: 'form-grid' }, UI.field('Dashboard title', title), UI.field('Subtitle', subtitle)),
+      UI.field('Logo', picturePicker('logo', branding.logo, pictureChanged),
+        'PNG, JPEG, WebP, GIF or SVG. A square or wide logo with a transparent background looks best. It is also used as the browser tab icon and the home-screen icon.'),
+      UI.field('The header shows', brandMode),
+      UI.field('Logo size', logoSize),
+      UI.field('Footer text', footer, 'A line at the bottom of every page: who to call, a room number, a motto.')));
+
+    body.append(h('div', { class: 'card' },
+      h('div', { class: 'card-title' }, h('h3', { text: 'Look & feel' }),
+        h('span', { class: 'hint', text: 'Previewed live — nothing is kept until you save' })),
       UI.field('Theme', themeWrap, 'Auto follows your phone or computer between light and dark.'),
       UI.field('Accent colour', accentRow),
+      UI.field('Font', font, 'Uses the fonts already on each phone or computer, so it works without the internet.'),
       UI.field('Spacing', density, 'How much room each tile gets.'),
       UI.field('Corners', radius),
-      UI.field('Text size', scale, 'Larger text for reading the dashboard at arm\'s length.'),
+      UI.field('Text size', scale, 'Larger text for reading the dashboard at arm\'s length.')));
+
+    body.append(h('div', { class: 'card' },
+      h('div', { class: 'card-title' }, h('h3', { text: 'Background' })),
+      UI.field('Background', backdrop),
+      UI.field('Background picture', picturePicker('background', branding.background, pictureChanged),
+        'Big photos are shrunk automatically before uploading.'),
+      UI.field('Dim the picture', dim, 'Darkens (or, on a light theme, lightens) the picture so text stays easy to read.'),
+      UI.field('Tiles', surface, 'Glass lets the background show through the tiles and cards.')));
+
+    body.append(h('div', { class: 'card' },
+      h('div', { class: 'card-title' }, h('h3', { text: 'Header' })),
       h('label', { class: 'check' }, showOffline, h('span', { text: 'Show controllers that are offline' })),
       h('label', { class: 'check' }, showClock, h('span', { text: 'Show the clock in the header' })),
       h('label', { class: 'check' }, showEstop, h('span', { text: 'Show the emergency stop button in the header' })),
-      h('label', { class: 'check' }, showLights, h('span', { text: 'Show the Lights button (every light at once) in the header' })),
-      h('div', { class: 'row end' }, revert, save)));
+      h('label', { class: 'check' }, showLights, h('span', { text: 'Show the Lights button (every light at once) in the header' }))));
+
+    body.append(h('details', { class: 'card' },
+      h('summary', { class: 'card-title' }, h('h3', { text: 'Custom CSS (advanced)' })),
+      el(`<p class="muted small">Extra styles added after JimboLED's own, previewed as you type. Handy variables: <code>--accent</code>, <code>--bg</code>, <code>--surface</code>, <code>--text</code>, <code>--radius</code>, <code>--font</code>. If something goes wrong, clear this box or use <b>Reset to defaults</b>.</p>`),
+      css));
+
+    body.append(h('div', { class: 'card sticky-save' }, saveBar));
 
     // Favourite colours: shown first in the Lights panel and on group tiles.
     const favs = [...(dash.favorite_colors || [])];
@@ -713,7 +871,7 @@
     const file = h('input', { type: 'file', accept: 'application/json,.json', class: 'input' });
     const up = el(`<button class="btn" data-busy="Restoring…">${icon('upload')} Restore from file</button>`);
     up.onclick = () => { if (!file.files[0]) return UI.toast('Choose a backup file first', 'error'); UI.confirm({ title: 'Restore backup', message: 'This replaces all controllers, switches and dashboard settings with the ones in the file.', okText: 'Restore' }).then((ok) => { if (!ok) return; const fd = new FormData(); fd.append('file', file.files[0]); UI.busy(up, api.upload('/api/restore', fd, { timeout: 120000 }).then(() => { UI.toast('Backup restored', 'success'); if (window.App) App.refresh(true); draw(); }).catch(UI.notifyError)); }); };
-    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Backup & restore' })), el(`<p class="muted small">Everything JimboLED knows – controllers, switches, scenes and your dashboard layout – lives in one file. Download it after you finish setting things up. Presets live on the WLED controllers themselves and are not included.</p>`), h('div', { class: 'row wrap' }, dl), h('div', { class: 'row wrap' }, file, up)));
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Backup & restore' })), el(`<p class="muted small">Everything JimboLED knows – controllers, switches, scenes, your dashboard layout, logo and background – lives in one file. Download it after you finish setting things up. Presets live on the WLED controllers themselves and are not included.</p>`), h('div', { class: 'row wrap' }, dl), h('div', { class: 'row wrap' }, file, up)));
     const card = h('div', { class: 'card' }); const list = h('div', { class: 'list' });
     card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Automatic snapshots' })), el(`<p class="muted small">JimboLED keeps a snapshot every time you change something important, so you can undo mistakes.</p>`), list);
     body.append(card);

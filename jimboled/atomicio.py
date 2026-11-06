@@ -63,3 +63,25 @@ def write_json_atomic(path: Path, data: Any, *, mode: int | None = None, **dump_
                 os.unlink(tmp_path)
             except OSError:  # pragma: no cover
                 pass
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write raw bytes to ``path`` atomically and durably (see :func:`write_json_atomic`)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=path.suffix or ".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, path)
+        tmp_path = None
+        fsync_dir(path.parent)
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:  # pragma: no cover
+                pass

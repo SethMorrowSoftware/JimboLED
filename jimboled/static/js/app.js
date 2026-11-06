@@ -49,8 +49,12 @@
       if (full || !App.state.dashboard || s.cfg_rev !== prevCfg) {
         const d = await api.get('/api/dashboard', { timeout: STATE_TIMEOUT_MS });
         App.state.dashboard = d.dashboard; App.state.setupComplete = d.setup_complete; App.state.groups = d.groups || [];
+        App.state.branding = d.branding || {};
         if (window.Lights) Lights.clearCache();
-        applyTheme(d.dashboard);
+        // The Appearance page previews unsaved choices on the live page; a
+        // refresh from elsewhere must not snap them back mid-edit.
+        if (!(App.route.view === 'settings' && App.route.section === 'appearance')) applyTheme(d.dashboard);
+        else applyBranding(d.dashboard, App.state.branding, { keepLook: true });
       }
       if (App.route.view === 'dashboard') renderDashboard();
       renderTopbar();
@@ -74,9 +78,48 @@
     // Stored as a percentage; the stylesheet wants a plain multiplier.
     root.style.setProperty('--text-scale', ((dash.text_scale || 100) / 100).toFixed(3));
     root.style.setProperty('--accent', dash.accent || '#7c5cff');
-    document.getElementById('brand-title').textContent = dash.title || 'JimboLED';
-    document.getElementById('brand-sub').textContent = dash.subtitle || '';
-    document.title = dash.title || 'JimboLED';
+    root.dataset.font = dash.font || 'system';
+    root.dataset.surface = dash.surface || 'solid';
+    root.dataset.brand = dash.brand_mode || 'logo_title';
+    root.dataset.logoSize = dash.logo_size || 'm';
+    root.style.setProperty('--backdrop-dim', ((dash.backdrop_dim == null ? 45 : dash.backdrop_dim) / 100).toFixed(2));
+    applyBranding(dash, App.state.branding || {});
+  }
+  App.applyTheme = applyTheme;
+
+  /** Logo, favicon, background picture, footer and custom CSS. */
+  function applyBranding(dash, branding, opts) {
+    const root = document.documentElement;
+    const logo = branding && branding.logo, bg = branding && branding.background;
+    const keepLook = opts && opts.keepLook;
+    const img = document.getElementById('brand-logo');
+    if (logo) { if (img.getAttribute('src') !== logo.url) img.src = logo.url; img.hidden = false; root.setAttribute('data-has-logo', ''); }
+    else { img.hidden = true; img.removeAttribute('src'); root.removeAttribute('data-has-logo'); }
+    const iconUrl = logo ? logo.url : '/static/img/icon.svg';
+    const fav = document.getElementById('favicon');
+    if (fav && fav.getAttribute('href') !== iconUrl) { fav.href = iconUrl; fav.type = logo ? logo.type : 'image/svg+xml'; }
+    const touch = document.getElementById('touch-icon');
+    if (touch && touch.getAttribute('href') !== iconUrl) touch.href = iconUrl;
+    if (bg) root.style.setProperty('--backdrop-image', `url("${bg.url}")`); else root.style.removeProperty('--backdrop-image');
+    if (!keepLook) {
+      root.dataset.backdrop = dash.backdrop === 'image' && !bg ? 'glow' : (dash.backdrop || 'glow');
+      document.getElementById('brand-title').textContent = dash.title || 'JimboLED';
+      document.getElementById('brand-sub').textContent = dash.subtitle || '';
+      document.title = dash.title || 'JimboLED';
+      setCustomCss(dash.custom_css || '');
+      renderFooter(dash);
+    }
+  }
+  App.applyBranding = applyBranding;
+  function setCustomCss(css) {
+    const style = document.getElementById('custom-css');
+    if (style && style.textContent !== css) style.textContent = css;
+  }
+  App.setCustomCss = setCustomCss;
+  function renderFooter(dash) {
+    const f = document.getElementById('footer');
+    const text = (dash && dash.footer_text) || '';
+    f.innerHTML = `${text ? `<span class="footer-text">${esc(text)}</span>` : ''}JimboLED ${esc(window.JIMBOLED.version)} · <a href="#/settings/system">System</a>`;
   }
 
   // ---------------------------------------------------------- topbar
@@ -425,7 +468,7 @@
   // ------------------------------------------------------------ boot
   async function boot() {
     App.route = parseHash();
-    document.getElementById('footer').innerHTML = `JimboLED ${esc(window.JIMBOLED.version)} · <a href="#/settings/system">System</a>`;
+    renderFooter(null);
     await refresh(true);
     render();
     if (App.state.dashboard && !App.state.setupComplete && !App.state.devices.length && !(App.state.gpio.switches || []).length) {

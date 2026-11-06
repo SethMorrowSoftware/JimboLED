@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/wled-gpio-flask-dashboard-qtx4vn"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the oldest Python on a supported Raspberry Pi OS; 3.13 the newest.
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -r requirements.txt pytest
+      - name: Python syntax
+        run: python -m compileall -q jimboled tests
+      - name: Tests
+        env:
+          GPIOZERO_PIN_FACTORY: mock
+        run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: JavaScript syntax
+        run: for f in jimboled/static/js/*.js; do node --check "$f" || exit 1; done
+      - name: Shell scripts
+        run: for f in install.sh update.sh uninstall.sh bin/jimboled-helper; do bash -n "$f" || exit 1; done
