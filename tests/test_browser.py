@@ -1,0 +1,379 @@
+"""End-to-end tests: the real dashboard in a real (headless) Chromium.
+
+These drive the single-page app the way a person does – against a real
+JimboLED server and a fake WLED controller – and fail on any JavaScript
+error, any failed API call and any page that scrolls sideways on a phone.
+
+They need Playwright (``pip install playwright && playwright install
+chromium``) and are skipped without it.  ``JIMBOLED_CHROMIUM`` can point at
+an already-installed Chromium binary instead.
+"""
+from __future__ import annotations
+
+import base64
+import os
+import socket
+import threading
+import time
+
+import pytest
+
+playwright_api = pytest.importorskip("playwright.sync_api")
+
+# 1x1 PNG; the logo test just needs a real picture.
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+
+SETTINGS_SECTIONS = ("devices", "groups", "switches", "scenes", "schedules", "estop", "appearance",
+                     "security", "integrations", "system", "backup")
+H = {"X-Requested-With": "JimboLED"}
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class Server:
+    """A real JimboLED on a free port, served by waitress like on the Pi."""
+
+    def __init__(self, data_dir):
+        from waitress.server import create_server
+
+        from jimboled import create_app
+
+        self.app = create_app(str(data_dir))
+        self.ctx = self.app.extensions["jimboled"]
+        self.ctx.store.update(lambda c: c["wled"].update({"poll_interval_s": 1, "offline_poll_interval_s": 3,
+                                                          "request_timeout_s": 2}))
+        self.port = _free_port()
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._srv = create_server(self.app, host="127.0.0.1", port=self.port, threads=8)
+        self._thread = threading.Thread(target=self._srv.run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._srv.close()
+        for svc in ("scheduler", "notifier", "gpio", "devices", "discovery"):
+            try:
+                getattr(self.ctx, svc).stop()
+            except Exception:
+                pass
+
+
+@pytest.fixture(scope="module")
+def browser():
+    with playwright_api.sync_playwright() as p:
+        exe = os.environ.get("JIMBOLED_CHROMIUM") or None
+        try:
+            b = p.chromium.launch(executable_path=exe)
+        except Exception as exc:  # browser not installed
+            pytest.skip(f"Chromium is not available: {exc}")
+        yield b
+        b.close()
+
+
+@pytest.fixture(scope="module")
+def fake():
+    from tests.fake_wled import FakeWLEDServer
+
+    s = FakeWLEDServer("Desk strip", 60, "aabbcc000001").start()
+    yield s
+    s.stop()
+
+
+@pytest.fixture(scope="module")
+def server(tmp_path_factory, fake):
+    """A set-up JimboLED: one controller, two relays, a scene, a group, a schedule."""
+    import requests
+
+    srv = Server(tmp_path_factory.mktemp("e2e") / "data")
+    api = requests.Session()
+    api.headers.update(H)
+    base = srv.url
+
+    def post(path, payload):
+        r = api.post(base + path, json=payload, timeout=10)
+        assert r.status_code in (200, 201), (path, r.text)
+        return r.json()
+
+    dev = post("/api/devices", {"host": fake.host, "name": "Desk strip"})["device"]
+    up = post("/api/gpio/switches", {"name": "Bed up", "pin": 17, "mode": "momentary", "interlock_group": "bed"})
+    post("/api/gpio/switches", {"name": "Fan", "pin": 22, "mode": "toggle"})
+    post("/api/scenes", {"name": "Goodnight", "actions": [{"type": "all", "state": {"on": False}}]})
+    post("/api/groups", {"name": "Bedroom", "devices": [dev["id"]]})
+    post("/api/schedules", {"name": "Night", "when": {"type": "time", "time": "23:30"}, "days": [0, 1, 2, 3, 4],
+                            "action": {"type": "all_off"}})
+    api.put(base + "/api/settings", json={"setup_complete": True}, timeout=10)
+    srv.device_id = dev["id"]
+    srv.switch = up
+    srv.api = api
+    # let the first poll of the controller land
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        devs = api.get(base + "/api/state", timeout=5).json()["devices"]
+        if devs and devs[0].get("online"):
+            break
+        time.sleep(0.2)
+    yield srv
+    srv.stop()
+
+
+class Page:
+    """A browser page that records every JavaScript error and failed API call."""
+
+    def __init__(self, browser, base, **ctx_kwargs):
+        self.context = browser.new_context(**ctx_kwargs)
+        self.page = self.context.new_page()
+        self.base = base
+        self.errors = []
+        self.page.on("pageerror", lambda e: self.errors.append(f"JS error: {e}"))
+        self.page.on("console", lambda m: m.type == "error" and self.errors.append(f"console: {m.text}"))
+
+        def on_response(resp):
+            if "/api/" in resp.url and resp.status >= 500:
+                self.errors.append(f"{resp.status} from {resp.url}")
+        self.page.on("response", on_response)
+
+    def go(self, hash_="#/", settle=600):
+        self.page.goto(self.base + "/" + hash_)
+        self.page.wait_for_load_state("networkidle")
+        self.page.wait_for_timeout(settle)
+        return self.page
+
+    def assert_clean(self):
+        assert not self.errors, "\n".join(self.errors)
+
+    def no_sideways_scroll(self):
+        overflow = self.page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
+        assert overflow <= 1, f"page scrolls sideways by {overflow}px"
+
+    def close(self):
+        self.context.close()
+
+
+@pytest.fixture
+def desktop(browser, server):
+    p = Page(browser, server.url, viewport={"width": 1280, "height": 900})
+    yield p
+    p.close()
+
+
+@pytest.fixture
+def phone(browser, server):
+    p = Page(browser, server.url, viewport={"width": 375, "height": 740}, is_mobile=True, has_touch=True)
+    yield p
+    p.close()
+
+
+# ----------------------------------------------------------------- tests
+def test_dashboard_shows_every_tile(desktop, server):
+    page = desktop.go()
+    page.wait_for_selector(".tile")
+    text = page.inner_text("#main")
+    for name in ("Desk strip", "Bed up", "Fan", "Goodnight", "Bedroom"):
+        assert name in text, name
+    assert page.inner_text("#topbar-status").strip().startswith("1/1")
+    desktop.assert_clean()
+
+
+@pytest.mark.parametrize("section", SETTINGS_SECTIONS)
+def test_every_settings_page_renders(desktop, section):
+    page = desktop.go(f"#/settings/{section}")
+    page.wait_for_selector(".card")
+    desktop.assert_clean()
+
+
+@pytest.mark.parametrize("section", SETTINGS_SECTIONS)
+def test_every_settings_page_fits_a_phone(phone, section):
+    phone.go(f"#/settings/{section}")
+    phone.page.wait_for_selector(".card")
+    phone.no_sideways_scroll()
+    phone.assert_clean()
+
+
+def test_dashboard_fits_a_phone(phone):
+    page = phone.go()
+    page.wait_for_selector(".tile")
+    phone.no_sideways_scroll()
+    phone.assert_clean()
+
+
+def test_power_toggle_reaches_the_controller(desktop, server, fake):
+    page = desktop.go()
+    tile = page.locator(".tile", has_text="Desk strip").first
+    before = fake.fake["state"]["on"] if hasattr(fake, "fake") and isinstance(fake.fake, dict) else None
+    tile.locator(".toggle").first.click()
+    page.wait_for_timeout(800)
+    after = server.api.get(server.url + "/api/state", timeout=5).json()["devices"][0]["state"]["on"]
+    if before is not None:
+        assert after != before
+    tile.locator(".toggle").first.click()
+    page.wait_for_timeout(800)
+    again = server.api.get(server.url + "/api/state", timeout=5).json()["devices"][0]["state"]["on"]
+    assert again != after
+    desktop.assert_clean()
+
+
+def test_controller_panel_and_all_its_tabs(desktop, server):
+    page = desktop.go(f"#/device/{server.device_id}", settle=1200)
+    page.wait_for_selector(".modal")
+    tabs = page.locator(".modal .tab")
+    count = tabs.count()
+    assert count >= 3
+    for i in range(count):
+        tabs.nth(i).click()
+        page.wait_for_timeout(300)
+    desktop.assert_clean()
+
+
+def test_lights_panel_opens(desktop):
+    page = desktop.go()
+    page.get_by_role("button", name="Lights").first.click()
+    page.wait_for_selector(".modal")
+    assert "Desk strip" in page.inner_text(".modal") or "light" in page.inner_text(".modal").lower()
+    page.keyboard.press("Escape")
+    desktop.assert_clean()
+
+
+def test_edit_layout_mode(desktop):
+    page = desktop.go()
+    page.get_by_role("button", name="Edit layout").click()
+    page.wait_for_timeout(300)
+    assert page.locator(".editing").count() >= 1
+    page.get_by_role("button", name="Done").click()
+    page.wait_for_timeout(300)
+    assert page.locator(".editing").count() == 0
+    desktop.assert_clean()
+
+
+def _switch(server, name):
+    return [s for s in server.api.get(server.url + "/api/state", timeout=5).json()["gpio"]["switches"]
+            if s["name"] == name][0]
+
+
+def test_toggle_switch_tile(desktop, server):
+    page = desktop.go()
+    btn = page.locator(".tile", has_text="Fan").locator(".hold-btn").first
+    btn.click()
+    page.wait_for_timeout(600)
+    assert _switch(server, "Fan")["on"] is True
+    btn.click()
+    page.wait_for_timeout(600)
+    assert _switch(server, "Fan")["on"] is False
+    desktop.assert_clean()
+
+
+def test_hold_to_run_only_runs_while_held(desktop, server):
+    page = desktop.go()
+    btn = page.locator(".tile", has_text="Bed up").locator(".hold-btn").first
+    box = btn.bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.down()
+    page.wait_for_timeout(900)
+    assert _switch(server, "Bed up")["on"] is True
+    page.mouse.up()
+    page.wait_for_timeout(700)
+    assert _switch(server, "Bed up")["on"] is False
+    desktop.assert_clean()
+
+
+def test_appearance_preview_save_and_branding(desktop, server, tmp_path):
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(PNG)
+    page = desktop.go("#/settings/appearance")
+    page.locator("input[type=file]").first.set_input_files(str(logo))
+    page.wait_for_selector("#brand-logo:not([hidden])")
+    assert "/branding/logo?v=" in page.get_attribute("#favicon", "href")
+    # previews live …
+    page.get_by_role("button", name="Paper").click()
+    assert page.evaluate("document.documentElement.dataset.theme") == "paper"
+    page.get_by_role("button", name="Serif").click()
+    page.get_by_role("button", name="Glass (see-through)").click()
+    assert page.evaluate("document.documentElement.dataset.font") == "serif"
+    # … is undone by leaving without saving …
+    page.goto(server.url + "/#/")
+    page.wait_for_timeout(300)
+    assert page.evaluate("document.documentElement.dataset.theme") == "midnight"
+    # … and kept by saving.
+    page = desktop.go("#/settings/appearance")
+    page.get_by_role("button", name="Serif").click()
+    page.locator("input[placeholder^='e.g. Questions']").fill("Ask Seth")
+    page.get_by_role("button", name="Save appearance").click()
+    page.wait_for_timeout(800)
+    dash = server.api.get(server.url + "/api/dashboard", timeout=5).json()["dashboard"]
+    assert dash["font"] == "serif" and dash["footer_text"] == "Ask Seth"
+    page = desktop.go("#/")
+    assert "Ask Seth" in page.inner_text("#footer")
+    assert page.evaluate("document.documentElement.dataset.font") == "serif"
+    # Reset puts the look back but keeps the logo.
+    page = desktop.go("#/settings/appearance")
+    page.get_by_role("button", name="Reset to defaults").click()
+    page.locator(".modal .btn.danger, .modal .btn.primary").last.click()
+    page.wait_for_timeout(800)
+    dash = server.api.get(server.url + "/api/dashboard", timeout=5).json()
+    assert dash["dashboard"]["font"] == "system" and dash["branding"]["logo"] is not None
+    server.api.delete(server.url + "/api/branding/logo", timeout=5)
+    server.api.put(server.url + "/api/dashboard", json={"footer_text": ""}, timeout=5)
+    desktop.assert_clean()
+
+
+def test_emergency_stop_engage_and_reset(desktop, server):
+    page = desktop.go()
+    page.locator(".estop-btn").first.click()
+    page.wait_for_timeout(400)
+    if page.locator(".modal").count():  # a zone picker or confirmation
+        page.locator(".modal .btn.danger").first.click()
+        page.wait_for_timeout(400)
+    st = server.api.get(server.url + "/api/estop", timeout=5).json()
+    engaged = [z for z in st["zones"] if z.get("engaged")]
+    assert engaged, st
+    # Latched: nothing can switch a relay on, from anywhere.
+    fan = _switch(server, "Fan")
+    r = server.api.post(f"{server.url}/api/gpio/switches/{fan['id']}/action", json={"action": "on"}, timeout=5)
+    assert r.status_code == 409 and r.json()["estop"] is True
+    # The dashboard says so in the header.
+    page.wait_for_selector("#pill-estop")
+    for z in engaged:
+        assert server.api.post(server.url + "/api/estop/reset", json={"zone": z["id"]}, timeout=5).status_code == 200
+    st = server.api.get(server.url + "/api/estop", timeout=5).json()
+    assert not any(z.get("engaged") for z in st["zones"])
+    page.wait_for_selector("#pill-estop", state="detached")
+    desktop.assert_clean()
+
+
+def test_login_page_and_sign_in(browser, server):
+    from werkzeug.security import generate_password_hash
+
+    server.ctx.store.update(lambda c: c["server"].__setitem__("password_hash", generate_password_hash("secret")))
+    try:
+        p = Page(browser, server.url, viewport={"width": 390, "height": 740})
+        page = p.go()
+        assert "/login" in page.url
+        page.fill("input[name=password]", "wrong")
+        page.click("button[type=submit]")
+        assert "Wrong password" in page.inner_text("body")
+        page.fill("input[name=password]", "secret")
+        page.click("button[type=submit]")
+        page.wait_for_selector(".tile")
+        p.no_sideways_scroll()
+        # the 401 from the wrong password is expected; nothing else may fail
+        p.errors = [e for e in p.errors if "401" not in e]
+        p.assert_clean()
+        p.close()
+    finally:
+        server.ctx.store.update(lambda c: c["server"].__setitem__("password_hash", None))
+
+
+def test_first_run_wizard(browser, tmp_path):
+    srv = Server(tmp_path / "fresh")
+    try:
+        p = Page(browser, srv.url, viewport={"width": 1024, "height": 800})
+        page = p.go(settle=1000)
+        page.wait_for_selector(".modal")
+        assert "Welcome" in page.inner_text(".modal")
+        p.assert_clean()
+        p.close()
+    finally:
+        srv.stop()

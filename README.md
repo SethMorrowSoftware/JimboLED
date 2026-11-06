@@ -33,6 +33,10 @@
   <img src="docs/screenshots/lights.png" width="560" alt="The Lights panel: every light at once"> <img src="docs/screenshots/mobile-lights.png" width="200" alt="The Lights panel on a phone">
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/branding-dashboard.png" width="560" alt="Your own logo, background picture and glass tiles"> <img src="docs/screenshots/mobile-branding.png" width="200" alt="Branded dashboard on a phone">
+</p>
+
 ## Install (Raspberry Pi)
 
 1. Flash Raspberry Pi OS (Lite is fine) and connect the Pi to your Wi‑Fi.
@@ -96,7 +100,7 @@ pip install -r requirements.txt
 JIMBOLED_DATA_DIR=./data python -m jimboled --port 8080 --debug
 ```
 
-Tests: `pip install pytest && pytest`. A fake WLED controller for demos: `python -m tests.fake_wled 8081`.
+Tests: `pip install pytest && pytest`. The browser tests (`tests/test_browser.py`) click through every screen in headless Chromium; they run when Playwright is installed (`pip install playwright && playwright install chromium`) and are skipped otherwise. GitHub Actions runs everything on every pull request. A fake WLED controller for demos: `python -m tests.fake_wled 8081`.
 
 ## Configuration & data
 
