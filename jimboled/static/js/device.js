@@ -87,7 +87,7 @@
     try { d = (await api.get(`/api/devices/${deviceId}`)).device; } catch (e) { return UI.notifyError(e); }
     const body = h('div', { class: 'stack' });
     const content = h('div', { class: 'stack' });
-    const tabsEl = UI.tabs([{ id: 'control', label: 'Control' }, { id: 'presets', label: 'Presets' }, { id: 'segments', label: 'Segments' }, { id: 'settings', label: 'Device' }], tab || 'control', (id) => setTab(id));
+    const tabsEl = UI.tabs([{ id: 'control', label: 'Control' }, { id: 'presets', label: 'Presets' }, { id: 'segments', label: 'Segments' }].concat(window.App && App.kiosk ? [] : [{ id: 'settings', label: 'Device' }]), (window.App && App.kiosk && tab === 'settings') ? 'control' : (tab || 'control'), (id) => setTab(id));
     body.append(tabsEl, content);
     const menuBtn = el(`<button class="btn ghost icon" aria-label="More">${icon('more')}</button>`);
     menuBtn.onclick = () => UI.menu(menuBtn, [
@@ -99,9 +99,10 @@
       '-',
       { label: 'Reboot controller', icon: 'rotate', onClick: async () => { if (await UI.confirm({ title: 'Reboot', message: `Reboot ${d.name}? Lights go off for a few seconds.`, okText: 'Reboot' })) { try { await api.post(`/api/devices/${d.id}/reboot`); UI.toast('Rebooting…', 'success'); } catch (e) { UI.notifyError(e); } } } },
       { label: 'Remove from dashboard', icon: 'trash', danger: true, onClick: () => removeDevice(d, () => m.close()) },
-    ]);
+    // A wall tablet can operate a light but not reboot or remove it.
+    ].filter((it) => !(window.App && App.kiosk) || (it !== '-' && !/^(Reboot|Remove)/.test(it.label))));
     const m = UI.modal({ title: d.name, icon: d.icon || 'bulb', body, full: true, headActions: menuBtn, onClose: () => { delete panels[deviceId]; clearInterval(poll); } });
-    let current = tab || 'control';
+    let current = (window.App && App.kiosk && tab === 'settings') ? 'control' : (tab || 'control');
     let refreshing = false;
     let lastSig = '';
     const panelState = { segId: null };
