@@ -596,6 +596,47 @@
     return h('div', { class: 'picture-row' }, preview, h('div', { class: 'row wrap' }, choose, remove), input);
   }
 
+  // One-tap looks: a whole style at once.  Only look-and-feel keys, so your
+  // title, logo and pictures are never touched; previewed until you save.
+  const LOOKS = [
+    { id: 'midnight', name: 'Midnight', theme: 'midnight', accent: '#7c5cff', font: 'system', backdrop: 'glow', surface: 'solid', radius: 'soft', density: 'comfortable' },
+    { id: 'neon', name: 'Neon night', theme: 'oled', accent: '#22d3ee', font: 'condensed', backdrop: 'glow', surface: 'glass', radius: 'sharp', density: 'comfortable' },
+    { id: 'cabin', name: 'Warm cabin', theme: 'graphite', accent: '#f97316', font: 'serif', backdrop: 'glow', surface: 'solid', radius: 'round', density: 'roomy' },
+    { id: 'ocean', name: 'Ocean calm', theme: 'ocean', accent: '#34d399', font: 'rounded', backdrop: 'glow', surface: 'glass', radius: 'round', density: 'comfortable' },
+    { id: 'studio', name: 'Studio', theme: 'graphite', accent: '#e2e8f0', font: 'humanist', backdrop: 'plain', surface: 'solid', radius: 'sharp', density: 'compact' },
+    { id: 'daylight', name: 'Daylight', theme: 'daylight', accent: '#2563eb', font: 'system', backdrop: 'plain', surface: 'solid', radius: 'soft', density: 'comfortable' },
+    { id: 'paper', name: 'Paper & ink', theme: 'paper', accent: '#b45309', font: 'serif', backdrop: 'plain', surface: 'solid', radius: 'sharp', density: 'roomy' },
+    { id: 'photo', name: 'Photo frame', needs: 'background', theme: 'midnight', font: 'rounded', backdrop: 'image', surface: 'glass', radius: 'round', density: 'comfortable', backdrop_dim: 35 },
+  ];
+
+  /** The most common vivid colours in a picture (e.g. the logo), most used first. */
+  async function pictureColors(url, max) {
+    const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = url; });
+    const size = 48;
+    const c = document.createElement('canvas'); c.width = size; c.height = size;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, size, size);
+    const px = ctx.getImageData(0, 0, size, size).data;
+    const buckets = new Map();
+    for (let i = 0; i < px.length; i += 4) {
+      const [r, g, b, a] = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+      if (a < 160) continue;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      // Skip greys, near-black and near-white: they make poor accents.
+      if (mx - mn < 40 || mx < 50 || mn > 225) continue;
+      const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+      const e = buckets.get(key) || { n: 0, r: 0, g: 0, b: 0 };
+      e.n++; e.r += r; e.g += g; e.b += b; buckets.set(key, e);
+    }
+    const ranked = [...buckets.values()].sort((x, y) => y.n - x.n).map((e) => [e.r / e.n, e.g / e.n, e.b / e.n]);
+    const out = [];
+    for (const rgb of ranked) {
+      if (out.every((o) => Math.hypot(o[0] - rgb[0], o[1] - rgb[1], o[2] - rgb[2]) > 70)) out.push(rgb);
+      if (out.length >= (max || 5)) break;
+    }
+    return out.map((rgb) => '#' + rgb.map((v) => Math.round(v).toString(16).padStart(2, '0')).join(''));
+  }
+
   async function appearanceSection(body) {
     const res = await api.get('/api/dashboard');
     const dash = res.dashboard;
@@ -631,6 +672,7 @@
         backdrop.querySelectorAll('.chip').forEach((c, i) => c.classList.toggle('active', BACKDROPS[i][0] === live.backdrop));
       }
       apply();
+      drawLogoColors();
     };
 
     const title = h('input', { class: 'input', value: dash.title, maxlength: 40 });
@@ -653,7 +695,9 @@
     }
 
     const accentRow = h('div', { class: 'row wrap' });
-    const markAccent = () => accentRow.querySelectorAll('.swatch').forEach((x) => x.classList.toggle('active', x.dataset.color === live.accent));
+    // Colours taken from the uploaded logo, so the dashboard matches it in one tap.
+    const logoColors = h('div', { class: 'row wrap logo-colors' });
+    const markAccent = () => [accentRow, logoColors].forEach((row) => row.querySelectorAll('.swatch').forEach((x) => x.classList.toggle('active', x.dataset.color === live.accent)));
     for (const c of ACCENTS) {
       const b = h('button', { type: 'button', class: 'swatch lg', style: { background: c }, dataset: { color: c },
                               title: c, 'aria-label': `Accent colour ${c}` });
@@ -671,13 +715,33 @@
       else { custom.classList.add('invalid'); UI.toast('Use a 6-digit hex colour like #7c5cff', 'error'); }
     };
     accentRow.append(wheel, custom);
+    const setAccent = (c) => { live.accent = c; custom.value = c; wheel.value = c; custom.classList.remove('invalid'); apply(); markAccent(); };
+
+    async function drawLogoColors() {
+      logoColors.innerHTML = '';
+      if (!branding.logo) return;
+      let colors = [];
+      try { colors = await pictureColors(branding.logo.url, 5); } catch (e) { return; }
+      if (!colors.length) return;
+      logoColors.append(h('span', { class: 'hint', text: 'From your logo:' }));
+      for (const c of colors) {
+        const b = h('button', { type: 'button', class: 'swatch lg', style: { background: c }, dataset: { color: c }, title: c, 'aria-label': `Use ${c} from the logo` });
+        b.onclick = () => setAccent(c);
+        logoColors.append(b);
+      }
+      markAccent();
+    }
+    drawLogoColors();
     markAccent();
 
     const font = chipGroup(FONTS, live.font, (v) => { live.font = v; apply(); });
     font.querySelectorAll('.chip').forEach((c, i) => { c.style.fontFamily = 'var(--font)'; c.dataset.font = FONTS[i][0]; });
-    const density = chipGroup([['comfortable', 'Comfortable'], ['compact', 'Compact'], ['roomy', 'Roomy']],
+    const DENSITY_OPTS = [['comfortable', 'Comfortable'], ['compact', 'Compact'], ['roomy', 'Roomy']];
+    const RADIUS_OPTS = [['sharp', 'Sharp'], ['soft', 'Soft'], ['round', 'Round']];
+    const SURFACE_OPTS = [['solid', 'Solid'], ['glass', 'Glass (see-through)']];
+    const density = chipGroup(DENSITY_OPTS,
       live.density, (v) => { live.density = v; apply(); });
-    const radius = chipGroup([['sharp', 'Sharp'], ['soft', 'Soft'], ['round', 'Round']],
+    const radius = chipGroup(RADIUS_OPTS,
       live.radius, (v) => { live.radius = v; apply(); });
     const brandMode = chipGroup([['logo_title', 'Logo and title'], ['logo', 'Logo only'], ['title', 'Title only']],
       live.brand_mode, (v) => { live.brand_mode = v; apply(); });
@@ -688,8 +752,30 @@
       live.backdrop = v; apply();
       if (v === 'image' && !branding.background) UI.toast('Upload a background picture below to see it', 'info');
     });
-    const surface = chipGroup([['solid', 'Solid'], ['glass', 'Glass (see-through)']],
+    const surface = chipGroup(SURFACE_OPTS,
       live.surface, (v) => { live.surface = v; apply(); });
+
+    const markChips = (wrap, options, value) => wrap.querySelectorAll('.chip').forEach((c, i) => c.classList.toggle('active', options[i][0] === value));
+    const looks = h('div', { class: 'looks' });
+    for (const look of LOOKS) {
+      const b = h('button', { type: 'button', class: 'look theme-swatch', dataset: { theme: look.theme, font: look.font },
+                              style: { '--look-accent': look.accent || 'var(--accent)' }, title: look.name },
+        h('span', { class: 'look-dots' }, h('span'), h('span'), h('span')),
+        h('span', { class: 'look-name', text: look.name }));
+      b.onclick = () => {
+        if (look.needs === 'background' && !branding.background) { UI.toast('Upload a background picture first (below), then try Photo frame', 'info'); return; }
+        for (const k of ['theme', 'font', 'backdrop', 'surface', 'radius', 'density', 'backdrop_dim']) if (look[k] != null) live[k] = look[k];
+        if (look.accent) setAccent(look.accent);
+        themeWrap.querySelectorAll('.chip').forEach((x) => x.classList.toggle('active', x.dataset.theme === live.theme));
+        markChips(font, FONTS, live.font); markChips(backdrop, BACKDROPS, live.backdrop); markChips(surface, SURFACE_OPTS, live.surface);
+        markChips(radius, RADIUS_OPTS, live.radius); markChips(density, DENSITY_OPTS, live.density);
+        dim.setValue(live.backdrop_dim);
+        looks.querySelectorAll('.look').forEach((x) => x.classList.toggle('active', x === b));
+        apply();
+        UI.toast(`${look.name} — previewing. Save to keep it.`, 'info', 2500);
+      };
+      looks.append(b);
+    }
 
     const scale = UI.slider({
       icon: 'textSize', min: 85, max: 150, step: 5, value: live.text_scale,
@@ -757,8 +843,9 @@
     body.append(h('div', { class: 'card' },
       h('div', { class: 'card-title' }, h('h3', { text: 'Look & feel' }),
         h('span', { class: 'hint', text: 'Previewed live — nothing is kept until you save' })),
+      UI.field('Quick looks', looks, 'A whole style in one tap: theme, accent, font, background and corners. Fine-tune anything below.'),
       UI.field('Theme', themeWrap, 'Auto follows your phone or computer between light and dark.'),
-      UI.field('Accent colour', accentRow),
+      UI.field('Accent colour', h('div', { class: 'stack accent-pick' }, accentRow, logoColors)),
       UI.field('Font', font, 'Uses the fonts already on each phone or computer, so it works without the internet.'),
       UI.field('Spacing', density, 'How much room each tile gets.'),
       UI.field('Corners', radius),
@@ -783,6 +870,15 @@
       h('summary', { class: 'card-title' }, h('h3', { text: 'Custom CSS (advanced)' })),
       el(`<p class="muted small">Extra styles added after JimboLED's own, previewed as you type. Handy variables: <code>--accent</code>, <code>--bg</code>, <code>--surface</code>, <code>--text</code>, <code>--radius</code>, <code>--font</code>. If something goes wrong, clear this box or use <b>Reset to defaults</b>.</p>`),
       css));
+
+    const kioskBtn = el(`<button class="btn">${icon('tv')} Use this screen as a wall tablet</button>`);
+    kioskBtn.onclick = () => { if (window.App) App.setKiosk(true); location.hash = '#/'; };
+    const kioskUrl = `${location.origin}/#/?kiosk=1`;
+    body.append(h('div', { class: 'card' },
+      h('div', { class: 'card-title' }, h('h3', { text: 'Wall tablet mode' })),
+      el(`<p class="muted small">For a tablet mounted on the wall or a screen by the bed: a clean full-screen dashboard with a big clock and no Edit or Settings buttons, so nobody changes the setup by accident. The lights, switches, scenes, <b>All off</b> and the emergency stop all keep working. The screen stays awake.</p>`),
+      el(`<p class="muted small">To leave it, <b>press and hold the logo for three seconds</b>. To set up another tablet, open <code>${esc(kioskUrl)}</code> on it.</p>`),
+      h('div', { class: 'row' }, kioskBtn)));
 
     body.append(h('div', { class: 'card' },
       h('div', { class: 'card-title' }, h('h3', { text: 'Start over' })),

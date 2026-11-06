@@ -14,6 +14,46 @@
   };
   window.App = App;
 
+  // ------------------------------------------------- wall-tablet mode
+  // A per-screen setting (kept in this browser only): the tablet on the wall
+  // is locked down, the phone in your pocket is not.
+  const KIOSK_KEY = 'jimboled.kiosk';
+  let wakeLock = null;
+  function kioskStored() { try { return localStorage.getItem(KIOSK_KEY) === '1'; } catch (e) { return false; } }
+  App.kiosk = kioskStored();
+  async function keepAwake() {
+    if (!App.kiosk || document.hidden || !('wakeLock' in navigator) || wakeLock) return;
+    try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } catch (e) { /* not allowed here, e.g. plain http */ }
+  }
+  function setKiosk(on) {
+    App.kiosk = !!on;
+    try { if (on) localStorage.setItem(KIOSK_KEY, '1'); else localStorage.removeItem(KIOSK_KEY); } catch (e) { /* private mode: lasts until reload */ }
+    document.documentElement.toggleAttribute('data-kiosk', App.kiosk);
+    if (App.kiosk) { if (App.editMode) App.editMode = false; keepAwake(); UI.toast('Wall tablet mode. Press and hold the logo for 3 seconds to leave.', 'info', 6000); }
+    else if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    const actions = document.getElementById('topbar-actions'); if (actions) actions.dataset.rendered = '';
+    if (typeof renderTopbar === 'function' && App.state.dashboard) renderTopbar();
+  }
+  App.setKiosk = setKiosk;
+  document.documentElement.toggleAttribute('data-kiosk', App.kiosk);
+  document.addEventListener('visibilitychange', keepAwake);
+  // Leaving: press and hold the logo for three seconds, then confirm.
+  (function holdToExit() {
+    const brand = document.getElementById('brand');
+    let timer = null;
+    const cancel = () => { clearTimeout(timer); timer = null; brand.classList.remove('kiosk-holding'); };
+    brand.addEventListener('pointerdown', () => {
+      if (!App.kiosk) return;
+      brand.classList.add('kiosk-holding');
+      timer = setTimeout(async () => {
+        cancel();
+        if (await UI.confirm({ title: 'Leave wall tablet mode?', message: 'Edit layout and Settings come back on this screen.', okText: 'Leave' })) setKiosk(false);
+      }, 3000);
+    });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => brand.addEventListener(ev, cancel));
+    brand.addEventListener('contextmenu', (e) => { if (App.kiosk) e.preventDefault(); });
+  })();
+
   // ---------------------------------------------------------- routing
   function parseHash() {
     const hash = location.hash.replace(/^#\/?/, '');
@@ -26,6 +66,7 @@
   }
   window.addEventListener('hashchange', () => {
     App.route = parseHash();
+    if (App.kiosk && App.route.view === 'settings') { location.replace('#/'); return; }
     // Appearance previews live on the page until saved; leaving the page
     // without saving puts the saved look back.
     if (App.state.dashboard && !(App.route.view === 'settings' && App.route.section === 'appearance')) applyTheme(App.state.dashboard);
@@ -134,12 +175,12 @@
     if (App.state.gpio.simulated && (App.state.gpio.switches || []).length) pieces.push(`<span class="pill" title="No GPIO hardware – switches are simulated"><span class="dot warn"></span>GPIO simulated</span>`);
     const latched = (window.EStop ? EStop.engagedZones() : []);
     if (latched.length) pieces.unshift(`<span class="pill" id="pill-estop" title="${esc(latched.map((z) => z.name).join(', '))} stopped – relays are locked out"><span class="dot bad"></span><span class="hide-sm">${esc(latched.map((z) => z.name).join(', '))}&nbsp;</span>stopped</span>`);
-    if (App.state.dashboard && App.state.dashboard.show_clock !== false) pieces.push(`<span class="pill nowrap" id="pill-clock">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`);
+    if (App.kiosk || (App.state.dashboard && App.state.dashboard.show_clock !== false)) pieces.push(`<span class="pill nowrap" id="pill-clock">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`);
     st.innerHTML = pieces.join('');
-    const pd = document.getElementById('pill-devices'); if (pd) pd.onclick = () => { location.hash = '#/settings/devices'; };
+    const pd = document.getElementById('pill-devices'); if (pd && !App.kiosk) pd.onclick = () => { location.hash = '#/settings/devices'; };
     const actions = document.getElementById('topbar-actions');
     const showLights = App.route.view === 'dashboard' && devs.length > 0 && !(App.state.dashboard && App.state.dashboard.show_lights_button === false);
-    const sig = App.route.view + App.editMode + showEstop() + showLights;
+    const sig = App.route.view + App.editMode + showEstop() + showLights + App.kiosk;
     if (actions.dataset.rendered !== sig) {
       actions.dataset.rendered = sig;
       actions.innerHTML = '';
@@ -162,7 +203,8 @@
           lights.onclick = () => Lights.open('all');
           actions.append(lights);
         }
-        actions.append(panic, edit, settings);
+        if (App.kiosk) actions.append(panic);
+        else actions.append(panic, edit, settings);
       } else if (App.route.view === 'settings') {
         actions.append(el(`<a class="btn sm" href="#/">${icon('grid')}<span class="hide-sm">Dashboard</span></a>`));
       }
@@ -189,7 +231,7 @@
     if (!grid) { main.innerHTML = ''; grid = h('div', { class: 'grid' }); main.append(grid); destroyTiles(); }
     renderDashboard();
     if (App.route.device) { const id = App.route.device; App.route.device = null; Device.openPanel(id, App.route.tab); history.replaceState(null, '', '#/'); }
-    if (App.route.q && App.route.q.edit === '1' && !App.editMode) { setEditMode(true); history.replaceState(null, '', '#/'); }
+    if (App.route.q && App.route.q.edit === '1' && !App.editMode && !App.kiosk) { setEditMode(true); history.replaceState(null, '', '#/'); }
   }
   function renderDashboard() {
     if (App.route.view !== 'dashboard' || !App.state.dashboard) return;
@@ -468,6 +510,10 @@
   // ------------------------------------------------------------ boot
   async function boot() {
     App.route = parseHash();
+    // #/?kiosk=1 turns a tablet into a wall panel; #/?kiosk=0 undoes it.
+    if (App.route.q && (App.route.q.kiosk === '1' || App.route.q.kiosk === '0')) { setKiosk(App.route.q.kiosk === '1'); history.replaceState(null, '', '#/'); App.route = parseHash(); }
+    if (App.kiosk && App.route.view === 'settings') { history.replaceState(null, '', '#/'); App.route = parseHash(); }
+    keepAwake();
     renderFooter(null);
     await refresh(true);
     render();

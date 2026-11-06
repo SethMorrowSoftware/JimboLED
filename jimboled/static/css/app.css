@@ -682,3 +682,25 @@ details.card > summary::-webkit-details-marker { display: none; }
 details.card > summary::after { content: "▸"; color: var(--muted); margin-left: auto; transition: transform var(--dur-2); }
 details.card[open] > summary::after { transform: rotate(90deg); }
 details.card:not([open]) { gap: 0; }
+
+/* quick looks */
+.looks { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: var(--sp-3); }
+.look { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-3); padding: var(--sp-4) var(--sp-5); border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: radial-gradient(120px 60px at 0% 0%, color-mix(in srgb, var(--look-accent) 35%, transparent), transparent 70%), var(--surface); color: var(--text); text-align: left; transition: transform var(--dur-1) var(--ease), border-color var(--dur-1); }
+.look:hover { transform: translateY(-1px); border-color: var(--look-accent); }
+.look.active { border-color: var(--look-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--look-accent) 55%, transparent); }
+.look-dots { display: flex; gap: 4px; }
+.look-dots span { width: 14px; height: 14px; border-radius: 50%; background: var(--look-accent); }
+.look-dots span:nth-child(2) { background: var(--surface-3); }
+.look-dots span:nth-child(3) { background: var(--text); opacity: .8; }
+.look-name { font-size: var(--fs-sm); font-weight: var(--fw-semi); }
+.logo-colors:empty { display: none; }
+
+/* wall-tablet (kiosk) mode: no way to change the setup by accident */
+:root[data-kiosk] .footer,
+:root[data-kiosk] .kiosk-hide { display: none !important; }
+:root[data-kiosk] #pill-clock { font-size: var(--fs-xl); font-weight: var(--fw-bold); color: var(--text); padding: 4px 14px; font-variant-numeric: tabular-nums; }
+:root[data-kiosk] .topbar-status .pill:not(#pill-clock):not(#pill-estop) { display: none; }
+:root[data-kiosk] .brand { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.brand.kiosk-holding .brand-logo, .brand.kiosk-holding .brand-mark { animation: kiosk-hold 3s linear forwards; }
+@keyframes kiosk-hold { to { opacity: .25; transform: scale(.85); } }
+@media (max-width: 560px) { :root[data-kiosk] .topbar-status #pill-clock { display: inline-flex; } }

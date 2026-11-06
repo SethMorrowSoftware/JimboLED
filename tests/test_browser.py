@@ -287,7 +287,7 @@ def test_appearance_preview_save_and_branding(desktop, server, tmp_path):
     page.wait_for_selector("#brand-logo:not([hidden])")
     assert "/branding/logo?v=" in page.get_attribute("#favicon", "href")
     # previews live …
-    page.get_by_role("button", name="Paper").click()
+    page.get_by_role("button", name="Paper", exact=True).click()
     assert page.evaluate("document.documentElement.dataset.theme") == "paper"
     page.get_by_role("button", name="Serif").click()
     page.get_by_role("button", name="Glass (see-through)").click()
@@ -316,6 +316,90 @@ def test_appearance_preview_save_and_branding(desktop, server, tmp_path):
     assert dash["dashboard"]["font"] == "system" and dash["branding"]["logo"] is not None
     server.api.delete(server.url + "/api/branding/logo", timeout=5)
     server.api.put(server.url + "/api/dashboard", json={"footer_text": ""}, timeout=5)
+    desktop.assert_clean()
+
+
+def test_quick_looks_and_logo_colours(desktop, server):
+    import io
+    import struct
+    import zlib
+
+    # A 4x4 PNG in one strong colour, so the logo palette is predictable.
+    def png(rgb):
+        raw = b"".join(b"\x00" + bytes(rgb) * 4 for _ in range(4))
+        chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    r = server.api.post(server.url + "/api/branding/logo", files={"file": ("l.png", io.BytesIO(png((230, 40, 90))), "image/png")},
+                        timeout=10)
+    assert r.status_code == 201, r.text
+    try:
+        page = desktop.go("#/settings/appearance", settle=1000)
+        swatch = page.locator(".logo-colors .swatch").first
+        swatch.wait_for()
+        colour = swatch.get_attribute("data-color")
+        r_, g_, b_ = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+        assert abs(r_ - 230) < 12 and abs(g_ - 40) < 12 and abs(b_ - 90) < 12, colour
+        swatch.click()
+        assert page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--accent')").strip() == colour
+        # A quick look changes several settings at once, all previewed …
+        page.locator(".look", has_text="Neon night").click()
+        assert page.evaluate("document.documentElement.dataset.theme") == "oled"
+        assert page.evaluate("document.documentElement.dataset.surface") == "glass"
+        assert page.locator(".chip.active", has_text="Condensed").count() == 1
+        # … and saved with one button.
+        page.get_by_role("button", name="Save appearance").click()
+        page.wait_for_timeout(800)
+        dash = server.api.get(server.url + "/api/dashboard", timeout=5).json()["dashboard"]
+        assert (dash["theme"], dash["accent"], dash["font"], dash["surface"], dash["radius"]) == \
+            ("oled", "#22d3ee", "condensed", "glass", "sharp")
+        # Photo frame needs a background picture first.
+        page.locator(".look", has_text="Photo frame").click()
+        assert page.evaluate("document.documentElement.dataset.backdrop") != "image"
+        desktop.assert_clean()
+    finally:
+        server.api.post(server.url + "/api/dashboard/appearance/reset", json={"pictures": True}, timeout=5)
+
+
+def test_wall_tablet_mode(desktop, server):
+    page = desktop.go("#/?kiosk=1", settle=1000)
+    page.wait_for_selector(".tile")
+    assert page.evaluate("document.documentElement.hasAttribute('data-kiosk')")
+    assert page.get_by_role("button", name="Edit layout").count() == 0
+    assert page.locator('a[href="#/settings"]').count() == 0
+    assert page.locator("#pill-clock").is_visible()
+    # Safety controls stay.
+    assert page.get_by_role("button", name="All off").count() == 1
+    assert page.locator(".estop-btn").count() == 1
+    # Settings can't be reached, even by typing the address.
+    page.goto(server.url + "/#/settings/security")
+    page.wait_for_timeout(500)
+    assert page.url.endswith("#/") and page.locator(".settings-nav").count() == 0
+    # The controller panel has no Device tab and no reboot/remove.
+    page.goto(server.url + f"/#/device/{server.device_id}")
+    page.wait_for_selector(".modal .tab")
+    tabs = [t.strip() for t in page.locator(".modal .tab").all_inner_texts()]
+    assert "Device" not in tabs and "Control" in tabs
+    page.locator(".modal [aria-label=More]").click()
+    menu = page.locator(".menu").inner_text()
+    assert "Reboot" not in menu and "Remove" not in menu
+    page.keyboard.press("Escape")
+    page.keyboard.press("Escape")
+    # It survives a reload (it is this screen's setting) …
+    page.reload()
+    page.wait_for_selector(".tile")
+    assert page.evaluate("document.documentElement.hasAttribute('data-kiosk')")
+    # … and a 3-second press on the logo, confirmed, leaves it.
+    box = page.locator("#brand").bounding_box()
+    page.mouse.move(box["x"] + 12, box["y"] + box["height"] / 2)
+    page.mouse.down()
+    page.wait_for_timeout(3300)
+    page.mouse.up()
+    page.locator(".modal .btn.primary").last.click()
+    page.wait_for_timeout(400)
+    assert not page.evaluate("document.documentElement.hasAttribute('data-kiosk')")
+    assert page.get_by_role("button", name="Edit layout").count() == 1
     desktop.assert_clean()
 
 
