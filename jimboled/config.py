@@ -102,6 +102,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "tiles": [],              # ordered list of tile descriptors, see dashboard.py
         "scenes": [],             # [{"id":..., "name":..., "actions":[...]}], see dashboard.py
         "favorite_colors": [],    # ["#ff8800", ...] shown first in every colour picker
+        # Branding.  The logo and background pictures themselves are files in
+        # <data dir>/branding/, see jimboled/branding.py.
+        "brand_mode": "logo_title",  # logo_title | logo | title: what the header shows
+        "logo_size": "m",            # s | m | l
+        "font": "system",            # see dashboard.FONTS
+        "backdrop": "glow",          # plain | glow | image (the uploaded background)
+        "backdrop_dim": 45,          # 0-90 %: darkens a background picture so text stays readable
+        "surface": "solid",          # solid | glass (see-through tiles, nice over a picture)
+        "footer_text": "",
+        "custom_css": "",            # advanced: extra CSS added after the built-in styles
+        "branding_rev": 0,           # bumped when a picture changes, so other screens reload it
     },
     "setup_complete": False,
 }

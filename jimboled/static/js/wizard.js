@@ -1,6 +1,11 @@
 /* First-run setup wizard. */
 (function () {
   const { h, el, esc } = UI;
+  /** The uploaded logo if there is one, else the default gradient mark. */
+  const heroMark = () => {
+    const logo = window.App && App.state.branding && App.state.branding.logo;
+    return logo ? `<img class="brand-logo" src="${esc(logo.url)}" alt="">` : '<span class="brand-mark"></span>';
+  };
   function run(onDone) {
     let step = 0;
     const steps = ['Welcome', 'Find your lights', 'Switches', 'Done'];
@@ -23,7 +28,7 @@
       back.classList.toggle('hidden', step === 0);
       next.textContent = step === steps.length - 1 ? 'Open the dashboard' : (step === 2 ? 'Next' : 'Next');
       if (step === 0) {
-        content.append(el(`<div class="hero"><span class="brand-mark"></span><h2>Welcome to JimboLED</h2><p>Let's connect your WLED lights and any relay switches wired to this Raspberry Pi. It only takes a minute, and you can change everything later in Settings.</p></div>`));
+        content.append(el(`<div class="hero">${heroMark()}<h2>Welcome to JimboLED</h2><p>Let's connect your WLED lights and any relay switches wired to this Raspberry Pi. It only takes a minute, and you can change everything later in Settings.</p></div>`));
       } else if (step === 1) {
         const list = h('div', { class: 'list' });
         const status = h('div', { class: 'row small muted' }, el(icon('refresh', 'spin')), h('span', { text: 'Searching your network for WLED controllers…' }));
@@ -63,7 +68,7 @@
         }
         drawList();
       } else {
-        content.append(el(`<div class="hero"><span class="brand-mark"></span><h2>You're all set</h2><p>Your dashboard is ready. Use <b>Edit layout</b> to arrange tiles the way you like, and <b>Settings</b> to add more lights, switches or scenes any time.</p><p class="small">Tip: on a phone, add this page to your home screen for a full-screen app.</p></div>`));
+        content.append(el(`<div class="hero">${heroMark()}<h2>You're all set</h2><p>Your dashboard is ready. Use <b>Edit layout</b> to arrange tiles the way you like, and <b>Settings</b> to add more lights, switches or scenes any time.</p><p class="small">Tip: on a phone, add this page to your home screen for a full-screen app.</p></div>`));
       }
     }
     back.onclick = () => { step = Math.max(0, step - 1); draw(); };

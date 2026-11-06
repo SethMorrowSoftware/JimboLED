@@ -214,7 +214,10 @@ it is deliberately **not** part of a backup.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET / PUT | `/api/dashboard` | `title`, `subtitle`, `theme` (`auto`/midnight/graphite/ocean/oled/daylight/paper), `accent`, `density` (comfortable/compact/roomy), `radius` (sharp/soft/round), `text_scale` (85–150 %), `show_offline`, `show_clock`, `show_estop`, `show_lights_button`, `favorite_colors[]` (up to 24 hex colours), `tiles[]`, `scenes[]`. GET also returns `groups[]` |
+| GET / PUT | `/api/dashboard` | `title`, `subtitle`, `theme` (`auto`/midnight/graphite/ocean/oled/daylight/paper), `accent`, `density` (comfortable/compact/roomy), `radius` (sharp/soft/round), `text_scale` (85–150 %), `font` (system/rounded/humanist/condensed/serif/mono), `brand_mode` (logo_title/logo/title), `logo_size` (s/m/l), `backdrop` (plain/glow/image), `backdrop_dim` (0–90 %), `surface` (solid/glass), `footer_text` (≤ 120 chars), `custom_css` (≤ 20 KB), `show_offline`, `show_clock`, `show_estop`, `show_lights_button`, `favorite_colors[]` (up to 24 hex colours), `tiles[]`, `scenes[]`. GET also returns `groups[]` and `branding` (`logo` / `background`: `{url, type, size}` or `null`) |
+| POST | `/api/dashboard/appearance/reset` | put every look-and-feel setting back to the defaults; `{"pictures": true}` also removes the logo and background |
+| POST / DELETE | `/api/branding/logo`, `/api/branding/background` | upload (multipart, field `file`: PNG, JPEG, GIF, WebP or a plain SVG; logo ≤ 1 MB, background ≤ 1.5 MB) or remove a picture |
+| GET | `/branding/logo`, `/branding/background` | the current picture (public, so the login page can show it); `/favicon.ico` serves the logo too |
 | POST | `/api/dashboard/tiles` | add a `heading`, `note`, `clock` or `all` tile |
 | PUT / DELETE | `/api/dashboard/tiles/<id>` | `size` (s/m/l/xl), `hidden`, `name`, `icon`, `color`, `opts` |
 | POST | `/api/dashboard/order` | `{"ids":[…]}` |

@@ -156,7 +156,7 @@
     if (opts.fill) input.style.setProperty('--slider-fill', opts.fill);
     setPct(input);
     let lastSent = null;
-    input.addEventListener('input', () => { setPct(input); val.textContent = opts.format ? opts.format(+input.value) : input.value; if (opts.onInput) opts.onInput(+input.value); });
+    input.addEventListener('input', () => { setPct(input); const t = opts.format ? opts.format(+input.value) : input.value; val.textContent = t; const vv = row.querySelector('.val'); if (vv) vv.textContent = t; if (opts.onInput) opts.onInput(+input.value); });
     input.addEventListener('change', () => { if (opts.onChange && lastSent !== input.value) { lastSent = input.value; opts.onChange(+input.value); } });
     row.append(input);
     if (opts.label == null) row.append(h('span', { class: 'val', text: opts.format ? opts.format(opts.value) : opts.value }));

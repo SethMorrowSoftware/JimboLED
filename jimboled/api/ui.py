@@ -1,7 +1,8 @@
 """HTML pages: the single-page dashboard and the optional login screen."""
 from __future__ import annotations
 
-from flask import Blueprint, redirect, render_template, request, session, url_for
+from flask import Blueprint, abort, redirect, render_template, request, send_file, session, url_for
+from markupsafe import Markup
 from werkzeug.security import check_password_hash
 
 from .. import __version__, get_ctx
@@ -23,7 +24,33 @@ def _appearance(dash: dict) -> dict:
         scale = max(85, min(150, int(dash.get("text_scale") or 100))) / 100.0
     except (TypeError, ValueError):
         scale = 1.0
+    branding = get_ctx().branding.summary()
+    logo = branding.get("logo")
+    background = branding.get("background")
+    try:
+        dim = max(0, min(90, int(dash.get("backdrop_dim", 45))))
+    except (TypeError, ValueError):
+        dim = 45
+    backdrop = dash.get("backdrop") or "glow"
+    if backdrop == "image" and not background:
+        backdrop = "glow"
+    # Custom CSS goes inside a <style> element: the only way out of one is
+    # "</style", so no "</" is let through.  "<\/" means the same in CSS.
+    css = str(dash.get("custom_css") or "").replace("</", "<\\/")
     return {
+        "logo_url": logo["url"] if logo else "",
+        "icon_url": logo["url"] if logo else "/static/img/icon.svg",
+        "icon_type": logo["type"] if logo else "image/svg+xml",
+        "background_url": background["url"] if background else "",
+        "brand_mode": dash.get("brand_mode") or "logo_title",
+        "logo_size": dash.get("logo_size") or "m",
+        "font": dash.get("font") or "system",
+        "backdrop": backdrop,
+        "backdrop_dim": f"{dim / 100:.2f}",
+        "surface": dash.get("surface") or "solid",
+        "custom_css": Markup(css),
+        "subtitle": dash.get("subtitle") or "",
+        "version": __version__,
         "title": dash.get("title") or "JimboLED",
         "accent": dash.get("accent") or "#7c5cff",
         "theme": theme,
@@ -38,7 +65,7 @@ def _appearance(dash: dict) -> dict:
 def index():
     ctx = get_ctx()
     dash = ctx.store.section("dashboard") or {}
-    return render_template("index.html", version=__version__, **_appearance(dash))
+    return render_template("index.html", **_appearance(dash))
 
 
 @bp.route("/login", methods=["GET", "POST"])
@@ -85,10 +112,42 @@ def healthz():
     return {"ok": True, "version": __version__}
 
 
+@bp.get("/branding/<kind>")
+def branding_image(kind):
+    from ..branding import SVG_CSP
+
+    found = get_ctx().branding.get(kind)
+    if not found:
+        abort(404)
+    path, mime = found
+    # The URL carries a version, so the picture can be cached for a long time.
+    resp = send_file(path, mimetype=mime, max_age=60 * 60 * 24 * 30, conditional=True)
+    resp.headers["Content-Security-Policy"] = SVG_CSP
+    return resp
+
+
+@bp.get("/favicon.ico")
+def favicon():
+    from ..branding import SVG_CSP
+
+    found = get_ctx().branding.get("logo")
+    if found:
+        path, mime = found
+        resp = send_file(path, mimetype=mime, max_age=3600)
+        resp.headers["Content-Security-Policy"] = SVG_CSP
+        return resp
+    return redirect("/static/img/icon.svg")
+
+
 @bp.get("/manifest.webmanifest")
 def manifest():
     ctx = get_ctx()
     dash = ctx.store.section("dashboard") or {}
+    logo = ctx.branding.info("logo")
+    if logo:
+        icons = [{"src": logo["url"], "sizes": "any", "type": logo["type"], "purpose": "any"}]
+    else:
+        icons = [{"src": "/static/img/icon.svg", "sizes": "any", "type": "image/svg+xml"}]
     return {
         "name": dash.get("title") or "JimboLED",
         "short_name": dash.get("title") or "JimboLED",
@@ -96,5 +155,5 @@ def manifest():
         "display": "standalone",
         "background_color": "#0f1117",
         "theme_color": dash.get("accent") or "#7c5cff",
-        "icons": [{"src": "/static/img/icon.svg", "sizes": "any", "type": "image/svg+xml"}],
+        "icons": icons,
     }

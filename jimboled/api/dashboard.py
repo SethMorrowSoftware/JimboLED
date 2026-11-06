@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from flask import Blueprint
+from flask import Blueprint, request
 
 from .. import get_ctx
 from ..config import new_id
@@ -22,6 +22,17 @@ THEMES = ("auto", "midnight", "graphite", "oled", "ocean", "daylight", "paper")
 DENSITIES = ("comfortable", "compact", "roomy")
 RADII = ("sharp", "soft", "round")
 TEXT_SCALE_RANGE = (85, 150)
+BRAND_MODES = ("logo_title", "logo", "title")
+LOGO_SIZES = ("s", "m", "l")
+FONTS = ("system", "rounded", "serif", "mono", "humanist", "condensed")
+BACKDROPS = ("plain", "glow", "image")
+SURFACES = ("solid", "glass")
+BACKDROP_DIM_RANGE = (0, 90)
+MAX_CUSTOM_CSS = 20000
+MAX_FOOTER = 120
+# Appearance keys that "Reset to defaults" puts back (pictures are separate).
+APPEARANCE_KEYS = ("theme", "accent", "density", "text_scale", "radius", "brand_mode", "logo_size",
+                   "font", "backdrop", "backdrop_dim", "surface", "footer_text", "custom_css")
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # Total time one scene run may spend waiting, across all of its delay actions.
 SCENE_DELAY_BUDGET_S = 30.0
@@ -188,7 +199,8 @@ def get_dashboard():
         ctx.store.update(sync_tiles)
         dash = ctx.store.section("dashboard")
     return ok({"dashboard": dash, "setup_complete": cfg.get("setup_complete", False),
-               "groups": [g for g in cfg.get("groups", []) if isinstance(g, dict)]})
+               "groups": [g for g in cfg.get("groups", []) if isinstance(g, dict)],
+               "branding": ctx.branding.summary()})
 
 
 @bp.put("/dashboard")
@@ -228,6 +240,31 @@ def update_dashboard():
             if not lo <= scale <= hi:
                 raise APIError(f"text_scale must be between {lo} and {hi}")
             dash["text_scale"] = scale
+        for key, allowed in (("brand_mode", BRAND_MODES), ("logo_size", LOGO_SIZES), ("font", FONTS),
+                             ("backdrop", BACKDROPS), ("surface", SURFACES)):
+            if key in data:
+                if data[key] not in allowed:
+                    raise APIError(f"{key} must be one of {', '.join(allowed)}")
+                dash[key] = data[key]
+        if "backdrop_dim" in data:
+            lo, hi = BACKDROP_DIM_RANGE
+            try:
+                dim = int(data["backdrop_dim"])
+            except (TypeError, ValueError):
+                raise APIError("backdrop_dim must be a number")
+            if not lo <= dim <= hi:
+                raise APIError(f"backdrop_dim must be between {lo} and {hi}")
+            dash["backdrop_dim"] = dim
+        if "footer_text" in data:
+            text = " ".join(str(data["footer_text"] or "").split())
+            if len(text) > MAX_FOOTER:
+                raise APIError(f"The footer text can be at most {MAX_FOOTER} characters")
+            dash["footer_text"] = text
+        if "custom_css" in data:
+            css = str(data["custom_css"] or "").replace("\r\n", "\n")
+            if len(css) > MAX_CUSTOM_CSS:
+                raise APIError(f"Custom CSS can be at most {MAX_CUSTOM_CSS // 1000} KB")
+            dash["custom_css"] = css
         if "favorite_colors" in data:
             favs = data["favorite_colors"]
             if not isinstance(favs, list):
@@ -474,3 +511,80 @@ def run_action(ctx, action: Dict[str, Any], *, source: str = "scene") -> Dict[st
     except APIError as exc:
         entry["error"] = exc.message
     return entry
+
+
+# ---------------------------------------------------------------- branding
+def _bump_branding(cfg):
+    cfg["dashboard"]["branding_rev"] = int(cfg["dashboard"].get("branding_rev") or 0) + 1
+
+
+@bp.post("/branding/<kind>")
+def upload_branding(kind):
+    from ..branding import KINDS, BrandingError
+
+    ctx = get_ctx()
+    if kind not in KINDS:
+        raise APIError(f"unknown picture '{kind}'", 404)
+    upload = request.files.get("file")
+    if upload is None:
+        raise APIError("Choose a picture to upload")
+    # The request as a whole is capped by MAX_CONTENT_LENGTH; validate() applies
+    # the tighter per-picture limit with a friendlier message.
+    data = upload.read()
+    try:
+        ctx.branding.save(kind, data)
+    except BrandingError as exc:
+        raise APIError(str(exc))
+
+    def mutate(cfg):
+        _bump_branding(cfg)
+        # Uploading a background is a clear sign you want to see it.
+        if kind == "background":
+            cfg["dashboard"]["backdrop"] = "image"
+
+    ctx.store.update(mutate)
+    return ok({"branding": ctx.branding.summary(), "dashboard": ctx.store.section("dashboard")}, 201)
+
+
+@bp.delete("/branding/<kind>")
+def delete_branding(kind):
+    from ..branding import KINDS
+
+    ctx = get_ctx()
+    if kind not in KINDS:
+        raise APIError(f"unknown picture '{kind}'", 404)
+    ctx.branding.delete(kind)
+
+    def mutate(cfg):
+        _bump_branding(cfg)
+        if kind == "background" and cfg["dashboard"].get("backdrop") == "image":
+            cfg["dashboard"]["backdrop"] = "glow"
+
+    ctx.store.update(mutate)
+    return ok({"branding": ctx.branding.summary(), "dashboard": ctx.store.section("dashboard")})
+
+
+@bp.post("/dashboard/appearance/reset")
+def reset_appearance():
+    """Put every look-and-feel setting back to how JimboLED ships.
+
+    Titles, tiles, scenes and favourite colours are yours, not "appearance",
+    so they stay.  Pictures are removed only when asked for.
+    """
+    from ..config import DEFAULT_CONFIG
+
+    ctx = get_ctx()
+    data = body()
+    if data.get("pictures"):
+        from ..branding import KINDS
+
+        for kind in KINDS:
+            ctx.branding.delete(kind)
+
+    def mutate(cfg):
+        for key in APPEARANCE_KEYS:
+            cfg["dashboard"][key] = DEFAULT_CONFIG["dashboard"][key]
+        _bump_branding(cfg)
+
+    ctx.store.update(mutate, backup_reason="appearance-reset")
+    return ok({"branding": ctx.branding.summary(), "dashboard": ctx.store.section("dashboard")})

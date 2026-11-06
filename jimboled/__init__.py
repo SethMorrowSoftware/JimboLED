@@ -68,6 +68,7 @@ class AppContext:
         self._cfg_rev = 0
         self._rev_lock = threading.Lock()
         self.log_buffer = None
+        self.branding = None
 
     def bump(self, *_args) -> None:
         """Something observable changed (device state, relay, config)."""
@@ -95,7 +96,8 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
     app = Flask(__name__, static_folder="static", template_folder="templates", static_url_path="/static")
     app.config["JSON_SORT_KEYS"] = False
     app.json.sort_keys = False  # type: ignore[attr-defined]
-    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+    # Big enough for a backup that carries the logo and background picture.
+    app.config["MAX_CONTENT_LENGTH"] = 6 * 1024 * 1024
     app.config["TESTING"] = testing
 
     store = ConfigStore(data_dir)
@@ -125,6 +127,10 @@ def create_app(data_dir: Optional[str] = None, *, start_services: bool = True, t
 
     ctx.devices = DeviceManager(store, on_change=ctx.bump)
     ctx.notifier = Notifier(store, ctx.devices)
+
+    from .branding import BrandingStore
+
+    ctx.branding = BrandingStore(store.data_dir)
 
     def _gpio_event(evt=None):
         ctx.bump()
@@ -291,7 +297,7 @@ def _install_security(app: Flask, ctx: AppContext) -> None:
                 if path.startswith("/api/"):
                     return jsonify({"error": msg}), 421
                 return msg, 421, {"Content-Type": "text/plain; charset=utf-8"}
-        if path.startswith("/static/") or path in ("/healthz", "/favicon.ico", "/manifest.webmanifest"):
+        if path.startswith(("/static/", "/branding/")) or path in ("/healthz", "/favicon.ico", "/manifest.webmanifest"):
             return None
         auth_header = request.headers.get("Authorization", "")
         if path.startswith("/api/") and auth_header[:7].lower() == "bearer ":

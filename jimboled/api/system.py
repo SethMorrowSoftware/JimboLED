@@ -341,6 +341,8 @@ def download_backup():
     # keys to this Pi.  Restoring keeps whatever tokens exist at the time.
     cfg["server"].pop("api_tokens", None)
     cfg["server"].pop("password_hash", None)
+    # The logo and background picture, so a restore on a new Pi looks the same.
+    cfg["branding"] = ctx.branding.export()
     payload = json.dumps(cfg, indent=2).encode("utf-8")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return send_file(io.BytesIO(payload), mimetype="application/json", as_attachment=True,
@@ -396,6 +398,7 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     # later when somebody taps it.
     dash["tiles"] = _keep_valid(dash.get("tiles"), clean_tile)
     dash["scenes"] = _keep_valid(dash.get("scenes"), clean_scene)
+    _validated_appearance(dash)
     favs = dash.get("favorite_colors")
     dash["favorite_colors"] = list(dict.fromkeys(
         str(c).lower() for c in (favs if isinstance(favs, list) else []) if HEX_RE.match(str(c))))[:MAX_FAVORITE_COLORS]
@@ -415,6 +418,30 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
     except ValueError:
         data["notify"] = {"url": "", "events": list(EVENTS)}
     return data
+
+
+def _validated_appearance(dash: Dict[str, Any]) -> None:
+    """Look-and-feel settings from a backup; anything unusable goes back to the default."""
+    from ..config import DEFAULT_CONFIG
+    from . import dashboard as d
+
+    defaults = DEFAULT_CONFIG["dashboard"]
+    for key, allowed in (("theme", d.THEMES), ("density", d.DENSITIES), ("radius", d.RADII),
+                         ("brand_mode", d.BRAND_MODES), ("logo_size", d.LOGO_SIZES), ("font", d.FONTS),
+                         ("backdrop", d.BACKDROPS), ("surface", d.SURFACES)):
+        if dash.get(key, defaults[key]) not in allowed:
+            dash[key] = defaults[key]
+    if not HEX_RE.match(str(dash.get("accent", defaults["accent"]))):
+        dash["accent"] = defaults["accent"]
+    for key, (lo, hi) in (("text_scale", d.TEXT_SCALE_RANGE), ("backdrop_dim", d.BACKDROP_DIM_RANGE)):
+        try:
+            dash[key] = max(lo, min(hi, int(dash.get(key, defaults[key]))))
+        except (TypeError, ValueError):
+            dash[key] = defaults[key]
+    dash["title"] = str(dash.get("title") or defaults["title"])[:40]
+    dash["subtitle"] = str(dash.get("subtitle") or "")[:80]
+    dash["footer_text"] = " ".join(str(dash.get("footer_text") or "").split())[:d.MAX_FOOTER]
+    dash["custom_css"] = str(dash.get("custom_css") or "")[:d.MAX_CUSTOM_CSS]
 
 
 def _validated_location(raw: Any) -> Dict[str, Any]:
@@ -506,8 +533,13 @@ def restore_backup():
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         raise APIError("That file is not a valid JimboLED backup")
+    pictures = data.pop("branding", None) if isinstance(data, dict) else None
     data = _validated_restore(data, ctx.store.section("server") or {})
     ctx.store.replace(data, backup_reason="pre-restore")
+    # After the configuration: a bad picture is skipped, never a failed restore.
+    ctx.branding.import_(pictures)
+    if pictures is not None:
+        ctx.store.update(lambda c: c["dashboard"].__setitem__("branding_rev", int(c["dashboard"].get("branding_rev") or 0) + 1))
     apply_boot_pins(ctx)
     return ok({"message": "Backup restored"})
 
@@ -530,6 +562,8 @@ def restore_named_backup(name):
             data = json.load(fh)
     except (OSError, ValueError):
         raise APIError("That snapshot is unreadable", 400)
+    if isinstance(data, dict):
+        data.pop("branding", None)
     data = _validated_restore(data, ctx.store.section("server") or {})
     ctx.store.replace(data, backup_reason="pre-restore")
     apply_boot_pins(ctx)
