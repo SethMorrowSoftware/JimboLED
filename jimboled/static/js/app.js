@@ -33,8 +33,56 @@
     else if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
     const actions = document.getElementById('topbar-actions'); if (actions) actions.dataset.rendered = '';
     if (typeof renderTopbar === 'function' && App.state.dashboard) renderTopbar();
+    if (App.kiosk) armScreensaver(); else { clearTimeout(idleTimer); if (saver) hideScreensaver(); }
   }
   App.setKiosk = setKiosk;
+
+  function hideSplash() {
+    const sp = document.getElementById('splash');
+    if (!sp) return;
+    sp.classList.add('gone');
+    setTimeout(() => sp.remove(), 600);
+  }
+
+  // Wall-tablet screensaver: after a while untouched, a big clock, the date
+  // and the logo, drifting slowly so the screen doesn't burn in.  One tap
+  // wakes it without that tap reaching the buttons underneath.  It never
+  // covers a latched emergency stop.
+  const IDLE_KEY = 'jimboled.kiosk.idle';
+  let idleTimer = null, saver = null, saverTick = null;
+  function idleMs() {
+    let s = 120;
+    try { const v = parseInt(localStorage.getItem(IDLE_KEY), 10); if (v >= 2 && v <= 3600) s = v; } catch (e) { /* default */ }
+    return s * 1000;
+  }
+  function showScreensaver() {
+    if (!App.kiosk || saver || document.querySelector('.modal')) return armScreensaver();
+    if (window.EStop && EStop.engagedZones().length) return armScreensaver();
+    const logo = App.state.branding && App.state.branding.logo;
+    const dash = App.state.dashboard || {};
+    saver = h('div', { class: 'screensaver', id: 'screensaver', role: 'button', 'aria-label': 'Tap to wake' });
+    const inner = h('div', { class: 'saver-inner' });
+    if (logo) inner.append(h('img', { class: 'saver-logo', src: logo.url, alt: '' }));
+    const time = h('div', { class: 'saver-time' }), date = h('div', { class: 'saver-date' });
+    inner.append(time, date, h('div', { class: 'saver-title', text: dash.title || 'JimboLED' }));
+    const tick = () => { const n = new Date(); time.textContent = n.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); date.textContent = n.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' }); };
+    tick(); saverTick = setInterval(tick, 1000);
+    saver.append(inner);
+    const wake = (e) => { e.preventDefault(); e.stopPropagation(); hideScreensaver(); };
+    saver.addEventListener('pointerdown', wake);
+    saver.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
+    document.body.append(saver);
+  }
+  function hideScreensaver() {
+    if (saver) { const s = saver; saver = null; clearInterval(saverTick); s.classList.add('gone'); setTimeout(() => s.remove(), 400); }
+    armScreensaver();
+  }
+  function armScreensaver() {
+    clearTimeout(idleTimer);
+    if (App.kiosk && !saver) idleTimer = setTimeout(showScreensaver, idleMs());
+  }
+  App.hideScreensaver = hideScreensaver;
+  ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach((ev) => document.addEventListener(ev, () => { if (!saver) armScreensaver(); }, { passive: true, capture: true }));
   document.documentElement.toggleAttribute('data-kiosk', App.kiosk);
   document.addEventListener('visibilitychange', keepAwake);
   // Leaving: press and hold the logo for three seconds, then confirm.
@@ -174,6 +222,7 @@
     if (onSwitches.length) pieces.push(`<span class="pill" title="Relays energised"><span class="dot ok"></span>${esc(onSwitches.map((s) => s.name).join(', '))} on</span>`);
     if (App.state.gpio.simulated && (App.state.gpio.switches || []).length) pieces.push(`<span class="pill" title="No GPIO hardware – switches are simulated"><span class="dot warn"></span>GPIO simulated</span>`);
     const latched = (window.EStop ? EStop.engagedZones() : []);
+    if (latched.length && saver) hideScreensaver();
     if (latched.length) pieces.unshift(`<span class="pill" id="pill-estop" title="${esc(latched.map((z) => z.name).join(', '))} stopped – relays are locked out"><span class="dot bad"></span><span class="hide-sm">${esc(latched.map((z) => z.name).join(', '))}&nbsp;</span>stopped</span>`);
     if (App.kiosk || (App.state.dashboard && App.state.dashboard.show_clock !== false)) pieces.push(`<span class="pill nowrap" id="pill-clock">${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>`);
     st.innerHTML = pieces.join('');
@@ -510,6 +559,8 @@
   // ------------------------------------------------------------ boot
   async function boot() {
     App.route = parseHash();
+    // #/?kiosk=1&idle=300: screensaver after 300 s untouched (this screen only).
+    if (App.route.q && /^\d+$/.test(App.route.q.idle || '')) { try { localStorage.setItem(IDLE_KEY, App.route.q.idle); } catch (e) { /* ignore */ } }
     // #/?kiosk=1 turns a tablet into a wall panel; #/?kiosk=0 undoes it.
     if (App.route.q && (App.route.q.kiosk === '1' || App.route.q.kiosk === '0')) { setKiosk(App.route.q.kiosk === '1'); history.replaceState(null, '', '#/'); App.route = parseHash(); }
     if (App.kiosk && App.route.view === 'settings') { history.replaceState(null, '', '#/'); App.route = parseHash(); }
@@ -517,6 +568,8 @@
     renderFooter(null);
     await refresh(true);
     render();
+    hideSplash();
+    armScreensaver();
     if (App.state.dashboard && !App.state.setupComplete && !App.state.devices.length && !(App.state.gpio.switches || []).length) {
       Wizard.run(() => refresh(true));
     }
