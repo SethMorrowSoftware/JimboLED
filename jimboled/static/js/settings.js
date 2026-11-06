@@ -742,7 +742,7 @@
       }).catch(UI.notifyError));
     };
 
-    const saveBar = h('div', { class: 'row end wrap' }, reset, h('span', { class: 'grow' }), revert, save);
+    const saveBar = h('div', { class: 'row end' }, revert, save);
 
     body.append(h('div', { class: 'card' },
       h('div', { class: 'card-title' }, h('h3', { text: 'Branding' }),
@@ -784,6 +784,10 @@
       el(`<p class="muted small">Extra styles added after JimboLED's own, previewed as you type. Handy variables: <code>--accent</code>, <code>--bg</code>, <code>--surface</code>, <code>--text</code>, <code>--radius</code>, <code>--font</code>. If something goes wrong, clear this box or use <b>Reset to defaults</b>.</p>`),
       css));
 
+    body.append(h('div', { class: 'card' },
+      h('div', { class: 'card-title' }, h('h3', { text: 'Start over' })),
+      el(`<p class="muted small">Puts the theme, colours, font, background style, logo layout and custom CSS back to how JimboLED ships. Your title, pictures, tiles, scenes and favourite colours stay.</p>`),
+      h('div', { class: 'row' }, reset)));
     body.append(h('div', { class: 'card sticky-save' }, saveBar));
 
     // Favourite colours: shown first in the Lights panel and on group tiles.

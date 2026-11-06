@@ -29,6 +29,25 @@ jobs:
           GPIOZERO_PIN_FACTORY: mock
         run: pytest -q
 
+  browser:
+    # The real dashboard in headless Chromium: every settings page, the
+    # controller panel, switches, hold-to-run, e-stop, branding, login, wizard.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          pip install -r requirements.txt pytest playwright
+          python -m playwright install --with-deps chromium
+      - name: Browser tests
+        env:
+          GPIOZERO_PIN_FACTORY: mock
+        run: pytest -q tests/test_browser.py
+
   frontend:
     runs-on: ubuntu-latest
     steps:
