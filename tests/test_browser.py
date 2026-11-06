@@ -403,6 +403,39 @@ def test_wall_tablet_mode(desktop, server):
     desktop.assert_clean()
 
 
+def test_splash_screen_shows_then_gets_out_of_the_way(desktop, server):
+    page = desktop.page
+    page.goto(server.url + "/")
+    assert page.locator("#splash .splash-title").inner_text() == page.locator("#brand-title").inner_text()
+    page.wait_for_selector("#splash", state="detached", timeout=8000)
+    page.wait_for_selector(".tile")
+    desktop.assert_clean()
+
+
+def test_wall_tablet_screensaver(desktop, server):
+    page = desktop.go("#/?kiosk=1&idle=2", settle=500)
+    page.wait_for_selector("#screensaver", timeout=6000)
+    assert ":" in page.locator(".saver-time").inner_text()
+    assert page.locator(".saver-title").inner_text().strip()
+    # The waking tap must not also press whatever is underneath.
+    before = _switch(server, "Fan")["on"]
+    box = page.locator(".tile", has_text="Fan").locator(".hold-btn").first.bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.wait_for_selector("#screensaver", state="detached")
+    page.wait_for_timeout(500)
+    assert _switch(server, "Fan")["on"] == before
+    # Touching the dashboard keeps it away; leaving it alone brings it back.
+    page.wait_for_selector("#screensaver", timeout=6000)
+    page.mouse.click(5, 300)
+    # Not on a normal (non-kiosk) screen.
+    p2 = desktop.context.new_page()
+    p2.goto(server.url + "/#/?kiosk=0")
+    p2.wait_for_timeout(3500)
+    assert p2.locator("#screensaver").count() == 0
+    p2.close()
+    desktop.assert_clean()
+
+
 def test_emergency_stop_engage_and_reset(desktop, server):
     page = desktop.go()
     page.locator(".estop-btn").first.click()

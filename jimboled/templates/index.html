@@ -31,6 +31,12 @@
     <main class="main" id="main"></main>
     <footer class="footer" id="footer"></footer>
   </div>
+  <!-- Shown until the first data arrives; hides itself after a few seconds even if scripts fail. -->
+  <div id="splash" class="splash" aria-hidden="true">
+    {% if logo_url %}<img class="splash-logo" src="{{ logo_url }}" alt="">{% else %}<span class="brand-mark splash-mark"></span>{% endif %}
+    <div class="splash-title">{{ title }}</div>
+    {% if subtitle %}<div class="splash-sub">{{ subtitle }}</div>{% endif %}
+  </div>
   <div id="modal-root"></div>
   <div id="toast-root" class="toast-root" aria-live="assertive"></div>
   <script>window.JIMBOLED = { version: "{{ version }}" };</script>
