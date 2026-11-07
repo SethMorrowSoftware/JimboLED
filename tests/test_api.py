@@ -55,6 +55,9 @@ def test_gpio_endpoints(client):
     assert r.status_code == 400 and "used by" in r.json["error"]
     r = client.post("/api/gpio/switches", json={"name": "Down", "pin": 27, "mode": "momentary", "interlock_group": "bed", "active_high": False})
     down = r.json["switch"]["id"]
+    # A motor only moves after Enable; Enable on Up unlocks Down too (same group).
+    assert client.post(f"/api/gpio/switches/{up}/action", json={"action": "press"}).status_code == 400
+    assert client.post(f"/api/gpio/switches/{up}/action", json={"action": "enable"}).status_code == 200
     r = client.post(f"/api/gpio/switches/{up}/action", json={"action": "press"})
     tok = r.json["switch"]["token"]
     assert r.json["switch"]["on"]

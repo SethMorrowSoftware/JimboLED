@@ -52,6 +52,8 @@ MODES = ("toggle", "momentary", "pulse")
 WATCHDOG_TICK_S = 0.1
 DEFAULT_PULSE_MS = 500
 DEFAULT_MAX_ON = {"toggle": 0, "momentary": 60, "pulse": 0}
+# How long a motor stays enabled after Enable is tapped, or after it last moved.
+DEFAULT_ENABLE_WINDOW_S = 15.0
 # Grace on top of a pin test's own duration before the watchdog takes the pin
 # away from the request that asked for it.
 TEST_PIN_GRACE_S = 1.0
@@ -114,6 +116,8 @@ class SwitchConfig:
     confirm: bool = False
     enabled: bool = True
     notes: str = ""
+    # Hold-to-run only: the dashboard needs a tap on Enable before Hold works.
+    require_enable: bool = True
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "SwitchConfig":
@@ -154,6 +158,7 @@ class SwitchConfig:
             confirm=as_bool(raw.get("confirm"), False),
             enabled=as_bool(raw.get("enabled"), True),
             notes=str(raw.get("notes") or "")[:200],
+            require_enable=as_bool(raw.get("require_enable"), True),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -171,6 +176,7 @@ class SwitchConfig:
             "confirm": self.confirm,
             "enabled": self.enabled,
             "notes": self.notes,
+            "require_enable": self.require_enable,
         }
 
 
@@ -237,6 +243,10 @@ class GPIOManager:
         self.store = config_store
         self._lock = _GuardedLock()
         self._switches: Dict[str, _Runtime] = {}
+        # Motors that someone tapped Enable on: arm key -> monotonic deadline.
+        # A motor's Up and Down share one key (their interlock group).
+        self._armed_until: Dict[str, float] = {}
+        self._enable_window = DEFAULT_ENABLE_WINDOW_S
         self._test_pins: Dict[int, _TestPin] = {}
         self._group_block_until: Dict[str, float] = {}
         self._events: Deque[Dict[str, Any]] = collections.deque(maxlen=200)
@@ -348,6 +358,7 @@ class GPIOManager:
         """
         self._dead_time = _positive(cfg.get("interlock_dead_time_ms"), 250.0, 0.0, 5000.0) / 1000.0
         self._hold_timeout = _positive(cfg.get("hold_timeout_s"), 1.5, 0.1, 30.0)
+        self._enable_window = _positive(cfg.get("enable_window_s"), DEFAULT_ENABLE_WINDOW_S, 3.0, 120.0)
 
     def _apply_config(self, raw_switches: List[Dict[str, Any]]) -> None:
         try:
@@ -579,16 +590,58 @@ class GPIOManager:
             if rt and rt.on:
                 self._set_off(rt, "pulse-complete")
 
-    def press(self, switch_id: str, source: str = "api") -> Dict[str, Any]:
-        """Start holding a momentary switch.  Returns snapshot incl. hold token."""
+    # ------------------------------------------------------------ enabling
+    @staticmethod
+    def _arm_key(cfg: SwitchConfig) -> str:
+        return f"group:{cfg.interlock_group}" if cfg.interlock_group else f"switch:{cfg.id}"
+
+    def _armed_left(self, cfg: SwitchConfig, now: Optional[float] = None) -> float:
+        now = time.monotonic() if now is None else now
+        return max(0.0, self._armed_until.get(self._arm_key(cfg), 0.0) - now)
+
+    def _keep_armed(self, cfg: SwitchConfig) -> None:
+        # Using a motor keeps it enabled, so Up then Down needs one Enable,
+        # but this never revives a motor whose Enable has already run out.
+        key, now = self._arm_key(cfg), time.monotonic()
+        if self._armed_until.get(key, 0.0) > now:
+            self._armed_until[key] = max(self._armed_until[key], now + self._enable_window)
+
+    def enable(self, switch_id: str, source: str = "api") -> Dict[str, Any]:
+        """Unlock a hold-to-run motor (both its directions) for a short while."""
+        with self._lock:
+            rt = self._get(switch_id)
+            if rt.cfg.mode != "momentary":
+                raise GPIOError(f"'{rt.cfg.name}' is not a hold-to-run switch")
+            self._check_estop(rt)
+            self._armed_until[self._arm_key(rt.cfg)] = time.monotonic() + self._enable_window
+            self._events.append({"ts": time.time(), "switch": rt.cfg.id, "name": rt.cfg.name,
+                                 "action": "enabled", "source": source, "reason": ""})
+            return self._snapshot_one(rt)
+
+    def disable(self, switch_id: str, source: str = "api") -> Dict[str, Any]:
+        """Lock a motor again.  Never stops one that is moving: letting go does that."""
+        with self._lock:
+            rt = self._get(switch_id)
+            self._armed_until.pop(self._arm_key(rt.cfg), None)
+            return self._snapshot_one(rt)
+
+    def press(self, switch_id: str, source: str = "api", require_enabled: bool = False) -> Dict[str, Any]:
+        """Start holding a momentary switch.  Returns snapshot incl. hold token.
+
+        ``require_enabled`` is set for presses from the dashboard: a motor
+        whose switch asks for it only runs after someone tapped Enable.
+        """
         with self._lock:
             rt = self._get(switch_id)
             self._check_estop(rt)
             if rt.cfg.mode != "momentary":
                 raise GPIOError(f"'{rt.cfg.name}' is not a hold-to-run switch")
+            if require_enabled and rt.cfg.require_enable and self._armed_left(rt.cfg) <= 0:
+                raise GPIOError(f"Tap Enable first, then hold '{rt.cfg.name}'")
         self._energise(switch_id, source)
         with self._lock:
             rt = self._get(switch_id)
+            self._keep_armed(rt.cfg)
             token = secrets.token_urlsafe(12)
             rt.hold_token = token
             rt.last_heartbeat = time.monotonic()
@@ -604,6 +657,7 @@ class GPIOManager:
                 snap["held"] = False
                 return snap
             rt.last_heartbeat = time.monotonic()
+            self._keep_armed(rt.cfg)
             snap = self._snapshot_one(rt)
             snap["held"] = True
             return snap
@@ -615,12 +669,14 @@ class GPIOManager:
                 raise GPIOError(f"unknown switch '{switch_id}'")
             # A release is always honoured, even with a stale token: safety first.
             self._set_off(rt, f"release:{source}")
+            self._keep_armed(rt.cfg)
             return self._snapshot_one(rt)
 
     def all_off(self, source: str = "api") -> Dict[str, Any]:
         with self._lock:
             for rt in self._switches.values():
                 self._set_off(rt, f"all-off:{source}")
+            self._armed_until.clear()
             return self.snapshot()
 
     # --------------------------------------------------------- emergency stop
@@ -662,6 +718,7 @@ class GPIOManager:
             zone = self.estop.zone(zone_id)
             newly = self.estop.engage(zone_id, reason, source)
             stopped = self._enforce_estop(force=True, reason="estop")
+            self._armed_until.clear()
             if newly:
                 self._events.append({"ts": time.time(), "switch": "", "name": zone.name,
                                      "action": "estop-engaged", "source": source,
@@ -879,6 +936,8 @@ class GPIOManager:
             "interlock_group": cfg.interlock_group,
             "max_on_seconds": cfg.max_on_seconds,
             "pulse_ms": cfg.pulse_ms,
+            "require_enable": cfg.mode == "momentary" and cfg.require_enable,
+            "enabled_for": round(self._armed_left(cfg, now), 1) if cfg.mode == "momentary" else 0,
             "last_off_reason": rt.last_off_reason,
             "activations": rt.activations,
             "locked_out": zone is not None,
@@ -893,6 +952,7 @@ class GPIOManager:
                 "simulated": self.simulated,
                 "pi_model": pi_model(),
                 "hold_timeout_s": self._hold_timeout if self.started else None,
+                "enable_window_s": self._enable_window,
                 "switches": [self._snapshot_one(rt) for rt in self._switches.values()],
                 "estop": self.estop.snapshot([rt.cfg for rt in self._switches.values()]),
                 "buttons": self.buttons.snapshot(),

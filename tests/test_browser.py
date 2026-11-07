@@ -266,8 +266,57 @@ def test_toggle_switch_tile(desktop, server):
     desktop.assert_clean()
 
 
+def _hold(page, btn, ms):
+    box = btn.bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.down()
+    page.wait_for_timeout(ms)
+
+
+def test_a_motor_is_locked_until_enable(desktop, server):
+    page = desktop.go()
+    tile = page.locator(".tile", has_text="Bed up")
+    hold = tile.locator(".hold-btn")
+    assert hold.get_attribute("aria-disabled") == "true"
+    # Holding without Enable does nothing, and points at Enable.
+    _hold(page, hold, 700)
+    assert _switch(server, "Bed up")["on"] is False
+    page.mouse.up()
+    page.wait_for_selector("text=Tap Enable first")
+    # Enable, then hold: it runs, and stops on letting go.
+    tile.get_by_role("button", name="Enable Bed up").click()
+    page.wait_for_timeout(300)
+    assert hold.get_attribute("aria-disabled") == "false"
+    assert "Enabled" in tile.locator(".enable-btn").inner_text()
+    _hold(page, hold, 900)
+    assert _switch(server, "Bed up")["on"] is True
+    page.mouse.up()
+    page.wait_for_timeout(700)
+    assert _switch(server, "Bed up")["on"] is False
+    # Tapping it again locks it straight away.
+    tile.get_by_role("button", name="Enable Bed up").click()
+    page.wait_for_timeout(300)
+    assert hold.get_attribute("aria-disabled") == "true"
+    r = server.api.post(f"{server.url}/api/gpio/switches/{server.switch['switch']['id']}/action",
+                        json={"action": "press"}, timeout=5)
+    assert r.status_code == 400  # the Pi refuses too, not just the page
+    desktop.assert_clean()
+
+
+def test_a_motor_tile_fits_a_phone(phone):
+    page = phone.go()
+    tile = page.locator(".tile", has_text="Bed up")
+    tile.locator(".enable-btn").wait_for()
+    eb, hb = tile.locator(".enable-btn").bounding_box(), tile.locator(".hold-btn").bounding_box()
+    assert abs(eb["y"] - hb["y"]) < 2 and eb["x"] + eb["width"] <= hb["x"]  # side by side
+    phone.no_sideways_scroll()
+    phone.assert_clean()
+
+
 def test_hold_to_run_only_runs_while_held(desktop, server):
     page = desktop.go()
+    page.locator(".tile", has_text="Bed up").get_by_role("button", name="Enable Bed up").click()
+    page.wait_for_timeout(300)
     btn = page.locator(".tile", has_text="Bed up").locator(".hold-btn").first
     box = btn.bounding_box()
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)

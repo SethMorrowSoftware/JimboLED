@@ -169,13 +169,17 @@ def switch_action(switch_id):
     elif action == "pulse":
         result = gpio.pulse(switch_id, data.get("duration_ms"), source)
     elif action == "press":
-        result = gpio.press(switch_id, source)
+        result = gpio.press(switch_id, source, require_enabled=True)
+    elif action == "enable":
+        result = gpio.enable(switch_id, source)
+    elif action == "disable":
+        result = gpio.disable(switch_id, source)
     elif action == "heartbeat":
         result = gpio.heartbeat(switch_id, token)
     elif action == "release":
         result = gpio.release(switch_id, token, source)
     else:
-        raise APIError("action must be on, off, toggle, pulse, press, heartbeat or release")
+        raise APIError("action must be on, off, toggle, pulse, enable, disable, press, heartbeat or release")
     return ok({"switch": result})
 
 

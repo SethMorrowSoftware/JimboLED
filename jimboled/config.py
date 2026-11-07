@@ -72,6 +72,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "interlock_dead_time_ms": 250,
         # Seconds without a heartbeat before a held (momentary) switch releases.
         "hold_timeout_s": 1.5,
+        # Seconds a motor stays unlocked after Enable is tapped (or it last moved).
+        "enable_window_s": 15,
         # Emergency stop.  ``zones`` are extra, scoped stops on top of the
         # built-in master stop; ``inputs`` are physical buttons wired to GPIO
         # inputs.  The latch itself is runtime state and lives in estop.json.

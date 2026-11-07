@@ -28,6 +28,8 @@
     }
     async press(e) {
       if (this.token || this.pending) return;
+      // A motor that needs Enable first: say so instead of pressing.
+      if (this.opts.guard && !this.opts.guard()) { if (e && e.preventDefault) e.preventDefault(); return; }
       if (e && e.pointerId != null) { try { this.btn.setPointerCapture(e.pointerId); } catch (_) {} this.pointerId = e.pointerId; }
       // Clear the "let go before the press landed" flag up front: a press that
       // failed used to leave it set, so the next hold released itself at once.
@@ -119,11 +121,13 @@
     const modeLabel = h('span', { text: MODE_LABEL[sw.mode] || sw.mode });
     status.append(modeLabel, timerEl);
 
+    let motor = null;
     if (sw.mode === 'momentary') {
       btn = el(`<button class="hold-btn ${opts.big ? 'big' : ''}" type="button" aria-label="Hold to run ${esc(sw.name)}">${icon(switchIcon(sw))}<span class="label">Hold</span><span class="progress"></span></button>`);
-      holder = new HoldController(sw, btn, { onState: (s) => root.update(s), onTick: (s) => root.update(s) });
-      root.append(btn, status);
-      root.hint = 'Press and hold the button. Let go to stop.';
+      motor = motorEnable(sw, btn, opts);
+      holder = new HoldController(sw, btn, { onState: (s) => root.update(s), onTick: (s) => root.update(s), guard: motor.guard });
+      root.append(motor.wrap, status);
+      root.hint = sw.require_enable ? 'Tap Enable, then press and hold. Let go to stop.' : 'Press and hold the button. Let go to stop.';
     } else if (sw.mode === 'pulse') {
       btn = el(`<button class="hold-btn ${opts.big ? 'big' : ''}" type="button">${icon(switchIcon(sw))}<span class="label">Tap</span><span class="progress"></span></button>`);
       btn.onclick = async () => { btn.classList.add('active'); const s = await act(sw, 'pulse'); if (s) root.update(s); setTimeout(() => btn.classList.remove('active'), sw.pulse_ms || 500); };
@@ -142,6 +146,7 @@
       btn.disabled = !s.available || !!s.locked_out;
       if (sw.mode === 'toggle') label.textContent = s.on ? 'On' : 'Off';
       else if (sw.mode === 'momentary') label.textContent = s.on ? 'Running…' : 'Hold';
+      if (motor) motor.update(s);
       const prog = btn.querySelector('.progress');
       if (s.on && s.max_on_seconds && s.remaining != null) { prog.style.width = (100 * (1 - s.remaining / s.max_on_seconds)) + '%'; timerEl.textContent = `${Math.ceil(s.remaining)}s left`; }
       else if (s.on) { prog.style.width = '100%'; timerEl.textContent = `on ${UI.fmtDuration(s.on_for)}`; }
@@ -150,8 +155,70 @@
       if (s.locked_out) { label.textContent = 'Stopped'; timerEl.textContent = 'emergency stop'; }
     };
     root.update(sw);
-    root.destroy = () => holder && holder.destroy();
+    root.destroy = () => { if (holder) holder.destroy(); if (motor) motor.destroy(); };
     return root;
+  }
+
+  /**
+   * The Enable half of a motor tile.  Hold stays locked until Enable is
+   * tapped; then both directions of that motor are unlocked for a short
+   * while (the Pi decides how long, and refuses a press after that), and
+   * every use keeps them unlocked.  Tapping Enable again locks at once.
+   */
+  function motorEnable(sw, holdBtn, opts) {
+    const wrap = h('div', { class: 'motor-ctl' + (opts.big ? ' big' : '') });
+    if (!sw.require_enable) { wrap.append(holdBtn); return { wrap, guard: () => true, update() {}, destroy() {} }; }
+    const enableBtn = el(`<button class="enable-btn" type="button" aria-pressed="false" aria-label="Enable ${esc(sw.name)}"><span class="ico-slot"></span><span class="label">Enable</span><span class="count"></span></button>`);
+    wrap.append(enableBtn, holdBtn);
+    const key = sw.interlock_group ? 'group:' + sw.interlock_group : 'switch:' + sw.id;
+    let until = 0, ticker = null, running = false;
+    const left = () => Math.max(0, (until - Date.now()) / 1000);
+    function paint() {
+      const on = left() > 0 || running;
+      wrap.classList.toggle('armed', on);
+      holdBtn.classList.toggle('locked', !on);
+      holdBtn.setAttribute('aria-disabled', on ? 'false' : 'true');
+      enableBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      enableBtn.querySelector('.label').textContent = on ? 'Enabled' : 'Enable';
+      enableBtn.querySelector('.count').textContent = on && !running ? `${Math.ceil(left())}s` : '';
+      const slot = enableBtn.querySelector('.ico-slot');
+      if (slot.dataset.on !== String(on)) { slot.dataset.on = String(on); slot.innerHTML = icon(on ? 'unlock' : 'lock'); }
+      if (!on && ticker) { clearInterval(ticker); ticker = null; }
+    }
+    function setUntil(sec) {
+      until = Date.now() + sec * 1000;
+      if (sec > 0 && !ticker) ticker = setInterval(paint, 250);
+      paint();
+    }
+    // Enabling Up also enables Down on every tile on this page.
+    const onShared = (e) => { if (e.detail.key === key && e.detail.from !== enableBtn) setUntil(e.detail.sec); };
+    document.addEventListener('jimboled:motor-enable', onShared);
+    const share = (sec) => document.dispatchEvent(new CustomEvent('jimboled:motor-enable', { detail: { key, sec, from: enableBtn } }));
+    enableBtn.onclick = async () => {
+      if (enableBtn.disabled) return;
+      const action = left() > 0 ? 'disable' : 'enable';
+      try {
+        const r = await api.post(`/api/gpio/switches/${sw.id}/action`, { action });
+        setUntil(r.switch.enabled_for || 0); share(r.switch.enabled_for || 0);
+        if (action === 'enable' && navigator.vibrate) navigator.vibrate(10);
+      } catch (err) { UI.notifyError(err); }
+    };
+    function guard() {
+      if (left() > 0) return true;
+      wrap.classList.remove('nudge'); void wrap.offsetWidth; wrap.classList.add('nudge');
+      UI.toast('Tap Enable first, then hold.', 'info', 2000);
+      return false;
+    }
+    paint();
+    return {
+      wrap, guard,
+      update(s) {
+        running = !!s.on;
+        enableBtn.disabled = !s.available || !!s.locked_out;
+        if (s.enabled_for != null) setUntil(s.enabled_for); else paint();
+      },
+      destroy() { clearInterval(ticker); document.removeEventListener('jimboled:motor-enable', onShared); },
+    };
   }
 
   // ---------------------------------------------------------- editor
@@ -161,7 +228,7 @@
   // technical knobs are still there, folded away under "More options".
   const KINDS = {
     momentary: { icon: 'up', title: 'Move a motor', tag: 'Hold to run',
-                 text: 'Runs only while a finger is on the button and stops the moment you let go. For beds, recliners, lifts, blinds and awnings.' },
+                 text: 'Tap Enable, then it runs only while a finger is on the button and stops the moment you let go. For beds, recliners, lifts, blinds and awnings.' },
     toggle: { icon: 'power', title: 'Turn something on and off', tag: 'On / off',
               text: 'Tap once for on, tap again for off. For lamps, fans, heaters and pumps.' },
     pulse: { icon: 'zap', title: 'Press for a moment', tag: 'Tap',
@@ -299,6 +366,8 @@
     const notes = h('input', { class: 'input', value: sw.notes, placeholder: 'e.g. Relay 3, blue wire', maxlength: 200 });
     const confirmChk = h('input', { type: 'checkbox', checked: sw.confirm });
     const enabledChk = h('input', { type: 'checkbox', checked: sw.enabled });
+    const needEnable = h('input', { type: 'checkbox', checked: sw.require_enable !== false });
+    const needEnableRow = h('label', { class: 'check' }, needEnable, h('span', { text: 'Tap Enable before it moves (recommended for motors)' }));
     const groupField = UI.field('Never runs at the same time as', group,
       'Buttons that share the same word here can never be on together, like a motor\'s Up and Down. Leave it empty if this button works on its own.');
     const appearance = h('div', { class: 'stack' }, h('span', { class: 'field-label', text: 'Icon and colour on the dashboard' }),
@@ -309,6 +378,7 @@
         UI.field('Safety time limit (seconds)', maxOn, 'Turns itself off after this long, even if someone forgets. 60 is one minute, 3600 is an hour, 0 means no limit. Hold-to-run buttons always have a limit.'),
         groupField,
         UI.field('Notes for later', notes, 'Only shown here. Handy for which relay or wire this is.'),
+        needEnableRow,
         h('label', { class: 'check' }, confirmChk, h('span', { text: 'Ask "are you sure?" before turning it on' })),
         h('label', { class: 'check' }, enabledChk, h('span', { text: 'Active (untick to switch it off without deleting it)' })),
         appearance), groupList);
@@ -337,6 +407,7 @@
       pairFields.classList.toggle('hidden', !pair);
       secondPin.classList.toggle('hidden', !pair);
       pulseField.classList.toggle('hidden', kind !== 'pulse');
+      needEnableRow.classList.toggle('hidden', kind !== 'momentary');
       groupField.classList.toggle('hidden', pair);
       appearance.classList.toggle('hidden', pair);
       const [a, b] = pairNames();
@@ -355,7 +426,7 @@
     const m = UI.modal({ title: existing ? `Edit “${existing.name}”` : 'Add a button', icon: 'switch', body, footer: [cancel, save], wide: true, sticky: true });
     cancel.onclick = m.close;
     save.onclick = () => UI.busy(save, (async () => {
-      const common = { mode: kind, active_high: isHigh(), pulse_ms: +pulseMs.value, max_on_seconds: +maxOn.value, confirm: confirmChk.checked, enabled: enabledChk.checked, notes: notes.value.trim() };
+      const common = { mode: kind, active_high: isHigh(), pulse_ms: +pulseMs.value, max_on_seconds: +maxOn.value, confirm: confirmChk.checked, enabled: enabledChk.checked, notes: notes.value.trim(), require_enable: needEnable.checked };
       if (canPair && pairMode && kind === 'momentary') {
         const [a, b] = pairNames();
         if (!base.value.trim()) throw new Error('Say what the motor moves, for example "Bed"');

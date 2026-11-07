@@ -767,3 +767,21 @@ details.card.advanced > summary h3 { margin: 0; }
 .pin-map[open] > summary { margin-bottom: var(--sp-3); }
 .more-options > summary { cursor: pointer; font-weight: var(--fw-semi); padding: var(--sp-2) 0; }
 .more-options[open] > summary { margin-bottom: var(--sp-4); }
+
+/* ---- Motor tiles: Enable + Hold side by side, in the space one button used */
+.motor-ctl { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: var(--sp-3); }
+.motor-ctl > .hold-btn:only-child { grid-column: 1 / -1; }
+.enable-btn { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: var(--touch); padding: var(--sp-4) var(--sp-3); border-radius: var(--radius); border: 1px dashed var(--border-strong); background: var(--surface-2); color: var(--muted); font: inherit; font-weight: var(--fw-bold); font-size: var(--fs-sm); cursor: pointer; touch-action: manipulation; user-select: none; -webkit-user-select: none; transition: background var(--dur-1), border-color var(--dur-1), color var(--dur-1); }
+.enable-btn .ico-slot { display: grid; place-items: center; }
+.enable-btn .ico { width: 20px; height: 20px; }
+.enable-btn .count { font-size: var(--fs-2xs); font-weight: var(--fw-semi); min-height: 1em; font-variant-numeric: tabular-nums; }
+.enable-btn:disabled { opacity: .55; cursor: not-allowed; }
+.motor-ctl.big .enable-btn { font-size: var(--fs-base); }
+.motor-ctl.armed .enable-btn { border-style: solid; border-color: var(--success); color: var(--text); background: color-mix(in srgb, var(--success) 20%, var(--surface-2)); }
+.motor-ctl.armed .enable-btn .ico { color: var(--success); }
+.hold-btn.locked { opacity: .5; }
+.hold-btn.locked .label::after { content: " (locked)"; font-weight: var(--fw-medium); font-size: var(--fs-xs); color: var(--muted); }
+.motor-ctl.nudge .enable-btn { animation: enable-nudge .45s ease; }
+@keyframes enable-nudge { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+@media (prefers-reduced-motion: reduce) { .motor-ctl.nudge .enable-btn { animation: none; outline: 2px solid var(--accent); } }
+.editing .enable-btn { pointer-events: none; opacity: .55; }
