@@ -2,6 +2,7 @@
 (function () {
   const { h, el, esc } = UI;
   const MODE_LABEL = { toggle: 'On / off', momentary: 'Hold to run', pulse: 'Tap' };
+  const DEFAULT_LIMIT = { toggle: 0, momentary: 60, pulse: 0 };
   const HEARTBEAT_MS = 400;
 
   /** Hold-to-run: press → heartbeats every 400 ms → release. Releases on any loss of contact. */
@@ -154,78 +155,250 @@
   }
 
   // ---------------------------------------------------------- editor
-  function editSwitch(existing, onSaved) {
-    const sw = Object.assign({ name: '', pin: null, mode: 'toggle', active_high: true, pulse_ms: 500, max_on_seconds: 0, interlock_group: '', icon: '', color: '', confirm: false, enabled: true, notes: '' }, existing || {});
-    if (!existing) sw.max_on_seconds = 60;
-    const body = h('div', { class: 'stack' });
-    const name = h('input', { class: 'input', value: sw.name, placeholder: 'e.g. Bed head up', maxlength: 60 });
-    const mode = h('select', { class: 'select' });
-    for (const [k, v] of Object.entries(MODE_LABEL)) mode.append(h('option', { value: k, text: v, selected: k === sw.mode }));
-    const modeHint = h('span', { class: 'hint' });
-    const setHint = () => { modeHint.textContent = { toggle: 'Stays on until you turn it off (or the time limit is reached). Good for lamps, fans, heaters.', momentary: 'Only runs while the button is held down – the safest choice for motors like an adjustable bed.', pulse: 'Energises the relay briefly then releases, like tapping a button on a remote.' }[mode.value]; };
-    setHint(); mode.onchange = () => { setHint(); refreshVisibility(); };
-    const activeHigh = h('select', { class: 'select' }, h('option', { value: '1', text: 'Active HIGH – relay turns on when the pin is 3.3 V (most SSR / transistor boards)', selected: sw.active_high }), h('option', { value: '0', text: 'Active LOW – relay turns on when the pin is 0 V (most cheap blue relay modules)', selected: !sw.active_high }));
-    activeHigh.onchange = () => renderPins();
-    const maxOn = h('input', { class: 'input', type: 'number', min: 0, max: 86400, step: 1, value: sw.max_on_seconds });
-    const pulseMs = h('input', { class: 'input', type: 'number', min: 20, max: 60000, step: 10, value: sw.pulse_ms });
-    const group = h('input', { class: 'input', value: sw.interlock_group, placeholder: 'e.g. bed-head', maxlength: 40 });
-    const notes = h('input', { class: 'input', value: sw.notes, placeholder: 'Wiring notes for future you', maxlength: 200 });
-    const confirmChk = h('input', { type: 'checkbox', checked: sw.confirm });
-    const enabledChk = h('input', { type: 'checkbox', checked: sw.enabled });
-    let color = sw.color, iconName = sw.icon;
+  // ------------------------------------------------------- switch editor
+  // Written for someone who has never heard of "momentary" or "active low":
+  // pick what the button is for, name it, say which wire it is on.  The
+  // technical knobs are still there, folded away under "More options".
+  const KINDS = {
+    momentary: { icon: 'up', title: 'Move a motor', tag: 'Hold to run',
+                 text: 'Runs only while a finger is on the button and stops the moment you let go. For beds, recliners, lifts, blinds and awnings.' },
+    toggle: { icon: 'power', title: 'Turn something on and off', tag: 'On / off',
+              text: 'Tap once for on, tap again for off. For lamps, fans, heaters and pumps.' },
+    pulse: { icon: 'zap', title: 'Press for a moment', tag: 'Tap',
+             text: 'Clicks the relay briefly, like pressing a button on a remote. For garage doors, gates and doorbells.' },
+  };
+  const DIRECTIONS = [['up', 'down'], ['open', 'close'], ['raise', 'lower'], ['in', 'out'], ['forward', 'back'], ['left', 'right'], ['extend', 'retract'], ['head up', 'head down'], ['feet up', 'feet down']];
+  const DIR_ICON = { up: 'up', down: 'down', raise: 'up', lower: 'down' };
+  const cap = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+  const slug = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 
-    // pin picker
-    const pinWrap = h('div', { class: 'stack' });
-    const pinLabel = h('div', { class: 'row between' }, h('span', { class: 'small muted', text: 'BCM (GPIO) number – the number printed on pinout diagrams, not the physical pin position (#). "boot-safe" pins keep the relay off while the Pi powers up.' }));
-    const pinout = h('div', { class: 'pinout' });
-    pinWrap.append(pinLabel, pinout);
-    let pins = [];
-    api.get('/api/gpio/pins').then((r) => { pins = r.pins; renderPins(); }).catch(UI.notifyError);
-    function renderPins() {
-      pinout.innerHTML = '';
-      for (const p of pins) {
-        const used = p.in_use_by && (!existing || p.bcm !== existing.pin);
-        const b = h('button', { type: 'button', class: 'pin' + (p.recommended ? ' rec' : '') + (p.reserved ? ' reserved' : '') + (used ? ' used' : '') + (p.bcm === sw.pin ? ' selected' : ''), title: p.note + (used ? ` (used by ${p.in_use_by})` : '') });
-        const bootOk = (activeHigh.value === '1') ? p.boot_pull === 'down' : p.boot_pull === 'up';
-        b.append(h('span', { class: 'num', text: `GPIO${p.bcm}` }), h('span', { class: 'phys', text: `#${p.physical}` }), h('span', { class: 'note grow', text: used ? `in use: ${p.in_use_by}` : p.note }), h('span', { class: 'boot', title: bootOk ? 'Relay stays off during power-up with this trigger type' : 'May click briefly during power-up with this trigger type', text: bootOk ? '✓ boot-safe' : '' }));
-        if (!p.reserved && !used) b.onclick = () => { sw.pin = p.bcm; renderPins(); };
-        pinout.append(b);
+  /** "Bed up" -> { name: "Bed down", word: "down", icon: "down" }, or null when no direction word is found. */
+  function opposite(name) {
+    const text = String(name || '').trim();
+    for (const [a, b] of DIRECTIONS) {
+      for (const [from, to] of [[a, b], [b, a]]) {
+        const re = new RegExp(`(^|\\s)(${from.replace(/ /g, '\\s+')})$`, 'i');
+        const m = re.exec(text);
+        if (!m) continue;
+        const was = m[2];
+        const word = was.charAt(0) === was.charAt(0).toUpperCase() && was.charAt(0) !== was.charAt(0).toLowerCase() ? cap(to) : to;
+        const last = to.split(' ').pop();
+        return { name: text.slice(0, m.index) + m[1] + word, word: to, icon: DIR_ICON[last] || '' };
       }
     }
-    const testBtn = el(`<button class="btn sm" type="button">${icon('zap')} Test this pin (0.4 s pulse)</button>`);
-    testBtn.onclick = async () => { if (sw.pin == null) return UI.toast('Pick a pin first', 'error'); try { await api.post('/api/gpio/test', { pin: sw.pin, active_high: activeHigh.value === '1', duration_ms: 400 }); UI.toast('Pulsed – did the relay click?', 'success'); } catch (e) { UI.notifyError(e); } };
+    return null;
+  }
 
-    const groupField = UI.field('Interlock group (optional)', group, 'Switches sharing a group can never be on at the same time. Put "up" and "down" of the same motor in one group.');
-    const maxField = UI.field('Auto-off after (seconds, 0 = never)', maxOn, 'A safety limit. Hold-to-run switches always have one.');
-    const pulseField = UI.field('Pulse length (milliseconds)', pulseMs);
-    function refreshVisibility() { pulseField.classList.toggle('hidden', mode.value !== 'pulse'); if (mode.value === 'momentary' && +maxOn.value === 0) maxOn.value = 60; }
-    refreshVisibility();
+  /** A pin dropdown (best choices first) with a Test button and a fold-out pin map. */
+  function pinPicker(pins, current, ownPin, isActiveHigh, label) {
+    let value = current == null ? null : +current;
+    const sel = h('select', { class: 'select pin-select', 'aria-label': label || 'GPIO pin' });
+    const map = h('div', { class: 'pinout' });
+    const bootSafe = (p) => (isActiveHigh() ? p.boot_pull === 'down' : p.boot_pull === 'up');
+    function draw() {
+      sel.innerHTML = '';
+      sel.append(h('option', { value: '', text: 'Choose the GPIO number…', disabled: true, selected: value == null }));
+      const groups = [['Best choices (stay off while the Pi starts)', []], ['Also work', []], ['Already in use', []]];
+      for (const p of pins) {
+        if (p.reserved) continue;
+        const used = p.in_use_by && p.bcm !== ownPin;
+        const text = `GPIO ${p.bcm}  ·  physical pin ${p.physical}` + (used ? `  —  used by ${p.in_use_by}` : '');
+        groups[used ? 2 : (p.recommended && bootSafe(p)) ? 0 : 1][1].push(h('option', { value: String(p.bcm), text, disabled: !!used, selected: p.bcm === value }));
+      }
+      for (const [name, opts] of groups) if (opts.length) sel.append(h('optgroup', { label: name }, opts));
+      map.innerHTML = '';
+      for (const p of pins) {
+        const used = p.in_use_by && p.bcm !== ownPin;
+        const ok = bootSafe(p);
+        const b = h('button', { type: 'button', class: 'pin' + (p.recommended ? ' rec' : '') + (p.reserved ? ' reserved' : '') + (used ? ' used' : '') + (p.bcm === value ? ' selected' : ''), title: p.note + (used ? ` (used by ${p.in_use_by})` : '') });
+        b.append(h('span', { class: 'num', text: `GPIO${p.bcm}` }), h('span', { class: 'phys', text: `#${p.physical}` }), h('span', { class: 'note grow', text: used ? `in use: ${p.in_use_by}` : p.note }), h('span', { class: 'boot', title: ok ? 'Relay stays off while the Pi starts up' : 'May click briefly while the Pi starts up', text: ok ? '✓ boot-safe' : '' }));
+        if (!p.reserved && !used) b.onclick = () => { value = p.bcm; draw(); };
+        map.append(b);
+      }
+    }
+    sel.onchange = () => { value = sel.value === '' ? null : +sel.value; draw(); };
+    const test = el(`<button class="btn sm" type="button" title="Clicks the relay for less than half a second">${icon('zap')} Test</button>`);
+    test.onclick = async () => {
+      if (value == null) return UI.toast('Choose the GPIO number first', 'error');
+      try { await api.post('/api/gpio/test', { pin: value, active_high: isActiveHigh(), duration_ms: 400 }); UI.toast(`Clicked GPIO ${value}. Did the right relay click?`, 'success'); } catch (e) { UI.notifyError(e); }
+    };
+    draw();
+    const node = h('div', { class: 'stack', style: { gap: '6px' } },
+      h('div', { class: 'row pin-row' }, sel, test),
+      h('details', { class: 'pin-map' }, h('summary', { class: 'small muted', text: 'Show the Pi\'s pin map' }), map));
+    return { el: node, redraw: draw, get value() { return value; } };
+  }
+
+  /**
+   * Add or edit a switch.  ``preset`` pre-fills a new one: ``{ mode, pair,
+   * name, base, active_high, interlock_group, icon, max_on_seconds, partner }``
+   * where ``partner`` is a switch that should join the new one's interlock
+   * group (used by "Add the matching Down button").
+   */
+  async function editSwitch(existing, onSaved, preset) {
+    let pins = [], all = [];
+    try {
+      [pins, all] = await Promise.all([api.get('/api/gpio/pins').then((r) => r.pins), api.get('/api/gpio/switches').then((r) => r.switches)]);
+    } catch (e) { return UI.notifyError(e); }
+    preset = preset || {};
+    const boardDefault = all.length ? all[0].active_high : false;
+    const sw = Object.assign({ name: '', pin: null, mode: 'toggle', active_high: boardDefault, pulse_ms: 500, max_on_seconds: null, interlock_group: '', icon: '', color: '', confirm: false, enabled: true, notes: '' }, preset, existing || {});
+    const isNew = !existing;
+    let kind = sw.mode;
+    // A new motor button starts as an Up + Down pair; a copy or a "matching
+    // button" is a single one by design.
+    const canPair = isNew && preset.pair !== false && !preset.partner && !preset.name;
+    let pairMode = canPair;
+    let limitTouched = sw.max_on_seconds != null;
+    if (sw.max_on_seconds == null) sw.max_on_seconds = DEFAULT_LIMIT[kind];
+    let color = sw.color, iconName = sw.icon;
+    const body = h('div', { class: 'stack switch-editor' });
+
+    // 1. What it does
+    const cards = h('div', { class: 'choice-cards', role: 'radiogroup', 'aria-label': 'What will this button do?' });
+    for (const [k, info] of Object.entries(KINDS)) {
+      const c = h('button', { type: 'button', class: 'choice', role: 'radio', dataset: { kind: k } },
+        h('span', { class: 'choice-icon', html: icon(info.icon) }),
+        h('span', { class: 'choice-text' }, h('b', { text: info.title }), h('span', { class: 'choice-tag', text: info.tag }), h('span', { class: 'small muted', text: info.text })));
+      c.onclick = () => { kind = k; if (!limitTouched) maxOn.value = DEFAULT_LIMIT[k]; refresh(); };
+      cards.append(c);
+    }
+
+    // 2. Name(s)
+    const name = h('input', { class: 'input', value: sw.name, maxlength: 60 });
+    const base = h('input', { class: 'input', value: preset.base || 'Bed', maxlength: 40, placeholder: 'e.g. Bed, Recliner, Awning' });
+    const dirs = h('select', { class: 'select' });
+    DIRECTIONS.forEach(([a, b], i) => dirs.append(h('option', { value: String(i), text: `${cap(a)} and ${cap(b)}` })));
+    const pairPreview = h('div', { class: 'small muted' });
+    const pairNames = () => { const [a, b] = DIRECTIONS[+dirs.value]; const t = base.value.trim(); return [`${t} ${a}`.trim(), `${t} ${b}`.trim()]; };
+    const pairToggle = h('input', { type: 'checkbox', checked: pairMode });
+    pairToggle.onchange = () => { pairMode = pairToggle.checked; refresh(); };
+
+    // 3. Pins
+    const board = h('select', { class: 'select' },
+      h('option', { value: '0', text: 'Turns on with LOW: most blue relay boards with IN1, IN2… pins', selected: !sw.active_high }),
+      h('option', { value: '1', text: 'Turns on with HIGH: solid-state relays and transistor boards', selected: !!sw.active_high }));
+    const isHigh = () => board.value === '1';
+    const pickA = pinPicker(pins, sw.pin, existing ? existing.pin : null, isHigh, 'GPIO pin');
+    const pickB = pinPicker(pins, null, null, isHigh, 'GPIO pin for the second button');
+    board.onchange = () => { pickA.redraw(); pickB.redraw(); };
+    const pinLabelA = h('span', { class: 'field-label' });
+    const pinLabelB = h('span', { class: 'field-label' });
+
+    // Tap length
+    const pulseMs = h('input', { class: 'input', type: 'number', min: 20, max: 60000, step: 50, value: sw.pulse_ms });
+    const pulseField = UI.field('How long to press it (milliseconds)', pulseMs, '500 is half a second, which suits most remotes and garage door openers.');
+
+    // More options
+    const maxOn = h('input', { class: 'input', type: 'number', min: 0, max: 86400, step: 1, value: sw.max_on_seconds });
+    maxOn.oninput = () => { limitTouched = true; };
+    const groups = [...new Set(all.map((s) => s.interlock_group).filter(Boolean))];
+    const listId = 'interlock-groups-' + Math.random().toString(36).slice(2, 8);
+    const group = h('input', { class: 'input', value: sw.interlock_group, placeholder: 'e.g. bed', maxlength: 40, list: listId });
+    const groupList = h('datalist', { id: listId }, groups.map((g) => h('option', { value: g })));
+    const notes = h('input', { class: 'input', value: sw.notes, placeholder: 'e.g. Relay 3, blue wire', maxlength: 200 });
+    const confirmChk = h('input', { type: 'checkbox', checked: sw.confirm });
+    const enabledChk = h('input', { type: 'checkbox', checked: sw.enabled });
+    const groupField = UI.field('Never runs at the same time as', group,
+      'Buttons that share the same word here can never be on together, like a motor\'s Up and Down. Leave it empty if this button works on its own.');
+    const appearance = h('div', { class: 'stack' }, h('span', { class: 'field-label', text: 'Icon and colour on the dashboard' }),
+      UI.iconPicker(iconName || switchIcon(sw), (n) => { iconName = n; }), UI.colorPicker(color, (c) => { color = c; }));
+    const more = h('details', { class: 'more-options' },
+      h('summary', { text: 'More options' }),
+      h('div', { class: 'stack' },
+        UI.field('Safety time limit (seconds)', maxOn, 'Turns itself off after this long, even if someone forgets. 60 is one minute, 3600 is an hour, 0 means no limit. Hold-to-run buttons always have a limit.'),
+        groupField,
+        UI.field('Notes for later', notes, 'Only shown here. Handy for which relay or wire this is.'),
+        h('label', { class: 'check' }, confirmChk, h('span', { text: 'Ask "are you sure?" before turning it on' })),
+        h('label', { class: 'check' }, enabledChk, h('span', { text: 'Active (untick to switch it off without deleting it)' })),
+        appearance), groupList);
+
+    const nameField = UI.field('Name on the button', name);
+    const pairBox = h('label', { class: 'check pair-check' }, pairToggle, h('span', {}, h('b', { text: 'It moves two ways. ' }), 'Make a pair of buttons, like Up and Down, that can never run at the same time.'));
+    const pairFields = h('div', { class: 'form-grid' }, UI.field('What does it move?', base), UI.field('The two directions', dirs), h('div', { class: 'full' }, pairPreview));
+    const secondPin = h('div', { class: 'stack', style: { gap: '4px' } }, pinLabelB, pickB.el);
+    const step = (n, title, ...children) => h('section', { class: 'step' }, h('h4', {}, h('span', { class: 'step-num', text: String(n) }), title), ...children);
+    const pinHelp = el(`<p class="small muted">Use the <b>GPIO number</b> from a Raspberry Pi pinout diagram, not the pin's position along the header. Follow the wire from the relay board's <b>IN</b> pin back to the Pi. Press <b>Test</b> to click the relay and check.</p>`);
 
     body.append(
-      h('div', { class: 'form-grid' },
-        UI.field('Name', name),
-        UI.field('Behaviour', mode, modeHint),
-        h('div', { class: 'full' }, UI.field('Relay trigger', activeHigh, 'Not sure? Save, then use "Test this pin" – if the relay clicks ON when you expect OFF, switch this setting.')),
-        maxField, pulseField, groupField,
-        UI.field('Notes', notes)),
-      h('div', { class: 'stack' }, h('h4', { text: 'GPIO pin' }), pinWrap, h('div', { class: 'row' }, testBtn)),
-      h('div', { class: 'stack' }, h('h4', { text: 'Appearance' }), UI.iconPicker(iconName || switchIcon(sw), (n) => { iconName = n; }), UI.colorPicker(color, (c) => { color = c; })),
-      h('label', { class: 'check' }, confirmChk, h('span', { text: 'Ask for confirmation before turning on' })),
-      h('label', { class: 'check' }, enabledChk, h('span', { text: 'Enabled' })),
-    );
-    const save = el(`<button class="btn primary" data-busy="Saving…">${existing ? 'Save changes' : 'Add switch'}</button>`);
+      step(1, 'What will this button do?', cards, canPair ? pairBox : null),
+      step(2, 'What is it called?', nameField, pairFields),
+      step(3, 'Which relay is it wired to?', pinHelp,
+        h('div', { class: 'stack', style: { gap: '4px' } }, pinLabelA, pickA.el), secondPin,
+        UI.field('What kind of relay board?', board, 'Not sure? If a relay\'s light is on while nothing should be running, choose the other option.'),
+        pulseField),
+      more);
+
+    function refresh() {
+      cards.querySelectorAll('.choice').forEach((c) => { const on = c.dataset.kind === kind; c.classList.toggle('active', on); c.setAttribute('aria-checked', on ? 'true' : 'false'); });
+      const pair = pairMode && kind === 'momentary' && canPair;
+      pairBox.classList.toggle('hidden', kind !== 'momentary');
+      nameField.classList.toggle('hidden', pair);
+      pairFields.classList.toggle('hidden', !pair);
+      secondPin.classList.toggle('hidden', !pair);
+      pulseField.classList.toggle('hidden', kind !== 'pulse');
+      groupField.classList.toggle('hidden', pair);
+      appearance.classList.toggle('hidden', pair);
+      const [a, b] = pairNames();
+      pairPreview.innerHTML = `Adds two buttons: <b>${esc(a)}</b> and <b>${esc(b)}</b>. Each one only runs while it is held, and they can never run together.`;
+      pinLabelA.textContent = pair ? `Relay for “${a}”` : 'GPIO number';
+      pinLabelB.textContent = `Relay for “${b}”`;
+      name.placeholder = { momentary: 'e.g. Bed up', toggle: 'e.g. Reading lamp', pulse: 'e.g. Garage door' }[kind];
+      save.textContent = existing ? 'Save changes' : pair ? 'Add both buttons' : 'Add button';
+      if (kind === 'momentary' && +maxOn.value === 0) maxOn.value = 60;
+    }
+    base.oninput = refresh; dirs.onchange = refresh;
+
+    const save = el(`<button class="btn primary" data-busy="Saving…"></button>`);
     const cancel = el(`<button class="btn">Cancel</button>`);
-    const m = UI.modal({ title: existing ? 'Edit switch' : 'Add a switch', icon: 'switch', body, footer: [cancel, save], wide: true, sticky: true });
+    refresh();
+    const m = UI.modal({ title: existing ? `Edit “${existing.name}”` : 'Add a button', icon: 'switch', body, footer: [cancel, save], wide: true, sticky: true });
     cancel.onclick = m.close;
     save.onclick = () => UI.busy(save, (async () => {
-      const payload = { name: name.value.trim(), pin: sw.pin, mode: mode.value, active_high: activeHigh.value === '1', pulse_ms: +pulseMs.value, max_on_seconds: +maxOn.value, interlock_group: group.value.trim(), icon: iconName, color, confirm: confirmChk.checked, enabled: enabledChk.checked, notes: notes.value.trim() };
-      if (!payload.name) throw new Error('Give the switch a name');
-      if (payload.pin == null) throw new Error('Pick a GPIO pin');
-      if (existing) await api.put(`/api/gpio/switches/${existing.id}`, payload); else await api.post('/api/gpio/switches', payload);
-      UI.toast(existing ? 'Switch saved' : 'Switch added', 'success');
-      m.close(); onSaved && onSaved();
+      const common = { mode: kind, active_high: isHigh(), pulse_ms: +pulseMs.value, max_on_seconds: +maxOn.value, confirm: confirmChk.checked, enabled: enabledChk.checked, notes: notes.value.trim() };
+      if (canPair && pairMode && kind === 'momentary') {
+        const [a, b] = pairNames();
+        if (!base.value.trim()) throw new Error('Say what the motor moves, for example "Bed"');
+        if (pickA.value == null || pickB.value == null) throw new Error('Choose a GPIO number for both buttons');
+        if (pickA.value === pickB.value) throw new Error('The two buttons need different GPIO numbers: each one drives its own relay');
+        let grp = slug(base.value) || 'motor', n = 2;
+        while (groups.includes(grp)) grp = `${slug(base.value) || 'motor'}-${n++}`;
+        const [wa, wb] = DIRECTIONS[+dirs.value];
+        const one = (nm, pin, w) => ({ ...common, name: nm, pin, interlock_group: grp, icon: DIR_ICON[w.split(' ').pop()] || 'hand', color });
+        await api.post('/api/gpio/switches', { switches: [one(a, pickA.value, wa), one(b, pickB.value, wb)] });
+        UI.toast(`Added ${a} and ${b}`, 'success');
+      } else {
+        const payload = { ...common, name: name.value.trim(), pin: pickA.value, interlock_group: group.value.trim(), icon: iconName, color };
+        if (!payload.name) throw new Error('Give the button a name');
+        if (payload.pin == null) throw new Error('Choose the GPIO number the relay is wired to');
+        if (existing) await api.put(`/api/gpio/switches/${existing.id}`, payload);
+        else {
+          // Pair with an existing switch: it joins the same group first, so
+          // the two are never both on, even for a moment.
+          const partner = preset.partner;
+          if (partner && payload.interlock_group && partner.interlock_group !== payload.interlock_group) {
+            await api.put(`/api/gpio/switches/${partner.id}`, { interlock_group: payload.interlock_group });
+          }
+          await api.post('/api/gpio/switches', payload);
+        }
+        UI.toast(existing ? 'Saved' : `Added ${payload.name}`, 'success');
+      }
+      m.close(); onSaved && onSaved(); if (window.App) App.refresh(true);
     })().catch(UI.notifyError));
     return m;
+  }
+
+  /** Pre-fill for "Add the matching Down button" next to a lone hold-to-run switch. */
+  function partnerPreset(sw) {
+    const opp = opposite(sw.name);
+    const grp = sw.interlock_group || slug(sw.name.replace(/\s+\S+$/, '')) || slug(sw.name) || 'motor';
+    return { mode: 'momentary', name: opp ? opp.name : `${sw.name} (other way)`, active_high: sw.active_high, max_on_seconds: sw.max_on_seconds, interlock_group: grp, icon: (opp && opp.icon) || sw.icon, color: sw.color, partner: sw };
+  }
+
+  /** Pre-fill for "Copy": everything but the pin. */
+  function copyPreset(sw) {
+    const { id, pin, ...rest } = sw;
+    return { ...rest, name: `${sw.name} copy`.slice(0, 60), pair: false };
   }
 
   async function removeSwitch(sw, onDone) {
@@ -234,5 +407,5 @@
     try { await api.del(`/api/gpio/switches/${sw.id}`); UI.toast('Switch removed', 'success'); onDone && onDone(); } catch (e) { UI.notifyError(e); }
   }
 
-  window.GPIO = { HoldController, control, editSwitch, removeSwitch, switchIcon, MODE_LABEL };
+  window.GPIO = { HoldController, control, editSwitch, removeSwitch, switchIcon, MODE_LABEL, KINDS, opposite, partnerPreset, copyPreset, slug };
 })();

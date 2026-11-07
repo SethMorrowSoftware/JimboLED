@@ -4,28 +4,55 @@
 (function () {
   const { h, el, esc } = UI;
   const SECTIONS = [
-    { id: 'devices', label: 'Controllers', icon: 'bulb' },
-    { id: 'groups', label: 'Groups', icon: 'home' },
-    { id: 'switches', label: 'Switches', icon: 'switch' },
-    { id: 'scenes', label: 'Scenes', icon: 'sparkles' },
-    { id: 'schedules', label: 'Schedules', icon: 'clock' },
-    { id: 'estop', label: 'Emergency stop', icon: 'estop' },
-    { id: 'appearance', label: 'Appearance', icon: 'palette' },
-    { id: 'security', label: 'Security', icon: 'lock' },
-    { id: 'integrations', label: 'Integrations', icon: 'key' },
-    { id: 'system', label: 'System', icon: 'cpu' },
-    { id: 'backup', label: 'Backup', icon: 'box' },
+    { id: 'home', label: 'All settings', icon: 'grid' },
+    { id: 'devices', label: 'Light controllers', icon: 'bulb', desc: 'Find and add your WLED lights, rename them, and check they are online.' },
+    { id: 'groups', label: 'Light groups', icon: 'home', desc: 'Put lights together, like "Bedroom", to control them with one tile.' },
+    { id: 'switches', label: 'Relays & switches', icon: 'switch', desc: 'Buttons for the bed motor, lamps, fans and anything else on a relay.' },
+    { id: 'scenes', label: 'Scenes', icon: 'sparkles', desc: 'One tap for several things at once, like "Goodnight".' },
+    { id: 'schedules', label: 'Schedules', icon: 'clock', desc: 'Make things happen by themselves at set times or at sunset.' },
+    { id: 'estop', label: 'Emergency stop', icon: 'estop', desc: 'The big red button that stops motors and keeps them stopped.' },
+    { id: 'appearance', label: 'Appearance', icon: 'palette', desc: 'Your name, logo, colours, background and wall tablet mode.' },
+    { id: 'security', label: 'Password', icon: 'lock', desc: 'Keep guests and children from changing things.' },
+    { id: 'integrations', label: 'Other apps', icon: 'key', desc: 'Phone notifications, Home Assistant and Shortcuts.' },
+    { id: 'system', label: 'System', icon: 'cpu', desc: 'Updates, restarting, and how the Raspberry Pi is doing.' },
+    { id: 'backup', label: 'Backup', icon: 'box', desc: 'Save everything to a file, or undo a recent change.' },
   ];
 
+  // What each page is for, in plain words, shown at the top of it.
+  const INTROS = {
+    devices: ['bulb', 'Light controllers', 'Each <b>WLED controller</b> is a small box that runs one LED strip or light. Press <b>Find controllers</b> and JimboLED searches your Wi‑Fi for them. Tap one to rename it or change its settings.'],
+    groups: ['home', 'Light groups', 'A group puts several lights under one tile, so <b>Bedroom</b> can turn the bed strip and the ceiling light on together. A light can be in more than one group.'],
+    scenes: ['sparkles', 'Scenes', 'A scene is one button that does several things at once, for example <b>Goodnight</b>: lights off and the bed flat. The easiest way to make one: set the lights how you like them, then press <b>New scene</b> and <b>Capture the lights as they are now</b>.'],
+    schedules: ['clock', 'Schedules', 'Make things happen on their own: porch lights at sunset, a wake-up light at 6:45 on weekdays. They run on the Raspberry Pi, so nobody needs to have the dashboard open.'],
+    estop: ['estop', 'Emergency stop', '<b>All off</b> turns everything off, and anything can be turned straight back on. An <b>emergency stop</b> is stronger: it cuts its relays and keeps them locked off, from every phone and every scene, until somebody resets it here.'],
+    appearance: ['palette', 'Appearance', 'Make the dashboard yours: your name, logo, colours and background. Everything previews straight away, and nothing is kept until you press <b>Save appearance</b>.'],
+    security: ['lock', 'Password', 'Anyone on your home Wi‑Fi can open the dashboard until you set a password here. Then everyone signs in once on each phone or tablet.'],
+    integrations: ['key', 'Other apps', 'Get a message on your phone when something needs attention, and let other apps such as Home Assistant or iPhone Shortcuts control JimboLED. You don\'t need any of this for everyday use.'],
+    system: ['cpu', 'System', 'How the Raspberry Pi is doing, how to reach the dashboard from another device, and buttons to update or restart.'],
+    backup: ['box', 'Backup', 'Save all of your settings, including your logo, to one file you can keep safe. JimboLED also saves a snapshot by itself each time you change something important, so you can undo a mistake.'],
+  };
+
   function render(main, section) {
-    section = SECTIONS.some((s) => s.id === section) ? section : 'devices';
-    const nav = h('nav', { class: 'settings-nav' });
-    for (const s of SECTIONS) nav.append(h('a', { href: `#/settings/${s.id}`, class: s.id === section ? 'active' : '', html: icon(s.icon) + '<span>' + esc(s.label) + '</span>' }));
+    section = SECTIONS.some((s) => s.id === section) ? section : 'home';
+    const nav = h('nav', { class: 'settings-nav', 'aria-label': 'Settings pages' });
+    for (const s of SECTIONS) nav.append(h('a', { href: `#/settings/${s.id}`, class: s.id === section ? 'active' : '', title: s.desc || '', html: icon(s.icon) + '<span>' + esc(s.label) + '</span>' }));
     const body = h('div', { class: 'settings-body' });
     main.innerHTML = '';
     main.append(h('div', { class: 'row between', style: { marginBottom: '12px' } }, h('h2', { text: 'Settings' }), el(`<a class="btn" href="#/">${icon('arrowLeft')} Back to dashboard</a>`)));
     main.append(h('div', { class: 'settings' }, nav, body));
-    ({ devices: devicesSection, groups: Automation.groupsSection, switches: switchesSection, scenes: scenesSection, schedules: Automation.schedulesSection, estop: estopSection, appearance: appearanceSection, security: securitySection, integrations: Automation.integrationsSection, system: systemSection, backup: backupSection })[section](body);
+    if (INTROS[section]) body.append(UI.intro(...INTROS[section]));
+    ({ home: homeSection, devices: devicesSection, groups: Automation.groupsSection, switches: switchesSection, scenes: scenesSection, schedules: Automation.schedulesSection, estop: estopSection, appearance: appearanceSection, security: securitySection, integrations: Automation.integrationsSection, system: systemSection, backup: backupSection })[section](body);
+  }
+
+  /** The front page of Settings: every page, with one line on what it is for. */
+  function homeSection(body) {
+    body.append(UI.intro('settings', 'What would you like to change?', 'Pick a topic. Every page explains itself at the top, and anything technical is folded away under <b>Advanced</b>.'));
+    const grid = h('div', { class: 'settings-home' });
+    for (const s of SECTIONS) {
+      if (!s.desc) continue;
+      grid.append(h('a', { href: `#/settings/${s.id}` }, h('span', { class: 'tile-icon', html: icon(s.icon) }), h('span', { class: 'grow' }, h('b', { text: s.label }), h('span', { class: 'small', text: s.desc }))));
+    }
+    body.append(grid);
   }
 
   // ---------------------------------------------------------- devices
@@ -36,7 +63,7 @@
     addBtn.onclick = () => Device.addDeviceDialog(() => draw());
     const findBtn = el(`<button class="btn">${icon('search')} Find controllers</button>`);
     findBtn.onclick = () => discoverDialog(() => draw());
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'WLED controllers' }), h('div', { class: 'row' }, findBtn, addBtn)), list);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Your lights' }), h('div', { class: 'row' }, findBtn, addBtn)), list);
     body.append(card);
     async function draw() {
       list.innerHTML = '';
@@ -69,7 +96,11 @@
       const timeout = h('input', { class: 'input', type: 'number', min: 1, max: 30, value: wled.wled.request_timeout_s });
       const save = el(`<button class="btn" data-busy="Saving…">Save</button>`);
       save.onclick = () => UI.busy(save, api.put('/api/settings', { wled: { poll_interval_s: +poll.value, request_timeout_s: +timeout.value } }).then(() => UI.toast('Saved', 'success')).catch(UI.notifyError));
-      body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Polling' })), el(`<p class="muted small">How often JimboLED checks each controller for changes made elsewhere (e.g. from the WLED app).</p>`), h('div', { class: 'form-grid' }, UI.field('Check every (seconds)', poll), UI.field('Give up after (seconds)', timeout)), h('div', { class: 'row end' }, save)));
+      body.append(UI.advanced('How often to check the lights', 'JimboLED asks each light how it is doing every few seconds, so changes made in the WLED app show up here too. The defaults suit almost everyone.',
+        h('div', { class: 'form-grid' },
+          UI.field('Check each light every (seconds)', poll, 'Lower is quicker to notice changes but busier for the Pi. 5 is a good value.'),
+          UI.field('Wait for an answer for up to (seconds)', timeout, 'After this long a light counts as offline until it answers again.')),
+        h('div', { class: 'row end' }, save)));
     }
   }
 
@@ -125,35 +156,77 @@
   }
 
   // --------------------------------------------------------- switches
+  /** 60 -> "1 minute", 90 -> "90 seconds", 3600 -> "1 hour". */
+  function plainTime(sec) {
+    const n = (v, unit) => `${+v.toFixed(1)} ${unit}${+v.toFixed(1) === 1 ? '' : 's'}`;
+    if (sec < 60 || sec % 60) return n(sec, 'second');
+    if (sec < 3600 || sec % 3600) return n(sec / 60, 'minute');
+    return n(sec / 3600, 'hour');
+  }
+
+  /** One plain sentence about a switch, for the list. */
+  function describeSwitch(s, all, pins) {
+    const pin = (pins || []).find((p) => p.bcm === s.pin);
+    const bits = [GPIO.MODE_LABEL[s.mode] || s.mode, `GPIO ${s.pin}${pin && pin.physical ? ` (pin ${pin.physical})` : ''}`];
+    const partners = s.interlock_group ? all.filter((o) => o.id !== s.id && o.interlock_group === s.interlock_group).map((o) => o.name) : [];
+    if (partners.length) bits.push(`never together with ${partners.join(', ')}`);
+    if (s.max_on_seconds) bits.push(`stops by itself after ${plainTime(s.max_on_seconds)}`);
+    if (!s.enabled) bits.push('turned off in settings');
+    return bits.join(' · ');
+  }
+
   async function switchesSection(body) {
     let gpio;
     try { gpio = await api.get('/api/gpio'); } catch (e) { return UI.notifyError(e); }
-    if (gpio.simulated) body.append(el(`<div class="sim-banner">${icon('alert')}<div><b>Simulation mode.</b> GPIO hardware isn't available (${esc(gpio.backend)}), so switches only pretend to work. On a Raspberry Pi with the installer this turns into real relay control.</div></div>`));
+    body.append(UI.intro('switch', 'Relays & switches', 'Each button here clicks one relay on your relay board, wired to the Raspberry Pi. Use it for bed motors, lamps, fans, garage doors, anything a relay can switch. Every button you add appears on the dashboard.'));
+    if (gpio.simulated) body.append(el(`<div class="sim-banner">${icon('alert')}<div><b>Practice mode.</b> This computer has no relay pins (${esc(gpio.backend)}), so the buttons only pretend to work. On the Raspberry Pi they click real relays.</div></div>`));
     const card = h('div', { class: 'card' });
     const list = h('div', { class: 'list' });
-    const addBtn = el(`<button class="btn primary">${icon('plus')} Add switch</button>`);
+    const fixes = h('div', { class: 'stack' });
+    const addBtn = el(`<button class="btn primary">${icon('plus')} Add a button</button>`);
     addBtn.onclick = () => GPIO.editSwitch(null, draw);
-    const bedBtn = el(`<button class="btn">${icon('bed')} Bed template</button>`);
-    bedBtn.onclick = () => bedTemplate(draw);
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'GPIO switches' }), h('div', { class: 'row' }, bedBtn, addBtn)), el(`<p class="muted small">Each switch drives one relay from a GPIO pin. Hold-to-run switches only stay on while the button is pressed and always time out for safety. Interlocked switches can never be on together.</p>`), list);
+    const motorBtn = el(`<button class="btn">${icon('bed')} Add a motor (Up + Down)</button>`);
+    motorBtn.onclick = () => GPIO.editSwitch(null, draw, { mode: 'momentary', pair: true });
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Dashboard buttons' }), h('div', { class: 'row' }, motorBtn, addBtn)), fixes, list);
     body.append(card);
     Automation.buttonsCard(body);
     async function draw() {
-      list.innerHTML = '';
-      let cfg;
-      try { cfg = (await api.get('/api/gpio/switches')).switches; gpio = await api.get('/api/gpio'); } catch (e) { return UI.notifyError(e); }
-      if (!cfg.length) list.append(el(`<div class="empty">${icon('switch')}<h3>No switches yet</h3><p>Add a switch for each relay you have wired to the Pi. For an adjustable bed, use the <b>Bed template</b>.</p></div>`));
+      list.innerHTML = ''; fixes.innerHTML = '';
+      let cfg, pins = [], tiles = [];
+      try {
+        [cfg, gpio, pins, tiles] = await Promise.all([
+          api.get('/api/gpio/switches').then((r) => r.switches), api.get('/api/gpio'),
+          api.get('/api/gpio/pins').then((r) => r.pins).catch(() => []),
+          api.get('/api/dashboard').then((r) => r.dashboard.tiles || []).catch(() => [])]);
+      } catch (e) { return UI.notifyError(e); }
+      if (!cfg.length) list.append(el(`<div class="empty">${icon('switch')}<h3>No relay buttons yet</h3><p>Got an adjustable bed or another motor? Press <b>Add a motor (Up + Down)</b>. For a lamp, fan or anything else, press <b>Add a button</b>.</p></div>`));
       const live = Object.fromEntries((gpio.switches || []).map((s) => [s.id, s]));
+      // A hold-to-run switch on its own is almost always half a motor: offer its other half.
+      for (const s of cfg) {
+        if (s.mode !== 'momentary') continue;
+        if (s.interlock_group && cfg.some((o) => o.id !== s.id && o.interlock_group === s.interlock_group)) continue;
+        const preset = GPIO.partnerPreset(s);
+        const b = el(`<button class="btn sm primary">${icon('plus')} Add ${esc(preset.name)}</button>`);
+        b.onclick = () => GPIO.editSwitch(null, draw, preset);
+        fixes.append(h('div', { class: 'alert info row between wrap' }, h('span', {}, h('b', { text: s.name }), ' has no opposite button yet. A motor usually needs both directions.'), b));
+      }
       for (const s of cfg) {
         const st = live[s.id] || {};
+        const tile = tiles.find((t) => t.type === 'switch' && t.ref === s.id);
         const item = h('div', { class: 'list-item' });
         item.append(el(`<span class="tile-icon" style="--tile-color:${esc(s.color || 'var(--accent)')}">${icon(GPIO.switchIcon(s))}</span>`));
-        const sub = `GPIO${s.pin} · ${GPIO.MODE_LABEL[s.mode]} · ${s.active_high ? 'active high' : 'active low'}${s.interlock_group ? ' · interlock "' + s.interlock_group + '"' : ''}${s.max_on_seconds ? ' · max ' + UI.fmtDuration(s.max_on_seconds) : ''}${!s.enabled ? ' · disabled' : ''}${st.error && st.error !== 'disabled' ? ' · ' + st.error : ''}`;
-        item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: s.name }), h('span', { class: 'sub', text: sub })));
-        item.append(el(`<span class="status-dot ${st.on ? 'ok' : (st.available ? '' : 'warn')}" title="${st.on ? 'on' : 'off'}"></span>`));
-        const edit = el(`<button class="btn ghost icon sm">${icon('edit')}</button>`); edit.onclick = () => GPIO.editSwitch(s, draw);
-        const del = el(`<button class="btn ghost icon sm">${icon('trash')}</button>`); del.onclick = () => GPIO.removeSwitch(s, draw);
-        item.append(edit, del);
+        const problem = st.error && st.error !== 'disabled' ? st.error : '';
+        item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: s.name }), h('span', { class: 'sub', text: describeSwitch(s, cfg, pins) }), problem ? h('span', { class: 'sub bad', text: problem }) : null));
+        if (tile && tile.hidden) {
+          const show = el(`<button class="btn sm" title="It is hidden from the dashboard">${icon('eye')} Show on dashboard</button>`);
+          show.onclick = () => api.put(`/api/dashboard/tiles/${tile.id}`, { hidden: false }).then(() => { UI.toast(`${s.name} is back on the dashboard`, 'success'); draw(); if (window.App) App.refresh(true); }).catch(UI.notifyError);
+          item.append(show);
+        }
+        item.append(el(`<span class="status-dot ${st.on ? 'ok' : (st.available ? '' : 'warn')}" title="${st.on ? 'running' : 'off'}"></span>`));
+        const copy = el(`<button class="btn ghost icon sm" aria-label="Copy ${esc(s.name)}" title="Make a copy (for another relay)">${icon('stack')}</button>`); copy.onclick = () => GPIO.editSwitch(null, draw, GPIO.copyPreset(s));
+        const edit = el(`<button class="btn ghost icon sm" aria-label="Edit ${esc(s.name)}" title="Edit">${icon('edit')}</button>`); edit.onclick = () => GPIO.editSwitch(s, draw);
+        const del = el(`<button class="btn ghost icon sm" aria-label="Remove ${esc(s.name)}" title="Remove">${icon('trash')}</button>`); del.onclick = () => GPIO.removeSwitch(s, draw);
+        item.append(copy, edit, del);
         list.append(item);
       }
     }
@@ -164,30 +237,23 @@
       const dead = h('input', { class: 'input', type: 'number', min: 0, max: 5000, value: settings.gpio.interlock_dead_time_ms });
       const hold = h('input', { class: 'input', type: 'number', min: 0.5, max: 10, step: 0.1, value: settings.gpio.hold_timeout_s });
       const backend = h('select', { class: 'select' });
-      [['auto', 'Automatic (recommended)'], ['lgpio', 'lgpio (Raspberry Pi OS Bookworm+)'], ['rpigpio', 'RPi.GPIO (older Pi OS)'], ['native', 'Native'], ['mock', 'Simulation (no hardware)']].forEach(([v, t]) => backend.append(h('option', { value: v, text: t, selected: settings.gpio.backend === v })));
+      [['auto', 'Automatic (recommended)'], ['lgpio', 'lgpio (Raspberry Pi OS Bookworm and newer)'], ['rpigpio', 'RPi.GPIO (older Raspberry Pi OS)'], ['native', 'Native'], ['mock', 'Practice mode (no relays)']].forEach(([v, t]) => backend.append(h('option', { value: v, text: t, selected: settings.gpio.backend === v })));
       const save = el(`<button class="btn" data-busy="Saving…">Save</button>`);
       save.onclick = () => UI.busy(save, api.put('/api/settings', { gpio: { interlock_dead_time_ms: +dead.value, hold_timeout_s: +hold.value, backend: backend.value } }).then(() => { UI.toast('Saved', 'success'); draw(); }).catch(UI.notifyError));
-      body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Safety settings' })), h('div', { class: 'form-grid' }, UI.field('Interlock dead time (ms)', dead, 'Pause between switching one interlocked relay off and the other on'), UI.field('Hold-to-run timeout (seconds)', hold, 'A held switch releases if the phone stops responding for this long'), UI.field('GPIO driver', backend, `Currently using: ${gpio.backend}${gpio.pi_model ? ' on ' + gpio.pi_model : ''}`)), h('div', { class: 'row end' }, save)));
-      const evBtn = el(`<button class="btn">${icon('activity')} Show recent switch activity</button>`);
-      evBtn.onclick = async () => { const r = await api.get('/api/gpio/events'); const log = h('div', { class: 'log' }); for (const e of r.events.slice().reverse()) log.append(h('div', { text: `${new Date(e.ts * 1000).toLocaleTimeString()}  ${e.name}: ${e.action}${e.reason ? ' (' + e.reason + ')' : ''} via ${e.source}` })); if (!r.events.length) log.textContent = 'No activity yet.'; UI.modal({ title: 'Switch activity', icon: 'activity', body: log, wide: true }); };
+      body.append(UI.advanced('Safety timing and hardware', 'The defaults suit almost everyone. Change these only if a motor behaves oddly.',
+        h('div', { class: 'form-grid' },
+          UI.field('Pause when changing direction (milliseconds)', dead, 'When a motor goes from Up straight to Down, wait this long in between so it never gets both at once. 300 is a good value.'),
+          UI.field('Stop if the phone loses contact for (seconds)', hold, 'While you hold a button, your phone keeps telling the Pi. If that stops (Wi‑Fi drops, phone locks), the motor stops after this long.'),
+          UI.field('Relay driver', backend, `Leave on Automatic. Now using ${gpio.backend}${gpio.pi_model ? ' on a ' + gpio.pi_model : ''}.`)),
+        h('div', { class: 'row end' }, save)));
+      const evBtn = el(`<button class="btn">${icon('activity')} What happened recently?</button>`);
+      evBtn.onclick = async () => { const r = await api.get('/api/gpio/events'); const log = h('div', { class: 'log' }); for (const e of r.events.slice().reverse()) log.append(h('div', { text: `${new Date(e.ts * 1000).toLocaleTimeString()}  ${e.name}: ${e.action}${e.reason ? ' (' + e.reason + ')' : ''} via ${e.source}` })); if (!r.events.length) log.textContent = 'Nothing yet.'; UI.modal({ title: 'Recent relay activity', icon: 'activity', body: log, wide: true }); };
       body.append(h('div', { class: 'row' }, evBtn));
     }
   }
+  /** Kept for the setup wizard: the motor pair form, pre-set for a bed. */
   function bedTemplate(onDone) {
-    const up = h('input', { class: 'input', type: 'number', min: 2, max: 27, value: 17 });
-    const down = h('input', { class: 'input', type: 'number', min: 2, max: 27, value: 27 });
-    const prefix = h('input', { class: 'input', value: 'Bed', maxlength: 30 });
-    const low = h('input', { type: 'checkbox', checked: true });
-    const body = h('div', { class: 'stack' }, el(`<p class="muted small">Creates two <b>hold-to-run</b> switches ("Up" and "Down") that are interlocked so they can never be energised together, with a 60-second safety limit each. Use the BCM pin numbers your relay inputs are wired to.</p>`), h('div', { class: 'form-grid' }, UI.field('Name prefix', prefix), UI.field('GPIO pin for UP', up), UI.field('GPIO pin for DOWN', down)), h('label', { class: 'check' }, low, h('span', { text: 'Relay board is active LOW (typical blue relay modules)' })));
-    const save = el(`<button class="btn primary" data-busy="Creating…">Create switches</button>`);
-    const m = UI.modal({ title: 'Adjustable bed template', icon: 'bed', body, footer: [save] });
-    save.onclick = () => UI.busy(save, (async () => {
-      if (+up.value === +down.value) throw new Error('Up and down need different pins');
-      const grp = (prefix.value.trim() || 'bed').toLowerCase().replace(/\s+/g, '-');
-      await api.post('/api/gpio/switches', { name: `${prefix.value.trim()} up`, pin: +up.value, mode: 'momentary', active_high: !low.checked, max_on_seconds: 60, interlock_group: grp, icon: 'up' });
-      await api.post('/api/gpio/switches', { name: `${prefix.value.trim()} down`, pin: +down.value, mode: 'momentary', active_high: !low.checked, max_on_seconds: 60, interlock_group: grp, icon: 'down' });
-      UI.toast('Bed switches created', 'success'); m.close(); onDone && onDone(); if (window.App) App.refresh();
-    })().catch(UI.notifyError));
+    return GPIO.editSwitch(null, () => { onDone && onDone(); }, { mode: 'momentary', pair: true, base: 'Bed' });
   }
 
   // ----------------------------------------------------------- scenes
@@ -196,12 +262,12 @@
     const list = h('div', { class: 'list' });
     const addBtn = el(`<button class="btn primary">${icon('plus')} New scene</button>`);
     addBtn.onclick = () => sceneDialog(null, draw);
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Scenes' }), addBtn), el(`<p class="muted small">A scene is a one-tap shortcut that sends several commands at once – e.g. "Goodnight": all lights off and the bed flat.</p>`), list);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Your scenes' }), addBtn), list);
     body.append(card);
     async function draw() {
       list.innerHTML = '';
       const scenes = (await api.get('/api/scenes').catch(() => ({ scenes: [] }))).scenes;
-      if (!scenes.length) list.append(el(`<div class="empty">${icon('sparkles')}<h3>No scenes yet</h3></div>`));
+      if (!scenes.length) list.append(el(`<div class="empty">${icon('sparkles')}<h3>No scenes yet</h3><p>Press <b>New scene</b> to make your first one.</p></div>`));
       for (const s of scenes) {
         const item = h('div', { class: 'list-item' });
         item.append(el(`<span class="tile-icon" style="--tile-color:${esc(s.color || 'var(--accent)')}">${icon(s.icon || 'sparkles')}</span>`), h('div', { class: 'grow' }, h('span', { class: 'title', text: s.name }), h('span', { class: 'sub', text: sceneSummary(s) })));
@@ -231,7 +297,7 @@
     const name = h('input', { class: 'input', value: scene.name, placeholder: 'e.g. Goodnight', maxlength: 60 });
     const list = h('div', { class: 'list' });
     const editors = new Map(); // action -> {target, intent} controls of a "lights" row
-    const TYPES = [['lights', 'Lights: colour, preset, effect…'], ['device', 'One light: exact saved look'], ['all', 'All lights: exact state'], ['switch', 'Switch'], ['all_off', 'Everything off'], ['delay', 'Wait']];
+    const TYPES = [['lights', 'Lights: colour, preset, effect…'], ['device', 'One light: exact saved look'], ['all', 'All lights: exact state'], ['switch', 'A relay button'], ['all_off', 'Everything off'], ['delay', 'Wait a moment']];
     /** Pull what is typed into "lights" rows back into the actions (before a redraw or save). */
     function collect(strict) {
       for (const [a, ed] of editors) {
@@ -273,8 +339,8 @@
         }
       } else if (a.type === 'switch') {
         const ref = h('select', { class: 'select', style: { width: '180px' } }); for (const s of sws) ref.append(h('option', { value: s.id, text: s.name, selected: s.id === a.ref })); ref.onchange = () => { a.ref = ref.value; };
-        const act = h('select', { class: 'select', style: { width: '120px' } }); ['off', 'on', 'toggle', 'pulse'].forEach((v) => act.append(h('option', { value: v, text: v, selected: a.action === v }))); act.onchange = () => { a.action = act.value; };
-        row.append(ref, act, h('span', { class: 'small muted', text: 'hold-to-run switches only accept "off"' }));
+        const act = h('select', { class: 'select', style: { width: '150px' } }); [['off', 'Turn off'], ['on', 'Turn on'], ['toggle', 'Switch over'], ['pulse', 'Tap (press briefly)']].forEach(([v, t]) => act.append(h('option', { value: v, text: t, selected: a.action === v }))); act.onchange = () => { a.action = act.value; };
+        row.append(ref, act, h('span', { class: 'small muted', text: 'a motor (hold-to-run) can only be turned off by a scene' }));
       } else if (a.type === 'all_off') {
         row.append(h('span', { class: 'small muted', text: 'every light and every relay off' }));
       } else {
@@ -312,7 +378,7 @@
 
 
   // ---------------------------------------------------- emergency stop
-  const SCOPE_LABEL = { all: 'Every relay', group: 'An interlock group', switch: 'Chosen switches' };
+  const SCOPE_LABEL = { all: 'Every relay', group: 'A motor (its Up and Down together)', switch: 'Buttons I pick' };
 
   /** A <select> of usable BCM pins, annotated with what already owns them. */
   async function pinSelect(current, skipId) {
@@ -341,12 +407,12 @@
       refsWrap.innerHTML = '';
       const chips = h('div', { class: 'chips' });
       const options = scope.value === 'group'
-        ? [...new Set(switches.map((s) => s.interlock_group).filter(Boolean))].map((g) => [g, g])
+        ? [...new Set(switches.map((s) => s.interlock_group).filter(Boolean))].map((g) => [g, switches.filter((s) => s.interlock_group === g).map((s) => s.name).join(' + ')])
         : switches.map((s) => [s.id, s.name]);
       if (!options.length) {
         refsWrap.append(el(`<div class="alert warn">${scope.value === 'group'
-          ? 'No interlock groups yet. Give the bed\'s up/down switches the same interlock group first (Settings → Switches).'
-          : 'No switches yet — add one under Settings → Switches.'}</div>`));
+          ? 'No motors yet. Add one under Settings, Relays & switches, with <b>Add a motor (Up + Down)</b>.'
+          : 'No relay buttons yet. Add one under Settings, Relays & switches.'}</div>`));
         return;
       }
       for (const [value, label] of options) {
@@ -361,7 +427,7 @@
     let iconName = z.icon, color = z.color;
     const body = h('div', { class: 'stack' },
       UI.field('Name', name, 'What this stop is called on the button and in the log.'),
-      UI.field('Covers', scope),
+      UI.field('What does it stop?', scope),
       UI.field('Which ones', refsWrap, 'Tap to include. Anything not covered keeps working normally.'),
       h('h4', { text: 'Appearance' }),
       UI.iconPicker(iconName || 'estop', (n) => { iconName = n; }),
@@ -400,7 +466,7 @@
         UI.field('Stops', zone, 'Which emergency stop this button engages.'),
         h('div', { class: 'full' }, UI.field('GPIO pin', pin)),
         h('div', { class: 'full' }, UI.field('Button type', wiring)),
-        h('div', { class: 'full' }, UI.field('Resistor', pull))),
+        h('div', { class: 'full' }, UI.field('Where does the other wire go?', pull, 'GND (ground) is the usual choice.'))),
       h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
     const cancel = el(`<button class="btn">Cancel</button>`);
     const save = el(`<button class="btn primary" data-busy="Saving…">${existing ? 'Save changes' : 'Add button'}</button>`);
@@ -421,7 +487,6 @@
     const inputsCard = h('div', { class: 'card' });
     const prefsCard = h('div', { class: 'card' });
     body.append(
-      el(`<div class="alert info"><b>All off</b> switches everything off — and anything can be switched straight back on. An <b>emergency stop</b> latches: it cuts its relays and keeps them locked out, from every phone and every scene, until somebody resets it here.</div>`),
       zonesCard, inputsCard, prefsCard,
       h('div', { class: 'card' },
         h('div', { class: 'card-title' }, h('h3', { text: 'Wiring a physical button' })),
@@ -464,7 +529,7 @@
 
       // ---- hardware inputs
       inputsCard.innerHTML = '';
-      const addInput = el(`<button class="btn">${icon('plus')} Add a button</button>`);
+      const addInput = el(`<button class="btn">${icon('plus')} Add a stop button</button>`);
       addInput.onclick = () => inputDialog(null, estop.zones, draw);
       inputsCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Physical buttons' }), addInput));
       if (!estop.inputs.length) {
@@ -920,14 +985,14 @@
     const remove = el(`<button class="btn danger" data-busy="Removing…">Remove password</button>`);
     remove.onclick = () => UI.busy(remove, api.post('/api/settings/password', { current: current.value, password: '' }).then(() => { UI.toast('Password removed', 'success'); body.innerHTML = ''; securitySection(body); }).catch(UI.notifyError));
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Dashboard password' }), el(`<span class="badge ${s.server.password_set ? 'ok' : ''}">${s.server.password_set ? 'protected' : 'open'}</span>`)),
-      el(`<p class="muted small">By default anyone on your home network can open the dashboard. Set a password if guests or children shouldn't be able to control things. WLED controllers themselves have no password, so this only protects the dashboard.</p>`),
+      el(`<p class="muted small">Choose something the family will remember. The WLED lights themselves have no password, so this protects the dashboard only.</p>`),
       h('div', { class: 'form-grid' }, s.server.password_set ? UI.field('Current password', current) : null, UI.field('New password', pw, 'Leave empty to remove'), UI.field('Repeat new password', pw2)),
       h('div', { class: 'row end' }, s.server.password_set ? remove : null, save)));
     // allowed host names (DNS-rebinding guard)
     const hosts = h('input', { class: 'input mono', value: (s.server.allowed_hosts || []).join(' '), placeholder: 'e.g. jimboled.mydomain.com' });
     const saveHosts = el(`<button class="btn" data-busy="Saving…">Save names</button>`);
     saveHosts.onclick = () => UI.busy(saveHosts, api.put('/api/settings', { server: { allowed_hosts: hosts.value } }).then(() => UI.toast('Saved', 'success')).catch(UI.notifyError));
-    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Allowed names' })), el(`<p class="muted small">For safety JimboLED only answers when opened by IP address, by a plain name, or by names ending in .local, .lan, .home and similar. If you gave the Pi a public-style DNS name, list it here (space separated).</p>`), UI.field('Extra names', hosts), h('div', { class: 'row end' }, saveHosts)));
+    body.append(UI.advanced('Web addresses JimboLED answers to', 'For safety JimboLED only answers when opened by its IP address, a plain name, or a name ending in .local, .lan or .home. You only need this if you gave the Pi its own domain name.', UI.field('Extra names (separate them with spaces)', hosts), h('div', { class: 'row end' }, saveHosts)));
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Good to know' })), el(`<ul class="muted small" style="margin:0;padding-left:18px;line-height:1.6"><li>Keep JimboLED on your home network. Don't forward its port on your router.</li><li>Relays are always released when JimboLED restarts, when the Pi reboots, or when a held button loses contact.</li><li>The <b>All off</b> button in the header turns off every relay and every light immediately.</li></ul>`)));
   }
 
@@ -942,7 +1007,7 @@
     if (s.cpu_temp_c != null) stat('CPU temp', s.cpu_temp_c.toFixed(0) + ' °C');
     if (s.memory && s.memory.total) stat('Memory free', UI.fmtBytes(s.memory.available));
     stat('Disk free', UI.fmtBytes(s.disk.free));
-    stat('GPIO driver', s.gpio_backend + (s.gpio_simulated ? ' (simulated)' : ''));
+    stat('Relay driver', s.gpio_backend + (s.gpio_simulated ? ' (practice mode)' : ''));
     const addr = s.addresses.map((a) => `http://${a}${s.port && s.port !== 80 ? ':' + s.port : ''}`);
     body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'This Pi' })), stats, el(`<p class="muted small">Open the dashboard from any device on your network at <b>http://${esc(s.hostname)}.local${s.port && s.port !== 80 ? ':' + s.port : ''}</b>${addr.length ? ' or ' + addr.map((a) => '<b>' + esc(a) + '</b>').join(', ') : ''}.</p>`)));
     const card = h('div', { class: 'card' });
@@ -957,11 +1022,11 @@
     reboot.onclick = async () => { if (await UI.confirm({ title: 'Reboot the Raspberry Pi', message: 'The Pi will be unavailable for about a minute.', okText: 'Reboot', danger: true })) UI.busy(reboot, api.post('/api/system/reboot').then((r) => UI.toast(r.message, 'success', 10000)).catch(UI.notifyError)); };
     card.append(h('div', { class: 'row wrap' }, check, restart, reboot), out);
     body.append(card);
-    const logCard = h('div', { class: 'card' });
+    const logCard = UI.advanced('Log (for troubleshooting)', 'A record of what JimboLED has been doing. Useful if something isn\'t working and you are asking for help.');
     const log = h('div', { class: 'log' });
     const refreshLogs = async () => { const r = await api.get('/api/system/logs?limit=300'); log.innerHTML = ''; for (const l of r.logs) log.append(h('div', { class: l.level, text: `${new Date(l.ts * 1000).toLocaleTimeString()} ${l.level.padEnd(7)} ${l.msg}` })); log.scrollTop = log.scrollHeight; if (!r.logs.length) log.textContent = 'No log entries yet.'; };
     const rl = el(`<button class="btn sm">${icon('refresh')} Refresh</button>`); rl.onclick = refreshLogs;
-    logCard.append(h('div', { class: 'card-title' }, h('h3', { text: 'Log' }), rl), log);
+    logCard.append(h('div', { class: 'row end' }, rl), log);
     body.append(logCard); refreshLogs();
   }
 
@@ -971,15 +1036,15 @@
     const file = h('input', { type: 'file', accept: 'application/json,.json', class: 'input' });
     const up = el(`<button class="btn" data-busy="Restoring…">${icon('upload')} Restore from file</button>`);
     up.onclick = () => { if (!file.files[0]) return UI.toast('Choose a backup file first', 'error'); UI.confirm({ title: 'Restore backup', message: 'This replaces all controllers, switches and dashboard settings with the ones in the file.', okText: 'Restore' }).then((ok) => { if (!ok) return; const fd = new FormData(); fd.append('file', file.files[0]); UI.busy(up, api.upload('/api/restore', fd, { timeout: 120000 }).then(() => { UI.toast('Backup restored', 'success'); if (window.App) App.refresh(true); draw(); }).catch(UI.notifyError)); }); };
-    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Backup & restore' })), el(`<p class="muted small">Everything JimboLED knows – controllers, switches, scenes, your dashboard layout, logo and background – lives in one file. Download it after you finish setting things up. Presets live on the WLED controllers themselves and are not included.</p>`), h('div', { class: 'row wrap' }, dl), h('div', { class: 'row wrap' }, file, up)));
+    body.append(h('div', { class: 'card' }, h('div', { class: 'card-title' }, h('h3', { text: 'Backup & restore' })), el(`<p class="muted small">Download a backup once everything is set up the way you like it, and keep the file somewhere safe. To put it back, choose the file and press <b>Restore from file</b>. Presets saved inside the WLED lights themselves are not included.</p>`), h('div', { class: 'row wrap' }, dl), h('div', { class: 'row wrap' }, file, up)));
     const card = h('div', { class: 'card' }); const list = h('div', { class: 'list' });
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Automatic snapshots' })), el(`<p class="muted small">JimboLED keeps a snapshot every time you change something important, so you can undo mistakes.</p>`), list);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Automatic snapshots' })), el(`<p class="muted small">Made by JimboLED itself before each important change. To undo a mistake, press <b>Restore</b> on the one from just before it.</p>`), list);
     body.append(card);
     async function draw() {
       list.innerHTML = '';
       const r = await api.get('/api/backups');
       if (!r.backups.length) list.append(h('div', { class: 'muted small', text: 'No snapshots yet.' }));
-      for (const b of r.backups.slice(0, 15)) { const item = h('div', { class: 'list-item' }); const reason = b.name.replace(/^config-\d{8}-\d{6}-/, '').replace(/\.json$/, ''); item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: new Date(b.mtime * 1000).toLocaleString() }), h('span', { class: 'sub', text: `before: ${reason}` }))); const rb = el(`<button class="btn sm" data-busy="Restoring…">Restore</button>`); rb.onclick = async () => { if (await UI.confirm({ title: 'Restore snapshot', message: `Go back to the configuration from ${new Date(b.mtime * 1000).toLocaleString()}?`, okText: 'Restore' })) UI.busy(rb, api.post(`/api/backups/${b.name}/restore`).then(() => { UI.toast('Snapshot restored', 'success'); if (window.App) App.refresh(true); }).catch(UI.notifyError)); }; item.append(rb); list.append(item); }
+      for (const b of r.backups.slice(0, 15)) { const item = h('div', { class: 'list-item' }); const reason = b.name.replace(/^config-\d{8}-\d{6}-/, '').replace(/\.json$/, '').replace(/[-_]+/g, ' '); item.append(h('div', { class: 'grow' }, h('span', { class: 'title', text: new Date(b.mtime * 1000).toLocaleString() }), h('span', { class: 'sub', text: `before: ${reason}` }))); const rb = el(`<button class="btn sm" data-busy="Restoring…">Restore</button>`); rb.onclick = async () => { if (await UI.confirm({ title: 'Restore snapshot', message: `Go back to the configuration from ${new Date(b.mtime * 1000).toLocaleString()}?`, okText: 'Restore' })) UI.busy(rb, api.post(`/api/backups/${b.name}/restore`).then(() => { UI.toast('Snapshot restored', 'success'); if (window.App) App.refresh(true); }).catch(UI.notifyError)); }; item.append(rb); list.append(item); }
     }
     draw();
   }

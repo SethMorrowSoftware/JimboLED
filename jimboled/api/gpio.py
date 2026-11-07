@@ -66,22 +66,47 @@ def list_switches():
 
 @bp.post("/gpio/switches")
 def add_switch():
+    """Add one switch, or several at once with ``{"switches": [...]}``.
+
+    Several are added all-or-nothing: an Up/Down motor pair must never end up
+    with only its Up half because the Down pin turned out to be taken.
+    """
     ctx = get_ctx()
     data = body()
-    data = dict(data)
-    data["id"] = new_id("sw")
-    cfg = SwitchConfig.from_dict(data)
+    many = data.get("switches")
+    if many is not None:
+        if not isinstance(many, list) or not many:
+            raise APIError("switches must be a non-empty list")
+        if len(many) > 16:
+            raise APIError("add at most 16 switches at a time")
+        raws = many
+    else:
+        raws = [data]
+    cfgs = []
+    for raw in raws:
+        if not isinstance(raw, dict):
+            raise APIError("each switch must be an object")
+        raw = dict(raw)
+        raw["id"] = new_id("sw")
+        cfgs.append(SwitchConfig.from_dict(raw))
 
     def mutate(c):
         switches = c["gpio"].setdefault("switches", [])
-        _check_estop_pin(c, cfg.pin)
-        validate_switches(switches + [cfg.to_dict()])
-        switches.append(cfg.to_dict())
-        ensure_tile(c, "switch", cfg.id, cfg.name)
+        for cfg in cfgs:
+            _check_estop_pin(c, cfg.pin)
+        validate_switches(switches + [cfg.to_dict() for cfg in cfgs])
+        for cfg in cfgs:
+            switches.append(cfg.to_dict())
+            ensure_tile(c, "switch", cfg.id, cfg.name)
 
     ctx.store.update(mutate, backup_reason="add-switch")
     _apply_boot_pins(ctx)
-    return ok({"switch": cfg.to_dict(), "gpio": ctx.gpio.snapshot()}, 201)
+    out = {"gpio": ctx.gpio.snapshot()}
+    if many is not None:
+        out["switches"] = [cfg.to_dict() for cfg in cfgs]
+    else:
+        out["switch"] = cfgs[0].to_dict()
+    return ok(out, 201)
 
 
 @bp.put("/gpio/switches/<switch_id>")

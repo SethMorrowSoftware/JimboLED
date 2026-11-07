@@ -24,7 +24,7 @@ playwright_api = pytest.importorskip("playwright.sync_api")
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
 
-SETTINGS_SECTIONS = ("devices", "groups", "switches", "scenes", "schedules", "estop", "appearance",
+SETTINGS_SECTIONS = ("home", "devices", "groups", "switches", "scenes", "schedules", "estop", "appearance",
                      "security", "integrations", "system", "backup")
 H = {"X-Requested-With": "JimboLED"}
 
@@ -181,14 +181,15 @@ def test_dashboard_shows_every_tile(desktop, server):
 @pytest.mark.parametrize("section", SETTINGS_SECTIONS)
 def test_every_settings_page_renders(desktop, section):
     page = desktop.go(f"#/settings/{section}")
-    page.wait_for_selector(".card")
+    # Every page opens with a plain-language explanation of what it is for.
+    page.wait_for_selector(".settings-intro")
     desktop.assert_clean()
 
 
 @pytest.mark.parametrize("section", SETTINGS_SECTIONS)
 def test_every_settings_page_fits_a_phone(phone, section):
     phone.go(f"#/settings/{section}")
-    phone.page.wait_for_selector(".card")
+    phone.page.wait_for_selector(".settings-intro")
     phone.no_sideways_scroll()
     phone.assert_clean()
 
@@ -494,3 +495,152 @@ def test_first_run_wizard(browser, tmp_path):
         p.close()
     finally:
         srv.stop()
+
+
+# ------------------------------------------------- relay buttons, the easy way
+def _switches_named(server, *names):
+    return [s for s in server.api.get(server.url + "/api/gpio/switches", timeout=5).json()["switches"] if s["name"] in names]
+
+
+def _remove_switches(server, *names):
+    for s in _switches_named(server, *names):
+        server.api.delete(f"{server.url}/api/gpio/switches/{s['id']}", timeout=5)
+
+
+def test_settings_opens_on_an_overview_of_every_page(desktop):
+    page = desktop.go("#/settings")
+    page.wait_for_selector(".settings-home")
+    links = page.locator(".settings-home a")
+    assert links.count() == 11
+    page.locator(".settings-home a", has_text="Relays & switches").click()
+    page.wait_for_selector("text=Dashboard buttons")
+    assert page.url.endswith("#/settings/switches")
+    desktop.assert_clean()
+
+
+def test_a_lone_bed_up_offers_its_down_button(desktop, server):
+    """The setup that started this: Bed up on the dashboard, no Bed down."""
+    try:
+        page = desktop.go("#/settings/switches")
+        page.get_by_role("button", name="Add Bed down").click()
+        modal = page.locator(".modal")
+        modal.wait_for()
+        # Pre-filled as the other half of the motor: name, hold-to-run, same group.
+        assert modal.locator(".choice.active").inner_text().startswith("Move a motor")
+        assert modal.get_by_label("Name on the button").input_value() == "Bed down"
+        modal.locator("details.more-options summary").click()
+        assert modal.get_by_label("Never runs at the same time as").input_value() == "bed"
+        modal.get_by_label("GPIO pin", exact=True).select_option("27")
+        modal.get_by_role("button", name="Add button").click()
+        page.wait_for_selector(".modal", state="detached")
+        (down,) = _switches_named(server, "Bed down")
+        (up,) = _switches_named(server, "Bed up")
+        assert down["mode"] == "momentary" and down["pin"] == 27
+        assert down["interlock_group"] == up["interlock_group"] == "bed"
+        assert down["active_high"] == up["active_high"] and down["icon"] == "down"
+        # The suggestion goes away once the pair is complete …
+        page.wait_for_timeout(400)
+        assert page.get_by_role("button", name="Add Bed down").count() == 0
+        assert "never together with Bed down" in page.inner_text(".settings-body")
+        # … and Bed down is on the dashboard, as a hold-to-run tile.
+        page = desktop.go("#/")
+        page.wait_for_selector(".tile")
+        assert "Bed down" in page.inner_text("#main")
+        desktop.assert_clean()
+    finally:
+        _remove_switches(server, "Bed down")
+
+
+def test_add_a_motor_makes_an_interlocked_pair(desktop, server):
+    try:
+        page = desktop.go("#/settings/switches")
+        page.get_by_role("button", name="Add a motor (Up + Down)").click()
+        modal = page.locator(".modal")
+        modal.wait_for()
+        modal.get_by_label("What does it move?").fill("Recliner")
+        modal.get_by_label("The two directions").select_option(label="Raise and Lower")
+        assert "Recliner raise" in modal.inner_text() and "Recliner lower" in modal.inner_text()
+        # Both buttons on the same pin is caught before anything is saved.
+        modal.get_by_label("GPIO pin", exact=True).select_option("5")
+        modal.get_by_label("GPIO pin for the second button").select_option("5")
+        modal.get_by_role("button", name="Add both buttons").click()
+        page.wait_for_selector("text=different GPIO numbers")
+        assert _switches_named(server, "Recliner raise", "Recliner lower") == []
+        desktop.errors = [e for e in desktop.errors if "different GPIO numbers" not in e]  # shown on purpose
+        modal.get_by_label("GPIO pin for the second button").select_option("6")
+        modal.get_by_role("button", name="Add both buttons").click()
+        page.wait_for_selector(".modal", state="detached")
+        pair = {s["name"]: s for s in _switches_named(server, "Recliner raise", "Recliner lower")}
+        assert set(pair) == {"Recliner raise", "Recliner lower"}
+        assert {s["mode"] for s in pair.values()} == {"momentary"}
+        assert {s["interlock_group"] for s in pair.values()} == {"recliner"}
+        assert pair["Recliner raise"]["pin"] == 5 and pair["Recliner raise"]["icon"] == "up"
+        assert pair["Recliner lower"]["pin"] == 6 and pair["Recliner lower"]["icon"] == "down"
+        desktop.assert_clean()
+    finally:
+        _remove_switches(server, "Recliner raise", "Recliner lower")
+
+
+def test_add_a_button_explains_each_kind(desktop, server):
+    page = desktop.go("#/settings/switches")
+    page.get_by_role("button", name="Add a button").click()
+    modal = page.locator(".modal")
+    modal.wait_for()
+    tap_length = modal.get_by_label("How long to press it (milliseconds)")
+    pair = modal.locator(".pair-check")
+    save = modal.locator(".modal-foot .btn.primary, .btn.primary").last
+    modal.locator(".choice", has_text="Turn something on and off").click()
+    assert not tap_length.is_visible() and not pair.is_visible()
+    modal.locator(".choice", has_text="Press for a moment").click()
+    assert tap_length.is_visible()
+    modal.locator(".choice", has_text="Move a motor").click()
+    assert pair.is_visible() and pair.locator("input").is_checked()
+    assert save.inner_text() == "Add both buttons"
+    pair.locator("input").uncheck()
+    assert save.inner_text() == "Add button"
+    assert modal.get_by_label("Name on the button").is_visible()
+    desktop.assert_clean()
+
+
+def test_copy_a_button(desktop, server):
+    try:
+        page = desktop.go("#/settings/switches")
+        page.get_by_role("button", name="Copy Fan").click()
+        modal = page.locator(".modal")
+        modal.wait_for()
+        assert modal.get_by_label("Name on the button").input_value() == "Fan copy"
+        modal.get_by_label("GPIO pin", exact=True).select_option("23")
+        modal.get_by_role("button", name="Add button").click()
+        page.wait_for_selector(".modal", state="detached")
+        (copy,) = _switches_named(server, "Fan copy")
+        assert copy["mode"] == "toggle" and copy["pin"] == 23
+        desktop.assert_clean()
+    finally:
+        _remove_switches(server, "Fan copy")
+
+
+def test_a_hidden_switch_can_be_put_back_on_the_dashboard(desktop, server):
+    dash = server.api.get(server.url + "/api/dashboard", timeout=5).json()["dashboard"]
+    fan = _switches_named(server, "Fan")[0]
+    tile = next(t for t in dash["tiles"] if t["type"] == "switch" and t["ref"] == fan["id"])
+    server.api.put(f"{server.url}/api/dashboard/tiles/{tile['id']}", json={"hidden": True}, timeout=5)
+    try:
+        page = desktop.go("#/settings/switches")
+        page.get_by_role("button", name="Show on dashboard").click()
+        page.wait_for_timeout(500)
+        dash = server.api.get(server.url + "/api/dashboard", timeout=5).json()["dashboard"]
+        assert next(t for t in dash["tiles"] if t["id"] == tile["id"])["hidden"] is False
+        desktop.assert_clean()
+    finally:
+        server.api.put(f"{server.url}/api/dashboard/tiles/{tile['id']}", json={"hidden": False}, timeout=5)
+
+
+def test_the_motor_form_fits_a_phone(phone):
+    page = phone.go("#/settings/switches")
+    page.get_by_role("button", name="Add a motor (Up + Down)").click()
+    page.locator(".modal").wait_for()
+    page.wait_for_timeout(300)
+    overflow = page.evaluate("(() => { const m = document.querySelector('.modal'); return m.scrollWidth - m.clientWidth; })()")
+    assert overflow <= 1, f"the form scrolls sideways by {overflow}px"
+    phone.no_sideways_scroll()
+    phone.assert_clean()

@@ -211,10 +211,22 @@
     else if (hint) f.append(h('span', { class: 'hint', text: hint }));
     return f;
   }
+  /** The plain-language header at the top of a settings page: what it is for, in one or two sentences. */
+  function intro(iconName, title, html, ...extra) {
+    return h('div', { class: 'settings-intro' },
+      h('span', { class: 'tile-icon', html: icon(iconName) }),
+      h('div', { class: 'grow' }, h('h3', { text: title }), h('p', { html })), ...extra);
+  }
+  /** Settings most people never need, folded away behind one line that says so. */
+  function advanced(title, text, ...children) {
+    return h('details', { class: 'card advanced' },
+      h('summary', { class: 'card-title' }, h('h3', { text: title }), h('span', { class: 'badge', text: 'Advanced' })),
+      text ? h('p', { class: 'muted small', text }) : null, ...children);
+  }
   function busy(btn, promise) {
     const old = btn.innerHTML; btn.disabled = true; btn.innerHTML = icon('refresh', 'spin') + ' <span>' + esc(btn.dataset.busy || 'Working…') + '</span>';
     return promise.finally(() => { btn.disabled = false; btn.innerHTML = old; });
   }
 
-  window.UI = { esc, el, h, debounce, throttle, fmtDuration, fmtAgo, fmtBytes, toast, notifyError, modal, confirm, prompt, menu, closeMenu, slider, setPct, toggle, tabs, iconPicker, colorPicker, field, busy };
+  window.UI = { esc, el, h, debounce, throttle, fmtDuration, fmtAgo, fmtBytes, toast, notifyError, modal, confirm, prompt, menu, closeMenu, slider, setPct, toggle, tabs, iconPicker, colorPicker, field, intro, advanced, busy };
 })();

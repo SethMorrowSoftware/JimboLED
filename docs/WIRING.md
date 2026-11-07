@@ -121,15 +121,20 @@ Example for a generic 6‑wire DIN remote (yours may differ – measure!):
 
 ## 5. Set it up in JimboLED
 
-1. Settings → Switches → **Bed template**. Enter the GPIO pins for *up* and
-   *down* and whether the board is active LOW.
-2. Use **Test this pin** on each switch – you should hear the relay click once.
-   If a relay is on when it should be off, flip *Relay trigger*.
+1. Settings → Relays & switches → **Add a motor (Up + Down)**. Type what it
+   moves ("Bed"), choose the GPIO number for each direction, and pick the kind
+   of relay board (most blue boards turn on with LOW).
+2. Press **Test** next to each GPIO number – you should hear the relay click
+   once. If a relay's light is on when nothing should be running, choose the
+   other kind of relay board.
 3. Try the *Hold* buttons on the dashboard. The bed moves only while you hold.
-4. Optional: add *pulse* switches for preset buttons on the remote (Flat,
-   Zero‑G…), and a plain *on/off* switch for an under‑bed light.
+4. Optional: **Add a button** → *Press for a moment* for preset buttons on the
+   remote (Flat, Zero‑G…), and *Turn something on and off* for an under‑bed light.
 
-The template creates the switches interlocked (up and down can never be on
+If you already have *Bed up* on its own, the Relays & switches page offers an
+**Add Bed down** button that sets up the matching half for you.
+
+The motor form creates the switches interlocked (up and down can never be on
 together) with a 60 s limit. A full head or foot travel takes 25–35 s, so 60 s
 is a comfortable ceiling; lower it in the switch settings if you like.
 
