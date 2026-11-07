@@ -63,7 +63,7 @@ See **[docs/WIRING.md](docs/WIRING.md)** for the full guide. The short version:
 
 * Use a common opto‑isolated **5 V relay module**; power its coils from 5 V, its logic (VCC) from the Pi's 3.3 V, and connect each `IN` pin to a GPIO.
 * Wire each relay's contacts **in parallel with a button of the bed's wired remote** (most beds: the remote just closes a low‑voltage contact). The bed's own control box keeps all its safety features; the original remote keeps working.
-* In JimboLED, use the **Bed template** (Settings → Switches): two *hold‑to‑run* switches, interlocked so "up" and "down" can never be energised together, with a 60‑second limit.
+* In JimboLED, use **Add a motor (Up + Down)** (Settings → Relays & switches): two *hold‑to‑run* switches, interlocked so "up" and "down" can never be energised together, with a 60‑second limit.
 * Optionally wire a **normally‑closed emergency‑stop button** between a spare GPIO and GND (Settings → Emergency stop). Pressing it – or a broken wire – cuts and locks the relays within about a fifth of a second.
 
 <p align="center">

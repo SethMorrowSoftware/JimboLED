@@ -108,7 +108,7 @@
     const [path, query] = hash.split('?');
     const parts = path.split('/').filter(Boolean);
     const q = Object.fromEntries(new URLSearchParams(query || ''));
-    if (parts[0] === 'settings') return { view: 'settings', section: parts[1] || 'devices', q };
+    if (parts[0] === 'settings') return { view: 'settings', section: parts[1] || 'home', q };
     if (parts[0] === 'device' && parts[1]) return { view: 'dashboard', device: parts[1], tab: parts[2], q };
     return { view: 'dashboard', q };
   }
@@ -220,7 +220,7 @@
     const pieces = [];
     if (devs.length) pieces.push(`<span class="pill clickable" id="pill-devices" title="${online} of ${devs.length} controllers online"><span class="dot ${online === devs.length ? 'ok' : online ? 'warn' : 'bad'}"></span>${online}/${devs.length}<span class="hide-sm">&nbsp;online</span></span>`);
     if (onSwitches.length) pieces.push(`<span class="pill" title="Relays energised"><span class="dot ok"></span>${esc(onSwitches.map((s) => s.name).join(', '))} on</span>`);
-    if (App.state.gpio.simulated && (App.state.gpio.switches || []).length) pieces.push(`<span class="pill" title="No GPIO hardware – switches are simulated"><span class="dot warn"></span>GPIO simulated</span>`);
+    if (App.state.gpio.simulated && (App.state.gpio.switches || []).length) pieces.push(`<span class="pill" title="No relay pins on this computer, so relay buttons only pretend to work"><span class="dot warn"></span>Practice mode</span>`);
     const latched = (window.EStop ? EStop.engagedZones() : []);
     if (latched.length && saver) hideScreensaver();
     if (latched.length) pieces.unshift(`<span class="pill" id="pill-estop" title="${esc(latched.map((z) => z.name).join(', '))} stopped – relays are locked out"><span class="dot bad"></span><span class="hide-sm">${esc(latched.map((z) => z.name).join(', '))}&nbsp;</span>stopped</span>`);
@@ -311,7 +311,7 @@
     // empty state
     let empty = main.querySelector('.empty-dash');
     if (!tiles.length || tiles.every((t) => t.hidden) && !App.editMode) {
-      if (!empty) { empty = el(`<div class="empty empty-dash" style="grid-column:1/-1">${icon('sparkles')}<h3>Your dashboard is empty</h3><p>Add WLED controllers and GPIO switches in Settings and they'll show up here.</p><div class="row"><a class="btn primary" href="#/settings/devices">${icon('search')} Find controllers</a><a class="btn" href="#/settings/switches">${icon('switch')} Add a switch</a></div></div>`); main.append(empty); }
+      if (!empty) { empty = el(`<div class="empty empty-dash" style="grid-column:1/-1">${icon('sparkles')}<h3>Your dashboard is empty</h3><p>Add your WLED lights and relay buttons in Settings and they will show up here.</p><div class="row"><a class="btn primary" href="#/settings/devices">${icon('search')} Find controllers</a><a class="btn" href="#/settings/switches">${icon('switch')} Add a relay button</a></div></div>`); main.append(empty); }
     } else if (empty) empty.remove();
     updateTiles();
     if (App.editMode) grid.append(addTileButton());

@@ -145,6 +145,7 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 | GET | `/api/gpio/pins` | header map with notes, recommended/reserved flags, boot pull |
 | GET | `/api/gpio/switches` | configured switches |
 | POST | `/api/gpio/switches` | `{"name":"Bed up","pin":17,"mode":"momentary","active_high":false,"max_on_seconds":60,"interlock_group":"bed","pulse_ms":500,"icon":"up","color":"#34d399","confirm":false}` |
+| POST | `/api/gpio/switches` | `{"switches":[{…},{…}]}` adds up to 16 at once, all or nothing (a motor's Up and Down); returns `switches` |
 | PUT | `/api/gpio/switches/<id>` | same fields |
 | DELETE | `/api/gpio/switches/<id>` | |
 | POST | `/api/gpio/switches/<id>/action` | `{"action":"on"|"off"|"toggle"|"pulse"}`; hold-to-run: `{"action":"press"}` → returns `switch.token`, then `{"action":"heartbeat","token":…}` at least every second, then `{"action":"release","token":…}` |

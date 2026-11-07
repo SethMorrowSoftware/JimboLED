@@ -10,8 +10,7 @@
     const list = h('div', { class: 'list' });
     const addBtn = el(`<button class="btn primary">${icon('plus')} New group</button>`);
     addBtn.onclick = () => groupDialog(null, draw);
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Groups' }), addBtn),
-      el(`<p class="muted small">Put controllers that belong together – a room, the outside lights, the bed – into a group. Each group gets its own dashboard tile and can be switched, coloured and given presets in one tap. A controller can be in several groups.</p>`), list);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Your groups' }), addBtn), list);
     body.append(card);
     async function draw() {
       list.innerHTML = '';
@@ -97,7 +96,7 @@
     const pauseToggle = UI.toggle(false, (on) => api.put('/api/schedules/paused', { paused: on }).then(() => { UI.toast(on ? 'Schedules paused – one-off timers still run' : 'Schedules running again', 'success'); draw(); }).catch(UI.notifyError));
     const pauseNote = el(`<div class="alert warn hidden">${icon('clock')} All repeating schedules are paused. One-off timers still run.</div>`);
     card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Schedules & timers' }), h('div', { class: 'row' }, h('label', { class: 'row small muted', style: { gap: '8px' } }, h('span', { text: 'Pause all' }), pauseToggle), addBtn)), pauseNote,
-      el(`<p class="muted small">Run lights, scenes or switches at set times – “porch lights on 10 minutes after sunset”, “wake-up light at 6:45 on weekdays”. They run on the Pi, so nobody needs to have the dashboard open. A schedule that was due while the Pi was off is skipped rather than run late.</p>`), list);
+      el(`<p class="muted small">If the Pi was switched off when a schedule was due, that one is skipped rather than run late. <b>Pause all</b> is handy while you are on holiday.</p>`), list);
     body.append(locCard, card);
     let ctx = { scenes: [], switches: [], listing: null };
     addBtn.onclick = () => scheduleDialog(null, ctx, draw);
@@ -176,7 +175,7 @@
         el(`<p class="muted small">${esc(sunLine)}${listing.running ? '' : ' <b>The scheduler is not running.</b>'}</p>`),
         clockNote ? el(clockNote) : '',
         tzNote ? el(tzNote) : '',
-        h('div', { class: 'form-grid' }, UI.field('Latitude', lat), UI.field('Longitude', lon), UI.field('Place name (optional)', label), UI.field('Timezone', tz, 'Changing it needs the installed service.')),
+        h('div', { class: 'form-grid' }, UI.field('Latitude', lat, 'Only used to work out sunrise and sunset. Two decimals is plenty, e.g. 40.71.'), UI.field('Longitude', lon, 'West of Greenwich is negative, e.g. -74.01.'), UI.field('Place name (optional)', label), UI.field('Timezone', tz, 'The Pi\'s clock runs on this. Changing it needs the installed service.')),
         here && !sameZone(here, listing.timezone) ? h('div', { class: 'row end' }, useTz) : '',
         h('div', { class: 'row wrap between' }, geo, save));
     }
@@ -221,7 +220,7 @@
     const action = actionEditor(s.action, ctx, { who: 'a schedule' });
     const getAction = action.getValue;
     const enabled = h('input', { type: 'checkbox', checked: s.enabled !== false });
-    const body = h('div', { class: 'stack' }, UI.field('Name', name), h('h4', { text: 'When' }), kindChips, whenWrap, h('h4', { text: 'What' }), action, h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
+    const body = h('div', { class: 'stack' }, UI.field('Name', name), h('h4', { text: 'When' }), kindChips, whenWrap, h('h4', { text: 'What' }), action, h('label', { class: 'check' }, enabled, h('span', { text: 'Active (untick to ignore the button without deleting it)' })));
     const save = el(`<button class="btn primary" data-busy="Saving…">Save schedule</button>`);
     const m = UI.modal({ title: isEdit ? 'Edit schedule' : 'New schedule', icon: 'clock', body, footer: [save], wide: true, sticky: true });
     save.onclick = () => UI.busy(save, (async () => {
@@ -265,10 +264,10 @@
         actWrap.append(UI.field('Scene', sel));
         getAction = () => ({ type: 'scene', ref: sel.value });
       } else if (actType.value === 'switch') {
-        if (!ctx.switches.length) { actWrap.append(h('div', { class: 'alert info', text: 'There are no GPIO switches yet.' })); getAction = () => { throw new Error('Choose a switch'); }; return; }
-        const sel = h('select', { class: 'select' }); for (const sw of ctx.switches) sel.append(h('option', { value: sw.id, text: sw.name + (sw.mode === 'momentary' ? ' (hold-to-run: off only)' : ''), selected: sw.id === a.ref }));
-        const act = h('select', { class: 'select' }); [['off', 'Turn off'], ['on', 'Turn on'], ['toggle', 'Toggle'], ['pulse', 'Pulse']].forEach(([v, t]) => act.append(h('option', { value: v, text: t, selected: (a.action || 'off') === v })));
-        actWrap.append(h('div', { class: 'form-grid' }, UI.field('Switch', sel), UI.field('Do', act)), h('div', { class: 'small muted', text: `For safety, hold-to-run switches (like a bed motor) can only be switched off by ${opts.who || 'an automation'}.` }));
+        if (!ctx.switches.length) { actWrap.append(h('div', { class: 'alert info', text: 'There are no relay buttons yet. Add one under Settings, Relays & switches.' })); getAction = () => { throw new Error('Choose a relay button'); }; return; }
+        const sel = h('select', { class: 'select' }); for (const sw of ctx.switches) sel.append(h('option', { value: sw.id, text: sw.name + (sw.mode === 'momentary' ? ' (motor: can only be turned off)' : ''), selected: sw.id === a.ref }));
+        const act = h('select', { class: 'select' }); [['off', 'Turn off'], ['on', 'Turn on'], ['toggle', 'Switch over (on if off, off if on)'], ['pulse', 'Tap (press briefly)']].forEach(([v, t]) => act.append(h('option', { value: v, text: t, selected: (a.action || 'off') === v })));
+        actWrap.append(h('div', { class: 'form-grid' }, UI.field('Relay button', sel), UI.field('What to do', act)), h('div', { class: 'small muted', text: `For safety, a motor (like the bed) only moves while someone holds its button, so ${opts.who || 'an automation'} can only stop it.` }));
         getAction = () => ({ type: 'switch', ref: sel.value, action: act.value });
       } else {
         actWrap.append(h('div', { class: 'small muted', text: 'Turns every light and every relay off, like the All off button.' }));
@@ -287,8 +286,8 @@
   async function buttonsCard(body) {
     const card = h('div', { class: 'card' });
     const list = h('div', { class: 'list' });
-    const addBtn = el(`<button class="btn">${icon('plus')} Add a button</button>`);
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Buttons' }), addBtn),
+    const addBtn = el(`<button class="btn">${icon('plus')} Add a wall button</button>`);
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Wall buttons wired to the Pi' }), addBtn),
       el(`<p class="muted small">Wire an ordinary push button to the Pi – by the bed, by the door – and choose what a <b>tap</b> and a <b>hold</b> do: "Goodnight" on a tap, everything off on a hold. Buttons run lights, scenes and switches, but never a hold-to-run motor, and they are not emergency stops.</p>`), list);
     body.append(card);
     let ctx = { scenes: [], switches: [] };
@@ -328,10 +327,10 @@
     const tap = actionEditor(b.press, ctx, { allowNone: true, label: 'When tapped', who: 'a button' });
     const hold = actionEditor(b.hold, ctx, { allowNone: true, label: 'When held for a second', who: 'a button' });
     const enabled = h('input', { type: 'checkbox', checked: b.enabled !== false });
-    const body = h('div', { class: 'stack' }, h('div', { class: 'form-grid' }, UI.field('Name', name), UI.field('GPIO pin', pin), h('div', { class: 'full' }, UI.field('Wiring', pull))),
-      h('h4', { text: 'Tap' }), tap, h('h4', { text: 'Hold' }), hold, h('label', { class: 'check' }, enabled, h('span', { text: 'Enabled' })));
+    const body = h('div', { class: 'stack' }, h('div', { class: 'form-grid' }, UI.field('Name', name), UI.field('GPIO pin', pin, 'The GPIO number one wire of the button goes to.'), h('div', { class: 'full' }, UI.field('Where does the other wire go?', pull, 'GND (ground) is the usual choice and needs no extra parts.'))),
+      h('h4', { text: 'Tap' }), tap, h('h4', { text: 'Hold' }), hold, h('label', { class: 'check' }, enabled, h('span', { text: 'Active (untick to ignore the button without deleting it)' })));
     const save = el(`<button class="btn primary" data-busy="Saving…">Save button</button>`);
-    const m = UI.modal({ title: existing ? 'Edit button' : 'Add a button', icon: 'hand', body, footer: [save], wide: true, sticky: true });
+    const m = UI.modal({ title: existing ? 'Edit button' : 'Add a wall button', icon: 'hand', body, footer: [save], wide: true, sticky: true });
     save.onclick = () => UI.busy(save, (async () => {
       if (!pin.value) throw new Error('Pick a GPIO pin');
       const payload = { name: name.value.trim() || 'Button', pin: +pin.value, pull: pull.value, enabled: enabled.checked, press: tap.getValue(), hold: hold.getValue() };
@@ -346,7 +345,7 @@
     const card = h('div', { class: 'card' });
     const list = h('div', { class: 'list' });
     const addBtn = el(`<button class="btn primary">${icon('plus')} New token</button>`);
-    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'API tokens' }), addBtn),
+    card.append(h('div', { class: 'card-title' }, h('h3', { text: 'Access keys for other apps (API tokens)' }), addBtn),
       el(`<p class="muted small">A token lets another program control JimboLED – Home Assistant, an iPhone Shortcut, a script – even when the dashboard has a password. Make one per program, so you can switch one off without breaking the others. Tokens can control lights, scenes, switches and schedules, but can't change passwords, tokens or backups.</p>`), list);
     const examples = h('div', { class: 'card' });
     const notifyCard = h('div', { class: 'card' });
