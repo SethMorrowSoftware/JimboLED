@@ -178,7 +178,7 @@
   async function switchesSection(body) {
     let gpio;
     try { gpio = await api.get('/api/gpio'); } catch (e) { return UI.notifyError(e); }
-    body.append(UI.intro('switch', 'Relays & switches', 'Each button here clicks one relay on your relay board, wired to the Raspberry Pi. Use it for bed motors, lamps, fans, garage doors, anything a relay can switch. Every button you add appears on the dashboard.'));
+    body.append(UI.intro('switch', 'Relays & switches', 'Each button here clicks one relay on your relay board, wired to the Raspberry Pi. Use it for bed motors, lamps, fans, garage doors, anything a relay can switch. Every button you add appears on the dashboard. A motor needs two steps there: tap <b>Enable</b>, then press and hold.'));
     if (gpio.simulated) body.append(el(`<div class="sim-banner">${icon('alert')}<div><b>Practice mode.</b> This computer has no relay pins (${esc(gpio.backend)}), so the buttons only pretend to work. On the Raspberry Pi they click real relays.</div></div>`));
     const card = h('div', { class: 'card' });
     const list = h('div', { class: 'list' });
@@ -236,13 +236,15 @@
     if (settings) {
       const dead = h('input', { class: 'input', type: 'number', min: 0, max: 5000, value: settings.gpio.interlock_dead_time_ms });
       const hold = h('input', { class: 'input', type: 'number', min: 0.5, max: 10, step: 0.1, value: settings.gpio.hold_timeout_s });
+      const enableFor = h('input', { class: 'input', type: 'number', min: 3, max: 120, step: 1, value: settings.gpio.enable_window_s == null ? 15 : settings.gpio.enable_window_s });
       const backend = h('select', { class: 'select' });
       [['auto', 'Automatic (recommended)'], ['lgpio', 'lgpio (Raspberry Pi OS Bookworm and newer)'], ['rpigpio', 'RPi.GPIO (older Raspberry Pi OS)'], ['native', 'Native'], ['mock', 'Practice mode (no relays)']].forEach(([v, t]) => backend.append(h('option', { value: v, text: t, selected: settings.gpio.backend === v })));
       const save = el(`<button class="btn" data-busy="Saving…">Save</button>`);
-      save.onclick = () => UI.busy(save, api.put('/api/settings', { gpio: { interlock_dead_time_ms: +dead.value, hold_timeout_s: +hold.value, backend: backend.value } }).then(() => { UI.toast('Saved', 'success'); draw(); }).catch(UI.notifyError));
+      save.onclick = () => UI.busy(save, api.put('/api/settings', { gpio: { interlock_dead_time_ms: +dead.value, hold_timeout_s: +hold.value, enable_window_s: +enableFor.value, backend: backend.value } }).then(() => { UI.toast('Saved', 'success'); draw(); }).catch(UI.notifyError));
       body.append(UI.advanced('Safety timing and hardware', 'The defaults suit almost everyone. Change these only if a motor behaves oddly.',
         h('div', { class: 'form-grid' },
           UI.field('Pause when changing direction (milliseconds)', dead, 'When a motor goes from Up straight to Down, wait this long in between so it never gets both at once. 300 is a good value.'),
+          UI.field('Motors stay enabled for (seconds)', enableFor, 'After Enable is tapped, or after the motor last moved. Then it locks itself again. 15 is a good value.'),
           UI.field('Stop if the phone loses contact for (seconds)', hold, 'While you hold a button, your phone keeps telling the Pi. If that stops (Wi‑Fi drops, phone locks), the motor stops after this long.'),
           UI.field('Relay driver', backend, `Leave on Automatic. Now using ${gpio.backend}${gpio.pi_model ? ' on a ' + gpio.pi_model : ''}.`)),
         h('div', { class: 'row end' }, save)));

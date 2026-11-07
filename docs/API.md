@@ -25,6 +25,7 @@ JimboLED from Home Assistant, Node-RED, cron jobs or a Stream Deck.
   switch – gets **403**. A wrong token gets **401**.
 * Errors are `{"error": "message"}` with a 4xx/5xx status.
 * Requests must use an IP address, a plain host name, or a private-style name (`*.local`, `*.lan`, `*.home`, …) in the `Host` header; other names get **421** unless listed in `server.allowed_hosts`. This blocks DNS-rebinding attacks from the internet.
+* Hold-to-run switches need `enable` before `press` (unless the switch has `"require_enable": false`). The switch snapshot shows `require_enable` and `enabled_for` (seconds left). *All off* and every emergency stop lock all motors again.
 * Hold-to-run switches must receive a heartbeat at least every second (the dashboard sends one every 0.4 s); the relay releases automatically otherwise. They can't be pulsed, toggled or turned on by a scene, a schedule or a script – only held by a person (the 2 s *Test this pin* blip while setting up is the one exception).
 
 ```bash
@@ -148,7 +149,7 @@ Runs that were due while the Pi was off are skipped after 3 minutes and shown as
 | POST | `/api/gpio/switches` | `{"switches":[{…},{…}]}` adds up to 16 at once, all or nothing (a motor's Up and Down); returns `switches` |
 | PUT | `/api/gpio/switches/<id>` | same fields |
 | DELETE | `/api/gpio/switches/<id>` | |
-| POST | `/api/gpio/switches/<id>/action` | `{"action":"on"|"off"|"toggle"|"pulse"}`; hold-to-run: `{"action":"press"}` → returns `switch.token`, then `{"action":"heartbeat","token":…}` at least every second, then `{"action":"release","token":…}` |
+| POST | `/api/gpio/switches/<id>/action` | `{"action":"on"|"off"|"toggle"|"pulse"}`; hold-to-run: `{"action":"enable"}` first (unlocks the motor, both directions of its interlock group, for `enable_window_s` seconds, 15 by default; every use extends it; `{"action":"disable"}` locks it again), then `{"action":"press"}` → returns `switch.token`, then `{"action":"heartbeat","token":…}` at least every second, then `{"action":"release","token":…}` |
 | POST | `/api/gpio/all-off` | release every relay (does **not** latch – see the emergency stop below) |
 | POST | `/api/gpio/test` | `{"pin":22,"active_high":true,"duration_ms":400}` – pulse a pin to find its relay. A pin that belongs to a switch is pulsed *as* that switch (interlocks and all); a bare pin is claimed for the pulse and released by any master emergency stop. |
 | GET | `/api/gpio/events` | recent on/off log with reasons |

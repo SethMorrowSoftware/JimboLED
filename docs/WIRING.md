@@ -127,7 +127,9 @@ Example for a generic 6‑wire DIN remote (yours may differ – measure!):
 2. Press **Test** next to each GPIO number – you should hear the relay click
    once. If a relay's light is on when nothing should be running, choose the
    other kind of relay board.
-3. Try the *Hold* buttons on the dashboard. The bed moves only while you hold.
+3. Try it on the dashboard: tap **Enable** (it unlocks Up and Down for 15
+   seconds, longer while you keep using them), then press and hold **Hold**.
+   The bed moves only while you hold.
 4. Optional: **Add a button** → *Press for a moment* for preset buttons on the
    remote (Flat, Zero‑G…), and *Turn something on and off* for an under‑bed light.
 

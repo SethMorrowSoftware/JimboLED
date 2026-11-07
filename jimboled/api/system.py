@@ -145,6 +145,8 @@ def update_settings():
                 cfg["gpio"]["interlock_dead_time_ms"] = int(_num(g["interlock_dead_time_ms"], 0, 5000, "interlock_dead_time_ms"))
             if "hold_timeout_s" in g:
                 cfg["gpio"]["hold_timeout_s"] = _num(g["hold_timeout_s"], 0.5, 10.0, "hold_timeout_s")
+            if "enable_window_s" in g:
+                cfg["gpio"]["enable_window_s"] = _num(g["enable_window_s"], 3, 120, "enable_window_s")
         if isinstance(data.get("server"), dict):
             s = data["server"]
             if "port" in s:
@@ -372,6 +374,7 @@ def _validated_restore(data: Any, current_server: Dict[str, Any]) -> Dict[str, A
         gpio["backend"] = "auto"
     gpio["interlock_dead_time_ms"] = int(_num(gpio.get("interlock_dead_time_ms", 250), 0, 5000, "interlock_dead_time_ms"))
     gpio["hold_timeout_s"] = _num(gpio.get("hold_timeout_s", 1.5), 0.5, 10.0, "hold_timeout_s")
+    gpio["enable_window_s"] = _num(gpio.get("enable_window_s", 15), 3, 120, "enable_window_s")
     gpio["estop"] = _validated_estop(gpio.get("estop"), switches)
     gpio["buttons"] = _validated_buttons(gpio.get("buttons"), switches, gpio["estop"].get("inputs", []))
     data["gpio"] = gpio
