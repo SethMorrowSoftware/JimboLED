@@ -25,15 +25,33 @@
     if (!App.kiosk || document.hidden || !('wakeLock' in navigator) || wakeLock) return;
     try { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } catch (e) { /* not allowed here, e.g. plain http */ }
   }
-  function setKiosk(on) {
+  // One function owns every change of mode, so the header, the screensaver and
+  // the wake lock always follow it, however the change came about (the button
+  // in Settings, the address bar, the logo, the lock button or another tab).
+  function setKiosk(on, opts) {
+    opts = opts || {};
+    const was = App.kiosk;
     App.kiosk = !!on;
-    try { if (on) localStorage.setItem(KIOSK_KEY, '1'); else localStorage.removeItem(KIOSK_KEY); } catch (e) { /* private mode: lasts until reload */ }
+    if (opts.store !== false) {
+      try { if (App.kiosk) localStorage.setItem(KIOSK_KEY, '1'); else localStorage.removeItem(KIOSK_KEY); } catch (e) { /* private mode: lasts until reload */ }
+    }
     document.documentElement.toggleAttribute('data-kiosk', App.kiosk);
-    if (App.kiosk) { if (App.editMode) App.editMode = false; keepAwake(); UI.toast('Wall tablet mode. Press and hold the logo for 3 seconds to leave.', 'info', 6000); }
-    else if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    if (App.kiosk) {
+      if (App.editMode && typeof setEditMode === 'function') setEditMode(false);
+      keepAwake();
+    } else if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    // Settings can't be shown on a locked screen.
+    if (App.kiosk && App.route && App.route.view === 'settings') {
+      if (App.state.dashboard) location.replace('#/'); // the router puts the saved look back and draws the dashboard
+      else { history.replaceState(null, '', '#/'); App.route = parseHash(); }
+    }
     const actions = document.getElementById('topbar-actions'); if (actions) actions.dataset.rendered = '';
-    if (typeof renderTopbar === 'function' && App.state.dashboard) renderTopbar();
+    if (App.state.dashboard) renderTopbar();
     if (App.kiosk) armScreensaver(); else { clearTimeout(idleTimer); if (saver) hideScreensaver(); }
+    if (was !== App.kiosk && opts.quiet !== true) {
+      if (App.kiosk) UI.toast('Wall tablet mode is on. To leave, press and hold the lock button (or the logo) for 3 seconds.', 'info', 7000);
+      else UI.toast('Wall tablet mode is off. Settings and Edit layout are back at the top right.', 'success', 5000);
+    }
   }
   App.setKiosk = setKiosk;
 
@@ -85,22 +103,55 @@
   ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach((ev) => document.addEventListener(ev, () => { if (!saver) armScreensaver(); }, { passive: true, capture: true }));
   document.documentElement.toggleAttribute('data-kiosk', App.kiosk);
   document.addEventListener('visibilitychange', keepAwake);
-  // Leaving: press and hold the logo for three seconds, then confirm.
-  (function holdToExit() {
-    const brand = document.getElementById('brand');
-    let timer = null;
-    const cancel = () => { clearTimeout(timer); timer = null; brand.classList.remove('kiosk-holding'); };
-    brand.addEventListener('pointerdown', () => {
-      if (!App.kiosk) return;
-      brand.classList.add('kiosk-holding');
-      timer = setTimeout(async () => {
-        cancel();
-        if (await UI.confirm({ title: 'Leave wall tablet mode?', message: 'Edit layout and Settings come back on this screen.', okText: 'Leave' })) setKiosk(false);
-      }, 3000);
+  // Leaving: press and hold the lock button (or the logo) for three seconds,
+  // then confirm.  A short tap explains how instead of doing nothing.
+  let leaving = false;
+  async function askToLeave() {
+    if (leaving || !App.kiosk) return;
+    leaving = true;
+    try {
+      if (await UI.confirm({ title: 'Leave wall tablet mode?', message: 'Settings and Edit layout come back on this screen.', okText: 'Leave' })) setKiosk(false);
+    } finally { leaving = false; }
+  }
+  function holdToLeave(target, opts) {
+    opts = opts || {};
+    let timer = null, fired = false, downAt = 0;
+    const cancel = () => { clearTimeout(timer); timer = null; target.classList.remove('kiosk-holding'); };
+    target.addEventListener('pointerdown', (e) => {
+      if (!App.kiosk || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      fired = false; downAt = Date.now();
+      target.classList.add('kiosk-holding');
+      timer = setTimeout(() => { fired = true; cancel(); askToLeave(); }, 3000);
     });
-    ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => brand.addEventListener(ev, cancel));
-    brand.addEventListener('contextmenu', (e) => { if (App.kiosk) e.preventDefault(); });
-  })();
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => target.addEventListener(ev, cancel));
+    target.addEventListener('contextmenu', (e) => { if (App.kiosk) e.preventDefault(); });
+    // In wall-tablet mode the logo is not a link, and the tap that ends a hold
+    // must not do anything else.
+    target.addEventListener('click', (e) => {
+      if (!App.kiosk) return;
+      e.preventDefault();
+      if (!fired && opts.hint && Date.now() - downAt < 3000) UI.toast('This screen is locked as a wall tablet. Press and hold for 3 seconds to unlock it.', 'info', 4500);
+      fired = false;
+    });
+  }
+  holdToLeave(document.getElementById('brand'));
+  App.holdToLeave = holdToLeave;
+
+  // The setting lives in this browser, so every open tab of it follows along.
+  window.addEventListener('storage', (e) => {
+    if (e.key === KIOSK_KEY || e.key === null) { const on = kioskStored(); if (on !== App.kiosk) setKiosk(on, { store: false }); }
+  });
+
+  // #/?kiosk=1 turns a screen into a wall panel, #/?kiosk=0 undoes it and
+  // #/?idle=300 sets its screensaver delay; they work whether they are typed
+  // into a fresh tab or into the address bar of one that is already open.
+  function applyRouteFlags() {
+    const q = App.route.q || {};
+    let changed = false;
+    if (/^\d+$/.test(q.idle || '')) { try { localStorage.setItem(IDLE_KEY, q.idle); } catch (e) { /* ignore */ } changed = true; if (App.kiosk) armScreensaver(); }
+    if (q.kiosk === '1' || q.kiosk === '0') { setKiosk(q.kiosk === '1'); changed = true; }
+    if (changed) { history.replaceState(null, '', '#/'); App.route = parseHash(); }
+  }
 
   // ---------------------------------------------------------- routing
   function parseHash() {
@@ -114,7 +165,11 @@
   }
   window.addEventListener('hashchange', () => {
     App.route = parseHash();
-    if (App.kiosk && App.route.view === 'settings') { location.replace('#/'); return; }
+    applyRouteFlags();
+    if (App.kiosk && App.route.view === 'settings') {
+      UI.toast('Settings are locked on this wall tablet. Press and hold the lock button for 3 seconds to unlock it.', 'info', 5000);
+      location.replace('#/'); return;
+    }
     // Appearance previews live on the page until saved; leaving the page
     // without saving puts the saved look back.
     if (App.state.dashboard && !(App.route.view === 'settings' && App.route.section === 'appearance')) applyTheme(App.state.dashboard);
@@ -246,14 +301,19 @@
         };
         const edit = el(`<button class="btn sm ${App.editMode ? 'primary' : ''}" title="Rearrange, resize and hide tiles">${icon(App.editMode ? 'check' : 'edit')}<span class="hide-sm">${App.editMode ? 'Done' : 'Edit layout'}</span></button>`);
         edit.onclick = () => setEditMode(!App.editMode);
-        const settings = el(`<a class="btn icon sm ghost" href="#/settings" title="Settings">${icon('settings')}</a>`);
+        const settings = el(`<a class="btn sm settings-btn" href="#/settings" title="Settings" aria-label="Settings">${icon('settings')}<span class="hide-md">Settings</span></a>`);
         if (showLights) {
           const lights = el(`<button class="btn sm primary" title="Colour, presets and effects for every light at once">${icon('sun')}<span class="hide-sm">Lights</span></button>`);
           lights.onclick = () => Lights.open('all');
           actions.append(lights);
         }
-        if (App.kiosk) actions.append(panic);
-        else actions.append(panic, edit, settings);
+        if (App.kiosk) {
+          // Locked: no Edit or Settings, but a visible way out for whoever
+          // looks after the tablet.
+          const lock = el(`<button class="btn icon sm kiosk-lock" title="Wall tablet mode: press and hold for 3 seconds to unlock" aria-label="Unlock (press and hold for 3 seconds)">${icon('lock')}</button>`);
+          holdToLeave(lock, { hint: true });
+          actions.append(panic, lock);
+        } else actions.append(panic, edit, settings);
       } else if (App.route.view === 'settings') {
         actions.append(el(`<a class="btn sm" href="#/">${icon('grid')}<span class="hide-sm">Dashboard</span></a>`));
       }
@@ -559,10 +619,7 @@
   // ------------------------------------------------------------ boot
   async function boot() {
     App.route = parseHash();
-    // #/?kiosk=1&idle=300: screensaver after 300 s untouched (this screen only).
-    if (App.route.q && /^\d+$/.test(App.route.q.idle || '')) { try { localStorage.setItem(IDLE_KEY, App.route.q.idle); } catch (e) { /* ignore */ } }
-    // #/?kiosk=1 turns a tablet into a wall panel; #/?kiosk=0 undoes it.
-    if (App.route.q && (App.route.q.kiosk === '1' || App.route.q.kiosk === '0')) { setKiosk(App.route.q.kiosk === '1'); history.replaceState(null, '', '#/'); App.route = parseHash(); }
+    applyRouteFlags();
     if (App.kiosk && App.route.view === 'settings') { history.replaceState(null, '', '#/'); App.route = parseHash(); }
     keepAwake();
     renderFooter(null);

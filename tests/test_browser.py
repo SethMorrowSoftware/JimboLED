@@ -453,6 +453,99 @@ def test_wall_tablet_mode(desktop, server):
     desktop.assert_clean()
 
 
+def _gear(page):
+    return page.locator('#topbar-actions a[href="#/settings"]')
+
+
+def _press_and_hold(page, locator, ms=3300):
+    box = locator.bounding_box()
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.mouse.down()
+    page.wait_for_timeout(ms)
+    page.mouse.up()
+
+
+@pytest.mark.parametrize("size", [(1280, 900), (1024, 768), (375, 740)], ids=["desktop", "tablet", "phone"])
+def test_settings_gear_comes_back_after_wall_tablet_mode(browser, server, size):
+    """Enter from Settings → Appearance, leave with the lock button: the gear is back and works."""
+    w, h = size
+    touch = w < 1280
+    p = Page(browser, server.url, viewport={"width": w, "height": h}, is_mobile=touch, has_touch=touch)
+    try:
+        page = p.go("#/settings/appearance", settle=800)
+        page.get_by_role("button", name="Use this screen as a wall tablet").click()
+        page.wait_for_selector(".tile")
+        assert page.url.endswith("#/")
+        assert _gear(page).count() == 0
+        lock = page.locator(".kiosk-lock")
+        assert lock.is_visible()
+        # A short tap only explains; it doesn't unlock.
+        lock.click()
+        page.wait_for_timeout(300)
+        assert page.evaluate("App.kiosk") and page.locator(".modal").count() == 0
+        _press_and_hold(page, lock)
+        page.locator(".modal .btn.primary").last.click()
+        page.wait_for_timeout(400)
+        assert not page.evaluate("document.documentElement.hasAttribute('data-kiosk')")
+        gear = _gear(page)
+        assert gear.count() == 1 and gear.is_visible()
+        box = gear.bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= w
+        p.no_sideways_scroll()
+        gear.click()
+        page.wait_for_selector(".settings-intro")
+        p.assert_clean()
+    finally:
+        p.page.evaluate("localStorage.clear()")
+        p.close()
+
+
+def test_wall_tablet_mode_from_the_address_bar_of_an_open_tab(desktop):
+    page = desktop.go()
+    page.wait_for_selector(".tile")
+    page.evaluate("location.hash = '#/?kiosk=1'")
+    page.wait_for_timeout(500)
+    assert page.evaluate("App.kiosk") and _gear(page).count() == 0
+    assert page.url.endswith("#/")
+    page.evaluate("location.hash = '#/?kiosk=0'")
+    page.wait_for_timeout(500)
+    assert not page.evaluate("App.kiosk") and _gear(page).count() == 1
+    # Settings typed in while locked explains itself instead of silently bouncing.
+    page.evaluate("location.hash = '#/?kiosk=1'")
+    page.wait_for_timeout(300)
+    page.evaluate("location.hash = '#/settings'")
+    page.wait_for_timeout(500)
+    assert page.url.endswith("#/") and "locked" in page.inner_text("#toast-root").lower()
+    page.evaluate("location.hash = '#/?kiosk=0'")
+    desktop.assert_clean()
+
+
+def test_wall_tablet_mode_follows_other_tabs(desktop, server):
+    page = desktop.go()
+    other = desktop.context.new_page()
+    other.goto(server.url + "/#/")
+    other.wait_for_selector(".tile")
+    page.evaluate("App.setKiosk(true)")
+    other.wait_for_timeout(500)
+    assert other.evaluate("App.kiosk") and _gear(other).count() == 0
+    page.evaluate("App.setKiosk(false)")
+    other.wait_for_timeout(500)
+    assert not other.evaluate("App.kiosk") and _gear(other).count() == 1
+    other.close()
+    desktop.assert_clean()
+
+
+def test_entering_wall_tablet_mode_ends_edit_layout(desktop):
+    page = desktop.go()
+    page.get_by_role("button", name="Edit layout").click()
+    page.wait_for_timeout(300)
+    page.evaluate("App.setKiosk(true)")
+    page.wait_for_timeout(300)
+    assert page.locator(".editing").count() == 0
+    page.evaluate("App.setKiosk(false)")
+    desktop.assert_clean()
+
+
 def test_splash_screen_shows_then_gets_out_of_the_way(desktop, server):
     page = desktop.page
     page.goto(server.url + "/")

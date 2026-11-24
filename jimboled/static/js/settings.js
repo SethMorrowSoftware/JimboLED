@@ -944,7 +944,7 @@
     body.append(h('div', { class: 'card' },
       h('div', { class: 'card-title' }, h('h3', { text: 'Wall tablet mode' })),
       el(`<p class="muted small">For a tablet mounted on the wall or a screen by the bed: a clean full-screen dashboard with a big clock and no Edit or Settings buttons, so nobody changes the setup by accident. The lights, switches, scenes, <b>All off</b> and the emergency stop all keep working. The screen stays awake.</p>`),
-      el(`<p class="muted small">To leave it, <b>press and hold the logo for three seconds</b>. To set up another tablet, open <code>${esc(kioskUrl)}</code> on it.</p>`),
+      el(`<p class="muted small">To leave it, <b>press and hold the lock button</b> (top right) <b>or the logo for three seconds</b>, then confirm; Settings and Edit layout come straight back. To set up another tablet, open <code>${esc(kioskUrl)}</code> on it (<code>#/?kiosk=0</code> turns it off again).</p>`),
       h('div', { class: 'row' }, kioskBtn)));
 
     body.append(h('div', { class: 'card' },
